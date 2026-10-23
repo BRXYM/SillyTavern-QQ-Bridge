@@ -59,6 +59,7 @@ function log(...a) {
 function applyReplyProcessors(text, processors) {
     let out = String(text ?? '');
     for (const rule of processors) {
+        if (rule.enabled === false) continue;   // 规则可禁用但不删除
         try {
             if (rule.type === 'replace' && rule.pattern) {
                 out = out.replace(new RegExp(rule.pattern, rule.flags ?? 'g'), rule.replacement ?? '');
@@ -385,16 +386,20 @@ function ruleRow(rule, i) {
   div.className = 'rule';
   div.innerHTML = \`
     <div class="head">
-      <span class="tag">#\${i + 1} <select class="r-type" style="background:#0d1220;color:#9ec1ff;border:none">
+      <span style="display:flex;align-items:center;gap:8px">
+        <label style="margin:0;font-size:12px;flex-shrink:0">启用 <input class="r-enabled" type="checkbox" style="vertical-align:middle"></label>
+        <span class="tag">#\${i + 1} <select class="r-type" style="background:#0d1220;color:#9ec1ff;border:none">
         <option value="replace">替换 replace</option>
         <option value="remove">删除 remove</option>
         <option value="strip">区域删除 strip</option>
       </select></span>
+      </span>
       <button class="small danger r-del">删除</button>
     </div>
     <div class="kv r-regex"><input class="r-pattern" placeholder="正则表达式（pattern）"><input class="r-flags" placeholder="flags，如 g" style="max-width:80px"><input class="r-replacement" placeholder="替换为（留空=删除）"></div>
     <div class="kv r-strip" style="display:none"><input class="r-begin" placeholder="开始标记，如 *"><input class="r-end" placeholder="结束标记，如 *"><label style="margin:0;flex-shrink:0">保留内容 <input class="r-keep" type="checkbox"></label></div>\`;
   div.querySelector('.r-type').value = rule.type ?? 'replace';
+  div.querySelector('.r-enabled').checked = rule.enabled !== false;
   div.querySelector('.r-pattern').value = rule.pattern ?? '';
   div.querySelector('.r-flags').value = rule.flags ?? 'g';
   div.querySelector('.r-replacement').value = rule.replacement ?? '';
@@ -405,8 +410,11 @@ function ruleRow(rule, i) {
     const t = div.querySelector('.r-type').value;
     div.querySelector('.r-regex').style.display = (t === 'strip') ? 'none' : 'flex';
     div.querySelector('.r-strip').style.display = (t === 'strip') ? 'flex' : 'none';
+    div.style.opacity = div.querySelector('.r-enabled').checked ? '1' : '.45';
   };
-  div.querySelector('.r-type').onchange = sync; sync();
+  div.querySelector('.r-type').onchange = sync;
+  div.querySelector('.r-enabled').onchange = sync;
+  sync();
   div.querySelector('.r-del').onclick = () => { div.remove(); collectRules(); };
   div.querySelectorAll('input,select').forEach(el => el.onchange = collectRules);
   return div;
@@ -416,7 +424,7 @@ function collectRules() {
   const rules = [];
   document.querySelectorAll('#rules .rule').forEach(div => {
     const t = div.querySelector('.r-type').value;
-    const r = { type: t };
+    const r = { type: t, enabled: div.querySelector('.r-enabled').checked };
     if (t === 'strip') {
       r.begin = div.querySelector('.r-begin').value;
       r.end = div.querySelector('.r-end').value;
@@ -429,6 +437,8 @@ function collectRules() {
     rules.push(r);
   });
   state.rules = rules;
+  // 规则变更自动保存（热生效）
+  api('/config', { replyProcessors: rules }).then(() => {});
   return rules;
 }
 
@@ -440,7 +450,7 @@ function renderRules(rules) {
 
 $('#addRule').onclick = () => {
   const box = $('#rules');
-  box.appendChild(ruleRow({ type: 'replace', pattern: '', flags: 'g', replacement: '' }, box.children.length));
+  box.appendChild(ruleRow({ type: 'replace', pattern: '', flags: 'g', replacement: '', enabled: true }, box.children.length));
   collectRules();
 };
 $('#testPipeline').onclick = () => {

@@ -10,12 +10,5 @@
         "allowedGroups": []
     },
     "maxMessageLength": 2000,
-    "replyProcessors": [
-        {
-            "type": "strip",
-            "begin": "*",
-            "end": "*",
-            "keep": false
-        }
-    ]
+    "replyProcessors": []
 }

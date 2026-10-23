@@ -10,7 +10,7 @@
         "mes_example": "<START>\n{{user}}: 你最近在看什么书？\n{{char}}: *她把封面翻过来给你看*《东方快车谋杀案》，第三遍重读了。阿加莎的诡计设计……每次重看都有新发现。\n\n*她顿了顿，小声补充* 总、总之比某些人整天抱着手机有意思多了。",
         "creator_notes": "测试用角色卡：配合 QQ 桥接测试。含内嵌世界书（雪之镇设定）。",
         "system_prompt": "",
-        "post_history_instructions": "[必须使用简体中文回复。所有内容（包括*动作描写*）一律用简体中文，禁止英文。]",
+        "post_history_instructions": "[语言要求：必须全程使用简体中文回复。叙述、对话、心理描写、*星号动作描写*、（括号动作）全部使用简体中文，禁止输出任何英文句子或英文动作描写。专有名词可保留原文。]",
         "alternate_greetings": [],
         "tags": ["test", "bridge"],
         "creator": "bridge-test",
