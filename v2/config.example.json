@@ -1,0 +1,21 @@
+{
+    "onebotUrl": "ws://127.0.0.1:3001",
+    "onebotToken": "<YOUR_ONEBOT_TOKEN>",
+    "stExtPort": 9500,
+    "consolePort": 9510,
+    "trigger": {
+        "atOnly": false,
+        "privateReply": true,
+        "allowedUsers": [],
+        "allowedGroups": []
+    },
+    "maxMessageLength": 2000,
+    "replyProcessors": [
+        {
+            "type": "strip",
+            "begin": "*",
+            "end": "*",
+            "keep": false
+        }
+    ]
+}
