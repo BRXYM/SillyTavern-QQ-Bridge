@@ -246,6 +246,15 @@ wss.on('connection', (socket) => {
             const processed = applyReplyProcessors(msg.text, cfg.replyProcessors);
             if (!processed) { log('回复经规则处理后为空，不发送'); return; }
             sendQQ({ ...route, text: processed, sessionKey: key });
+        } else if (msg.type === 'command_reply') {
+            // / 指令结果：不经过处理管道，直接回发
+            let key = msg.sessionKey;
+            if (!key || !sessionRoutes.has(key)) {
+                const lastActive = [...sessionStats.entries()].sort((a, b) => b[1].last - a[1].last)[0];
+                if (lastActive) key = lastActive[0];
+                else { log('⚠ 指令回复无法路由，丢弃'); return; }
+            }
+            sendQQ({ ...sessionRoutes.get(key), text: msg.text, sessionKey: key });
         } else if (msg.type === 'hello') {
             log(`酒馆扩展握手: ${msg.ext ?? 'unknown'} v${msg.version ?? '?'}`);
         }

@@ -1,11 +1,11 @@
 {
-    "display_name": "SnowLuma Bridge",
-    "loading_order": 15,
-    "requires": [],
-    "optional": [],
-    "js": "index.js",
-    "css": "style.css",
-    "author": "bridge",
-    "version": "3.0.0",
-    "homePage": ""
+  "display_name": "SnowLuma Bridge",
+  "loading_order": 15,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "bridge",
+  "version": "3.1.0",
+  "homePage": ""
 }
