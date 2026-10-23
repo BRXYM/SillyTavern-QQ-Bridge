@@ -197,11 +197,11 @@ async function handleCommand(msg) {
     return `未知指令「${cmd}」。发送 /help 查看帮助`;
 }
 
-// 触发词：/指令 或 ？/?（中英文问号）→ 触发指令手册
+// 触发词：/指令 或 ？/?（中英文问号）或单独的 / → 触发指令手册
 function isCommand(text) {
     const t = (text ?? '').trim();
     if (/^\/(help|character|word|status)\b/i.test(t)) return true;
-    if (/^[?？]$/.test(t)) return true;                    // 单独的 ? / ？
+    if (/^[?？/]$/.test(t)) return true;                   // 单独的 ? ？ /
     return false;
 }
 
@@ -232,7 +232,7 @@ async function onQQMessage(msg) {
         let reply;
         try {
             const t = text.trim();
-            if (/^[?？]$/.test(t)) {
+            if (/^[?？/]$/.test(t)) {
                 reply = helpText();
             } else {
                 reply = await handleCommand({ ...msg, sessionKey: key, text });
