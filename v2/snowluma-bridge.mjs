@@ -224,10 +224,16 @@ const wss = new WebSocketServer({ host: '127.0.0.1', port: cfg.stExtPort });
 wss.on('listening', () => log(`酒馆扩展 WS 服务已启动: ws://127.0.0.1:${cfg.stExtPort}`));
 wss.on('connection', (socket) => {
     stClients.add(socket);
+    socket.isAlive = true;
+    socket.on('pong', () => { socket.isAlive = true; });
     log(`酒馆扩展已接入（当前 ${stClients.size} 个连接）`);
     socket.on('message', (raw) => {
         let msg;
         try { msg = JSON.parse(raw.toString()); } catch { return; }
+        if (msg.type === 'ping') {           // 扩展心跳：原样回 pong（复用 message 通道）
+            try { socket.send(JSON.stringify({ type: 'pong' })); } catch { /* 忽略 */ }
+            return;
+        }
         if (msg.type === 'st_reply') {
             let key = msg.sessionKey;
             // 兜底：扩展未携带 sessionKey（旧版本）时路由到最近活跃的会话

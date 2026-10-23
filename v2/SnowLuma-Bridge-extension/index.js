@@ -36,6 +36,7 @@ const log = (...a) => console.log(`[${extensionName} v${version}]`, ...a);
 
 let ws = null;
 let reconnectTimer = null;
+let pingTimer = null;
 
 /** @type {Map<string, Array<{sender:string, text:string, sessionKey:string}>>} */
 const pendingQueue = new Map();
@@ -68,8 +69,21 @@ function connect() {
     ws.onmessage = (event) => {
         let msg;
         try { msg = JSON.parse(event.data); } catch { return; }
-        if (msg.type === 'qq_message') onQQMessage(msg);
+        if (msg.type === 'qq_message') {
+            // 隔离异常：任何错误都不能杀死 WS 连接
+            Promise.resolve()
+                .then(() => onQQMessage(msg))
+                .catch((e) => log('onQQMessage 异常(已隔离):', e.message, e.stack));
+        }
     };
+
+    // 心跳保活：每 25 秒 ping，防止代理/浏览器闲置断连
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+        }
+    }, 25000);
 
     ws.onclose = () => {
         updateUI(false);
@@ -130,17 +144,7 @@ async function handleCommand(msg) {
     const context = getContext();
 
     if (cmd === '/help') {
-        return [
-            '📜 鲸鱼桥指令手册',
-            '/help — 显示本帮助',
-            '/character list — 列出角色',
-            '/character select <名称/编号> — 切换角色（发送新开场白）',
-            '/word list — 列出世界书',
-            '/word select <名称/编号> — 切换世界书',
-            '/status — 当前会话状态',
-            '',
-            '其他消息会转发给当前角色进行扮演。',
-        ].join('\n');
+        return helpText();
     }
 
     if (cmd === '/status') {
@@ -193,24 +197,51 @@ async function handleCommand(msg) {
     return `未知指令「${cmd}」。发送 /help 查看帮助`;
 }
 
+// 触发词：/指令 或 ？/?（中英文问号）→ 触发指令手册
 function isCommand(text) {
-    return /^\/(help|character|word|status)\b/i.test((text ?? '').trim());
+    const t = (text ?? '').trim();
+    if (/^\/(help|character|word|status)\b/i.test(t)) return true;
+    if (/^[?？]$/.test(t)) return true;                    // 单独的 ? / ？
+    return false;
+}
+
+// 指令手册（/ 与 ? 共用）
+function helpText() {
+    return [
+        '📜 鲸鱼桥指令手册',
+        '/help 或 ? — 显示本帮助',
+        '/character list — 列出角色',
+        '/character select <名称/编号> — 切换角色（发送新开场白）',
+        '/word list — 列出世界书',
+        '/word select <名称/编号> — 切换世界书',
+        '/status — 当前会话状态',
+        '',
+        '其他消息会转发给当前角色进行扮演。',
+    ].join('\n');
 }
 
 async function onQQMessage(msg) {
     const key = msg.sessionKey ?? `private_${msg.user_id ?? 'unknown'}`;
     const text = (msg.text ?? '').trim();
 
-    // / 指令：直接处理并回发，不进聊天、不触发生成
+    log(`[${key}] onQQMessage 收到: "${text}" (type=${msg.type})`);
+
+    // / 指令 与 ? 触发：直接处理并回发，不进聊天、不触发生成
     if (isCommand(text)) {
-        log(`[${key}] 指令: ${text}`);
+        log(`[${key}] 指令命中: ${text}`);
         let reply;
         try {
-            reply = await handleCommand({ ...msg, sessionKey: key, text });
+            const t = text.trim();
+            if (/^[?？]$/.test(t)) {
+                reply = helpText();
+            } else {
+                reply = await handleCommand({ ...msg, sessionKey: key, text });
+            }
         } catch (e) {
-            log(`[${key}] 指令执行失败:`, e.message);
+            log(`[${key}] 指令执行失败:`, e.message, e.stack);
             reply = `❌ 指令执行失败: ${e.message}`;
         }
+        log(`[${key}] 指令回复长度: ${reply?.length ?? 0}`);
         sendToBridge({ type: 'command_reply', sessionKey: key, text: reply });
         return;
     }
