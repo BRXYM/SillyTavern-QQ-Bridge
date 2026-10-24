@@ -188,70 +188,196 @@ function callOnebot(action, params) {
 }
 
 /**
- * 按标点切分长文本，模拟真人聊天的多条短消息。
- * 规则（可在 config.segmentation 调整）：
- *   - 按 。！？!?… 分句
- *   - 单段超过 maxLen 时按逗号二次切分
- *   - 过短的片段合并（避免碎成单字）
+ * 按可配置的分隔规则切分长文本。
+ *
+ * 分隔层级：
+ *   1. splitStrings  自定义字面量串（最高优先级，如换行、"||"）
+ *   2. pairChars     配对符：*动作* / "台词" / “台词”
+ *                    → 配对符本身就是分段边界（整段动作或台词成为一条消息）
+ *   3. hardChars     句末标点 。！？!?…
+ *   4. softChars     逗号类，仅在片段超长时二次切分
+ *
+ * 关键点：配对符内部的内容不会被句末标点切断，
+ * 例如 *她抬起头。眼睛里闪着光。* 会保持为一个整体动作。
  */
 function segmentText(text, opts = {}) {
     const {
         enabled = true,
-        maxLen = 120,          // 单条最大字数
-        minLen = 8,            // 单条最小字数（低于则与下一条合并）
-        maxSegments = 4,       // 最多分几条（防止刷屏）
-        splitChars = '。！？!?…\n',
+        maxLen = 120,
+        minLen = 8,
+        maxSegments = 4,
+        hardChars = '。！？!?…',
         softChars = '，,；;',
-        delayMs = [300, 900],  // 每条之间的随机延迟
+        pairChars = ['*', '"', '\u201c\u201d'],
+        splitStrings = [],
+        splitOnPairs = true,      // 配对符本身是否作为分段边界
+        delayMs = [300, 900],
+        keepDelimiter = true,
     } = opts;
 
     if (!enabled) return [{ text, delayMs: 0 }];
-
     const trimmed = (text ?? '').trim();
     if (!trimmed) return [];
 
-    // 1) 按硬标点切分（保留标点）
-    const hardRe = new RegExp(`([^${splitChars}]+[${splitChars}]*)`, 'g');
-    let parts = trimmed.match(hardRe) ?? [trimmed];
-    parts = parts.map((p) => p.trim()).filter(Boolean);
-
-    // 2) 超长片段按软标点二次切分
-    const expanded = [];
-    for (const p of parts) {
-        if (p.length <= maxLen) {
-            expanded.push(p);
-            continue;
-        }
-        const softRe = new RegExp(`([^${softChars}]+[${softChars}]*)`, 'g');
-        const subs = p.match(softRe) ?? [p];
-        let buf = '';
-        for (const sub of subs) {
-            if ((buf + sub).length > maxLen && buf) {
-                expanded.push(buf.trim());
-                buf = sub;
-            } else {
-                buf += sub;
-            }
-        }
-        if (buf.trim()) expanded.push(buf.trim());
+    // ---------- 步骤 1：找出所有配对符区间的片段 ----------
+    // 结果是一个 token 列表：{ text, isPair, pairIndex }
+    const pairs = [];
+    for (const p of pairChars) {
+        if (!p) continue;
+        if (p.length >= 2) pairs.push([p[0], p[1]]);
+        else pairs.push([p, p]);
     }
 
-    // 3) 合并过短片段
+    // 统一用占位符标记配对段落
+    const pairSegments = [];
+    let work = trimmed;
+    for (const [open, close] of pairs) {
+        const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(esc(open) + '[^' + esc(open) + esc(close) + ']*?' + esc(close), 'g');
+        work = work.replace(re, (m) => {
+            const idx = pairSegments.length;
+            pairSegments.push(m);
+            return `\u0000P${idx}\u0000`;
+        });
+    }
+
+    // ---------- 步骤 2：自定义分隔串（切出的片段即为最终边界） ----------
+    const fixedChunks = [];   // 由 splitStrings 切出的不可跨越片段
+    let chunks = [work];
+    if (Array.isArray(splitStrings) && splitStrings.length) {
+        for (const sep of splitStrings) {
+            if (!sep) continue;
+            const next = [];
+            for (const c of chunks) {
+                const parts = c.split(sep);
+                for (let i = 0; i < parts.length; i++) {
+                    const piece = parts[i] + (i < parts.length - 1 && keepDelimiter ? sep : '');
+                    if (piece) next.push(piece);
+                }
+            }
+            chunks = next;
+        }
+        // 全部标记为固定边界
+        fixedChunks.push(...chunks);
+        chunks = [];   // 不再参与 hardSplit 的跨段合并
+    }
+
+    // ---------- 步骤 3：按硬标点切分（占位符不受影响） ----------
+    const hardSet = new Set([...hardChars, '\n']);
+    const hardSplit = [];
+    for (const chunk of chunks) {
+        let buf = '';
+        for (const ch of chunk) {
+            buf += ch;
+            if (hardSet.has(ch)) {
+                hardSplit.push(buf);
+                buf = '';
+            }
+        }
+        if (buf.trim()) hardSplit.push(buf);
+    }
+
+    // ---------- 步骤 4：还原配对符，并可选地把它们拆成独立片段 ----------
+    let pieces = [];
+    // splitStrings 切出的片段直接作为独立段（不再被硬标点切分）
+    for (const fc of fixedChunks) {
+        pieces.push(fc.replace(/\u0000P(\d+)\u0000/g, (_, i) => pairSegments[Number(i)] ?? ''));
+    }
+    for (const piece of hardSplit) {
+        if (!splitOnPairs) {
+            pieces.push(piece.replace(/\u0000P(\d+)\u0000/g, (_, i) => pairSegments[Number(i)] ?? ''));
+            continue;
+        }
+        // 占位符作为边界：拆成 [前文][配对][后文]
+        const re = /\u0000P(\d+)\u0000/g;
+        let last = 0;
+        let m;
+        while ((m = re.exec(piece)) !== null) {
+            const before = piece.slice(last, m.index).trim();
+            if (before) pieces.push(before);
+            pieces.push(pairSegments[Number(m[1])] ?? '');
+            last = m.index + m[0].length;
+        }
+        const after = piece.slice(last).trim();
+        if (after) pieces.push(after);
+    }
+
+    // 标记：配对符片段 / splitStrings 片段 都不参与 minLen 合并
+    const fixedSet = new Set(fixedChunks.map((c) => c.replace(/\u0000P(\d+)\u0000/g, (_, i) => pairSegments[Number(i)] ?? '').trim()));
+    pieces = pieces
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .map((p) => {
+            const isPair = pairSegments.some((ps) => ps === p);
+            const isFixed = fixedSet.has(p);
+            return { text: p, isPair, isFixed };
+        });
+
+    // ---------- 步骤 5：超长片段按软标点二次切分 ----------
+    const expanded = [];
+    for (const piece of pieces) {
+        const p = piece.text;
+        if (p.length <= maxLen) {
+            expanded.push(piece);
+            continue;
+        }
+        const softSet = new Set([...softChars]);
+        let buf = '';
+        const subs = [];
+        for (const ch of p) {
+            buf += ch;
+            if (softSet.has(ch)) { subs.push(buf); buf = ''; }
+        }
+        if (buf) subs.push(buf);
+
+        let acc = '';
+        for (const sub of subs) {
+            if ((acc + sub).length > maxLen && acc) {
+                expanded.push({ text: acc.trim(), isPair: false });
+                acc = sub;
+            } else {
+                acc += sub;
+            }
+        }
+        if (acc.trim()) expanded.push({ text: acc.trim(), isPair: false });
+    }
+
+    // ---------- 步骤 6：合并过短片段 ----------
+    // 引导语模式：以冒号结尾的短文本（如 "她说："）应与后一个配对片段合并
+    const isLeadIn = (t) => /[:：]\s*$/.test(t) && t.length <= 20;
+
     const merged = [];
     let acc = '';
-    for (const p of expanded) {
+    for (const item of expanded) {
+        if (item.isPair) {
+            if (acc && isLeadIn(acc)) {
+                // 引导语 + 台词 合并成一段（更自然）
+                merged.push(acc + item.text);
+                acc = '';
+            } else {
+                if (acc) { merged.push(acc); acc = ''; }
+                merged.push(item.text);
+            }
+            continue;
+        }
+        // splitStrings 切出的片段：独立成段，不合并
+        if (item.isFixed) {
+            if (acc) { merged.push(acc); acc = ''; }
+            merged.push(item.text);
+            continue;
+        }
         if (!acc) {
-            acc = p;
+            acc = item.text;
         } else if (acc.length < minLen) {
-            acc += p;
+            acc += item.text;
         } else {
             merged.push(acc);
-            acc = p;
+            acc = item.text;
         }
     }
     if (acc) merged.push(acc);
 
-    // 4) 限制条数：超出部分合并到最后一条
+    // ---------- 步骤 7：限制条数 ----------
     let result = merged;
     if (result.length > maxSegments) {
         const head = result.slice(0, maxSegments - 1);
@@ -259,12 +385,11 @@ function segmentText(text, opts = {}) {
         result = [...head, tail];
     }
 
-    // 5) 最终长度兜底
+    // ---------- 步骤 8：长度兜底 + 随机延迟 ----------
     result = result.map((t) => (t.length > cfg.maxMessageLength
         ? t.slice(0, cfg.maxMessageLength) + '…'
         : t));
 
-    // 6) 附加随机延迟
     const [dMin, dMax] = delayMs;
     return result.map((t, i) => ({
         text: t,
@@ -681,8 +806,32 @@ button.small { padding:3px 10px; font-size:12px; }
         <div><label>间隔最小(ms)</label><input id="segDelayMin" type="number" min="0"></div>
         <div><label>间隔最大(ms)</label><input id="segDelayMax" type="number" min="0"></div>
       </div>
-      <div style="margin-top:12px"><button id="saveSeg">保存分段设置</button></div>
-      <div class="hint" id="segPreview"></div>
+
+      <label style="margin-top:12px">硬分隔符（句末标点，切分边界）</label>
+      <input id="segHard" type="text" placeholder="。！？!?…">
+      <label>软分隔符（逗号类，仅超长时二次切分）</label>
+      <input id="segSoft" type="text" placeholder="，,；;">
+      <label>配对符（成对内容保持完整，如 *动作* / "台词"）</label>
+      <div class="row">
+        <input id="segPair1" type="text" placeholder="*" style="max-width:70px">
+        <input id="segPair2" type="text" placeholder="&quot;" style="max-width:70px">
+        <input id="segPair3" type="text" placeholder="“”" style="max-width:70px">
+      </div>
+      <label class="checkbox_label" style="margin-top:8px">
+        <input id="segSplitOnPairs" type="checkbox"> 配对符内容作为独立消息分段
+      </label>
+      <label>自定义分隔串（每行一个，按字面量切分，优先级最高）</label>
+      <textarea id="segSplitStrings" class="text_pole" rows="3" style="width:100%;font-family:monospace"
+        placeholder="留空则不用。示例：&#10;||&#10;---"></textarea>
+
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button id="saveSeg">保存分段设置</button>
+        <button id="testSeg" class="small">预览切分效果</button>
+      </div>
+      <label id="segTestLabel" style="display:none;margin-top:10px">测试文本</label>
+      <textarea id="segTestInput" class="text_pole" rows="3" style="width:100%;display:none"
+        placeholder="粘贴一段 AI 回复，点击预览看会切成几条"></textarea>
+      <div id="segPreview" style="margin-top:8px"></div>
     </div>
 
     <div class="card">
@@ -869,18 +1018,54 @@ $('#saveGlobalPipeline').onclick = async () => {
 };
 
 // ===== 分段设置 =====
-$('#saveSeg').onclick = async () => {
-  const seg = {
+function readSegConfig() {
+  const pairs = [$('#segPair1').value, $('#segPair2').value, $('#segPair3').value]
+    .map((v) => v ?? '')
+    .filter((v) => v.length > 0);
+  const splitStrings = ($('#segSplitStrings').val() ?? '')
+    .split('\\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  return {
     enabled: $('#segEnabled').checked,
     maxLen: Number($('#segMaxLen').value) || 120,
+    minLen: 8,
     maxSegments: Number($('#segMaxSeg').value) || 4,
+    hardChars: $('#segHard').value || '。！？!?…',
+    softChars: $('#segSoft').value || '，,；;',
+    pairChars: pairs,
+    splitStrings,
+    splitOnPairs: $('#segSplitOnPairs').checked,
     delayMs: [
       Number($('#segDelayMin').value) || 300,
       Number($('#segDelayMax').value) || 900,
     ],
   };
-  await api('/config', { segmentation: seg });
+}
+
+$('#saveSeg').onclick = async () => {
+  await api('/config', { segmentation: readSegConfig() });
   toast('分段设置已保存');
+};
+
+$('#testSeg').onclick = async () => {
+  const show = $('#segTestInput').css('display') === 'none';
+  $('#segTestInput').css('display', show ? 'block' : 'none');
+  $('#segTestLabel').css('display', show ? 'block' : 'none');
+  if (!show) return;
+
+  const text = $('#segTestInput').val() || '*她抬起头。* "你来啦！" 今天天气不错。';
+  const r = await api('/test-segments', { text, config: readSegConfig() });
+  const box = $('#segPreview');
+  if (!r.segments?.length) {
+    box.innerHTML = '<div class="hint">无内容</div>';
+    return;
+  }
+  box.innerHTML = '<div class="hint">会切成 ' + r.segments.length + ' 条：</div>'
+    + r.segments.map((s2, i) =>
+      '<div style="font-size:12px;padding:4px 8px;margin:3px 0;background:#121828;border-left:2px solid #35507d">'
+      + '[' + (i + 1) + '] ' + escapeAttr(s2.text) + '</div>').join('');
 };
 
 // ===== 图片设置 =====
@@ -1121,6 +1306,14 @@ async function refresh() {  const s = await api('/status');
     $('#segMaxSeg').val(seg.maxSegments ?? 4);
     $('#segDelayMin').val(seg.delayMs?.[0] ?? 300);
     $('#segDelayMax').val(seg.delayMs?.[1] ?? 900);
+    $('#segHard').val(seg.hardChars ?? '。！？!?…');
+    $('#segSoft').val(seg.softChars ?? '，,；;');
+    const pc = seg.pairChars ?? ['*', '"', '“”'];
+    $('#segPair1').val(pc[0] ?? '');
+    $('#segPair2').val(pc[1] ?? '');
+    $('#segPair3').val(pc[2] ?? '');
+    $('#segSplitOnPairs').prop('checked', seg.splitOnPairs !== false);
+    $('#segSplitStrings').val((seg.splitStrings ?? []).join('\\n'));
     const img = s.config.imageReplies ?? {};
     $('#imgEnabled').prop('checked', img.enabled !== false);
     $('#imgBaseUrl').val(img.baseUrl ?? '');
@@ -1249,6 +1442,22 @@ const consoleServer = http.createServer((req, res) => {
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: true }));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+        });
+        return;
+    }
+    if (req.method === 'POST' && req.url === '/api/test-segments') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+            try {
+                const { text, config } = JSON.parse(body);
+                const segs = segmentText(text ?? '', config ?? cfg.segmentation ?? {});
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, segments: segs }));
             } catch (e) {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: false, error: e.message }));

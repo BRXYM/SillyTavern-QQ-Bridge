@@ -10,5 +10,34 @@
         "allowedGroups": []
     },
     "maxMessageLength": 2000,
-    "replyProcessors": []
+    "replyProcessors": [],
+    "defaults": {
+        "character": "雪乃",
+        "world": "雪之镇设定"
+    },
+    "stDataDir": "D:\\WorkSpace\\SillyTavern\\data\\default-user",
+    "segmentation": {
+        "enabled": true,
+        "maxLen": 120,
+        "minLen": 8,
+        "maxSegments": 4,
+        "hardChars": "。！？!?…",
+        "softChars": "，,；;",
+        "pairChars": [
+            "*",
+            "\"",
+            "“”"
+        ],
+        "splitStrings": [],
+        "splitOnPairs": true,
+        "delayMs": [
+            300,
+            900
+        ]
+    },
+    "imageReplies": {
+        "enabled": true,
+        "instruction": true,
+        "baseUrl": ""
+    }
 }
