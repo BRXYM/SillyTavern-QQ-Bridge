@@ -851,12 +851,15 @@ const consoleServer = http.createServer((req, res) => {
         let body = '';
         req.on('data', (c) => (body += c));
         req.on('end', () => {
+            // 兼容 text/plain（no-cors）与 JSON 两种格式
+            let text = body;
             try {
-                const { text } = JSON.parse(body);
-                log(text ?? '[HTTP] (空)');
-            } catch { /* 忽略 */ }
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true }));
+                const parsed = JSON.parse(body);
+                if (parsed && typeof parsed.text === 'string') text = parsed.text;
+            } catch { /* 纯文本，直接用 */ }
+            log(text || '[HTTP] (空)');
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end('ok');
         });
         return;
     }

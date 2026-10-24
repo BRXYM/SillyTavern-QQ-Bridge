@@ -15,7 +15,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 import { world_names } from '../../../world-info.js';
 
 const extensionName = 'SnowLuma-Bridge';
-const version = '4.0.0';
+const version = '4.1.0';
 const defaultSettings = {
     bridgeUrl: 'ws://127.0.0.1:9500',
     autoConnect: true,
@@ -58,6 +58,21 @@ function chatNameOf(key) {
     return 'QQ_' + key;
 }
 
+/**
+ * 诊断日志：POST 到连接器 /api/ext-log。
+ * 用 text/plain + no-cors 避免 CORS 预检（服务器仍能收到内容）。
+ */
+function httpLog(text) {
+    try {
+        fetch('http://127.0.0.1:9510/api/ext-log', {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'text/plain' },
+            body: String(text),
+        }).catch(() => {});
+    } catch { /* 忽略 */ }
+}
+
 function wsSend(obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(obj));
@@ -93,14 +108,26 @@ function connect() {
 
     ws.onmessage = (event) => {
         let msg;
-        try { msg = JSON.parse(event.data); } catch { return; }
-        if (msg.type === 'qq_message') {
-            Promise.resolve().then(() => onQQMessage(msg)).catch((e) => log('onQQMessage 异常(已隔离):', e.message));
-        } else if (msg.type === 'session_state') {
-            remoteSessions = msg.sessions ?? {};
-            remoteDefaults = msg.defaults ?? {};
-        } else if (msg.type === 'sync_request') {
-            reportCatalog();
+        try { msg = JSON.parse(event.data); } catch (e) {
+            log('消息解析失败:', e.message);
+            return;
+        }
+
+        log(`<<< 收到 WS 消息 type=${msg.type}`);   // 无条件记录每条入站消息
+
+        try {
+            if (msg.type === 'qq_message') {
+                Promise.resolve()
+                    .then(() => onQQMessage(msg))
+                    .catch((e) => log('onQQMessage 异常(已隔离):', e.message, e.stack));
+            } else if (msg.type === 'session_state') {
+                remoteSessions = msg.sessions ?? {};
+                remoteDefaults = msg.defaults ?? {};
+            } else if (msg.type === 'sync_request') {
+                reportCatalog();
+            }
+        } catch (e) {
+            log('ws.onmessage 顶层异常:', e.message, e.stack);
         }
     };
 
@@ -234,13 +261,7 @@ function onQQMessage(msg) {
     const text = (msg.text ?? '').trim();
 
     // 第一道诊断：用 HTTP 直连连接器（完全绕开 WebSocket 状态问题）
-    try {
-        fetch('http://127.0.0.1:9510/api/ext-log', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: `[HTTP] onQQMessage 进入 key=${key} text=${text.slice(0, 40)}` }),
-        }).catch(() => {});
-    } catch { /* 忽略 */ }
+    httpLog(`onQQMessage 进入 key=${key} text=${text.slice(0, 40)}`);
 
     log(`收到 [${key}]: ${text.slice(0, 60)}`);
 
@@ -255,7 +276,13 @@ function onQQMessage(msg) {
     }
 
     if (!pendingQueue.has(key)) pendingQueue.set(key, []);
-    pendingQueue.get(key).push({ sender: msg.sender ?? 'QQ', text, sessionKey: key });
+    pendingQueue.get(key).push({
+        sender: msg.sender ?? 'QQ',
+        text,
+        sessionKey: key,
+        defaultCharacter: msg.defaultCharacter,
+        defaultWorld: msg.defaultWorld,
+    });
     pump();
 }
 
@@ -277,11 +304,55 @@ function pump() {
 }
 
 async function processMessage(item) {
-    const ctx = getContext();
+    let ctx = getContext();
     log(`[${item.sessionKey}] 开始处理`);
 
-    if (ctx.characterId === null || ctx.characterId === undefined || ctx.characterId === '') {
-        throw new Error('酒馆未选择角色。请在酒馆里选一个角色，或用 /character select <名称>');
+    // ===== 未选择角色时自动选择 =====
+    const noChar = ctx.characterId === null || ctx.characterId === undefined || ctx.characterId === '';
+    if (noChar) {
+        const desired =
+            remoteSessions?.[item.sessionKey]?.character ||
+            item.defaultCharacter ||
+            remoteDefaults?.character ||
+            '';
+        log(`[${item.sessionKey}] 酒馆未选角色，默认角色配置=「${desired || '(空)'}」`);
+
+        if (!desired) {
+            throw new Error('酒馆未选择角色，且未配置默认角色。请在桥接控制台设置默认角色。');
+        }
+
+        const chars = ctx.characters ?? [];
+        const names = chars.map((c) => c.name);
+        const avatars = chars.map((c) => c.avatar ?? '');
+
+        // 依次尝试：精确名 → 名包含 → avatar 文件名匹配（去扩展名）
+        let idx = names.indexOf(desired);
+        if (idx < 0) idx = names.findIndex((n) => n && n.includes(desired));
+        if (idx < 0) {
+            idx = avatars.findIndex((a) => {
+                const base = String(a).replace(/\.(png|json)$/i, '');
+                return base === desired;
+            });
+        }
+        if (idx < 0) {
+            const detail = chars.map((c, i) => `${i}:${c.name}(${c.avatar})`).join(' ');
+            throw new Error(`默认角色「${desired}」不在角色列表。现有: ${detail}`);
+        }
+
+        log(`[${item.sessionKey}] 自动选择角色「${names[idx]}」(index=${idx})`);
+        try {
+            // switchMenu:false 避免切换左侧菜单导致界面重绘异常
+            await ctx.selectCharacterById(idx, { switchMenu: false });
+            await new Promise((r) => setTimeout(r, 1200));
+            ctx = getContext();
+            log(`[${item.sessionKey}] 角色已就绪: ${ctx.name2} (characterId=${ctx.characterId})`);
+        } catch (e) {
+            throw new Error(`自动选择角色失败: ${e.message}`);
+        }
+
+        if (ctx.characterId === null || ctx.characterId === undefined || ctx.characterId === '') {
+            throw new Error('自动选择角色后 characterId 仍为空，请手动在酒馆中选一个角色');
+        }
     }
 
     // 切到该 QQ 的专属聊天（仅当不同）
@@ -418,5 +489,43 @@ jQuery(async () => {
 
     hookEvents();
     if (extension_settings[extensionName].autoConnect) connect();
+
+    // ===== 全局调试入口（浏览器控制台可用）=====
+    window.snowlumaDebug = {
+        // 查看内部状态
+        state: () => ({
+            wsState: ws?.readyState,
+            wsUrl: extension_settings[extensionName].bridgeUrl,
+            busy,
+            activeSession,
+            generatingFor,
+            queueDepth: [...pendingQueue.values()].reduce((n, q) => n + q.length, 0),
+            remoteDefaults,
+            remoteSessions,
+        }),
+        // 手动模拟收到一条 QQ 消息（绕过 WS）
+        simulate: (text = '测试消息', sessionKey = 'private_debug') => {
+            log(`[DEBUG] 手动模拟: ${text}`);
+            onQQMessage({ type: 'qq_message', sessionKey, sender: '调试', text, user_id: 0 });
+            return '已触发 onQQMessage，查看控制台和酒馆界面';
+        },
+        // 手动发一条指令
+        cmd: (text = '?', sessionKey = 'private_debug') => {
+            onQQMessage({ type: 'qq_message', sessionKey, sender: '调试', text, user_id: 0 });
+            return '已发送指令: ' + text;
+        },
+        // 测试 HTTP 诊断通道
+        httpTest: async () => {
+            const r = await fetch('http://127.0.0.1:9510/api/ext-log', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: '[HTTP] 手动测试成功' }),
+            });
+            return await r.text();
+        },
+    };
+
     log('扩展初始化完成');
+    log('调试入口已就绪：window.snowlumaDebug.state() / .simulate() / .cmd() / .httpTest()');
 });
+
