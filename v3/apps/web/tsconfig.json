@@ -1,0 +1,16 @@
+{
+    "extends": "../../tsconfig.base.json",
+    "compilerOptions": {
+        "noEmit": true,
+        "composite": false,
+        "jsx": "preserve",
+        "lib": ["ES2023", "DOM", "DOM.Iterable"],
+        "types": ["vite/client"],
+        "baseUrl": ".",
+        "paths": {
+            "@/*": ["./src/*"],
+            "@bridge/shared": ["../../packages/shared/src/index.ts"]
+        }
+    },
+    "include": ["src/**/*.ts", "src/**/*.vue", "../../packages/shared/src/**/*.ts"]
+}

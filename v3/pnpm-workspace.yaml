@@ -1,0 +1,15 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# 允许执行构建脚本的依赖（esbuild 需要下载二进制）
+allowBuilds:
+  esbuild: true
+  vue-demi: true
+
+# 共享依赖版本，避免各包重复声明
+catalog:
+  typescript: ~5.9.3
+  vite: ^7.1.5
+  vue: ^3.5.22
+  zod: ^3.24.1

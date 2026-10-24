@@ -1,0 +1,26 @@
+{
+    "name": "snowluma-bridge-v3",
+    "version": "3.0.0",
+    "private": true,
+    "type": "module",
+    "description": "QQ <-> SillyTavern bridge with service orchestration",
+    "engines": {
+        "node": ">=22"
+    },
+    "scripts": {
+        "dev": "node scripts/dev.mjs",
+        "dev:web": "node scripts/dev.mjs --web-only",
+        "dev:api": "node scripts/dev.mjs --api-only",
+        "build": "pnpm -r build",
+        "build:web": "pnpm --filter @bridge/web build",
+        "build:server": "pnpm --filter @bridge/server build",
+        "build:extension": "pnpm --filter @bridge/extension build",
+        "start": "pnpm --filter @bridge/server start",
+        "test": "pnpm -r test",
+        "typecheck": "pnpm -r typecheck"
+    },
+    "devDependencies": {
+        "typescript": "~5.9.3"
+    },
+    "packageManager": "pnpm@11.25.0"
+}

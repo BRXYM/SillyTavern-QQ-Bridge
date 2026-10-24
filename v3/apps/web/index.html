@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>SnowLuma Bridge</title>
+        <script>
+            // 首屏防闪：在 bundle 加载前应用主题
+            (function () {
+                try {
+                    var saved = localStorage.getItem('bridge_theme');
+                    var dark = saved === 'dark'
+                        || (saved !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+                    if (dark) {
+                        document.documentElement.classList.add('dark');
+                        document.documentElement.dataset.theme = 'dark';
+                        document.documentElement.style.colorScheme = 'dark';
+                    }
+                } catch (e) {}
+            })();
+        </script>
+    </head>
+    <body>
+        <div id="app"></div>
+        <script type="module" src="/src/main.ts"></script>
+    </body>
+</html>
