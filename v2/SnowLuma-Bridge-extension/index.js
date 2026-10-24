@@ -20,7 +20,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 import { world_names } from '../../../world-info.js';
 
 const extensionName = 'SnowLuma-Bridge';
-const version = '3.1.0';
+const version = '3.2.0';
 const defaultSettings = {
     bridgeUrl: 'ws://127.0.0.1:9500',
     autoConnect: true,
@@ -234,11 +234,11 @@ async function handleCommand(msg) {
             const worlds = world_names ?? [];
             const hit = resolveEntry(argRaw, worlds);
             if (!hit) return `未找到世界书「${argRaw}」。用 /word list 查看列表`;
-            // /world <名称> 激活全局世界书（state 默认 on）
-            await context.executeSlashCommandsWithOptions(`/world ${JSON.stringify(hit.item)}`);
-            // 上报选择给连接器持久化
+            // 绑定为当前聊天专属世界书（chat_metadata.world_info，随聊天文件保存）
+            await applyChatWorld(context, msg.sessionKey, hit.item);
+            // 上报选择给连接器持久化（跨重启仍生效）
             sendToBridge({ type: 'session_selected', sessionKey: msg.sessionKey, world: hit.item });
-            return `✅ 世界书「${hit.item}」已激活（对当前对话生效）`;
+            return `✅ 世界书「${hit.item}」已绑定到本对话（聊天: ${context.getCurrentChatId()}）\n每个 QQ 会话的世界书相互独立。`;
         }
         return '用法: /word list | /word select <名称/编号>';
     }
@@ -328,11 +328,10 @@ function pumpQueue() {
  */
 async function ensureChat(key, msg = {}) {
     const context = getContext();
-    let target = chatNameOf(key);
-    let current = context.getCurrentChatId();
 
     // ===== 1. 无角色时自动选择默认角色 =====
-    const noCharacter = context.characterId === null || context.characterId === undefined || context.characterId === '';
+    const noCharacter =
+        context.characterId === null || context.characterId === undefined || context.characterId === '';
     if (noCharacter) {
         const desired =
             remoteSessions?.[key]?.character ||
@@ -340,43 +339,90 @@ async function ensureChat(key, msg = {}) {
             remoteDefaults?.character ||
             '';
         if (!desired) {
-            throw new Error('酒馆未选择角色，且未配置默认角色。请在桥接控制台设置默认角色，或先手动选一个角色。');
+            throw new Error(
+                '酒馆未选择角色，且未配置默认角色。请在桥接控制台设置默认角色，或先手动选一个角色。',
+            );
         }
         log(`[${key}] 酒馆无选中角色 → 自动选择默认角色「${desired}」`);
         await context.executeSlashCommandsWithOptions(`/go ${JSON.stringify(desired)}`);
         await new Promise((r) => setTimeout(r, 1200));
-        current = getContext().getCurrentChatId();
-        log(`[${key}] 已进入角色「${desired}」的聊天: ${current}`);
+        log(`[${key}] 已进入角色「${desired}」的聊天: ${getContext().getCurrentChatId()}`);
     }
 
-    // ===== 2. 确保世界书激活（会话级优先） =====
-    const desiredWorld = remoteSessions?.[key]?.world || msg.defaultWorld || remoteDefaults?.world || '';
-    if (desiredWorld) {
-        const activeWorld = getContext().chatMetadata?.world;
-        if (activeWorld !== desiredWorld) {
-            log(`[${key}] 激活世界书「${desiredWorld}」`);
-            try {
-                await getContext().executeSlashCommandsWithOptions(`/world ${JSON.stringify(desiredWorld)}`);
-            } catch (e) {
-                log(`[${key}] 世界书激活失败(忽略):`, e.message);
-            }
+    // ===== 2. 切换到该 QQ 的专属聊天（先切聊天，世界书是聊天级的） =====
+    const target = chatNameOf(key);
+    let current = getContext().getCurrentChatId();
+
+    if (current !== target) {
+        log(`[${key}] 切换到专属聊天 → ${target}`);
+        switchingChat = true;
+        try {
+            await getContext().openCharacterChat(target);
+            log(`[${key}] 已进入聊天: ${getContext().getCurrentChatId()}`);
+            await ensureGreeting(getContext(), key);
+        } finally {
+            switchingChat = false;
         }
+        current = getContext().getCurrentChatId();
     }
 
-    // ===== 3. 切换到该 QQ 的专属聊天 =====
-    if (current === target) return;
-
-    if (!getContext().characterId && getContext().characterId !== 0) {
-        throw new Error('未选择角色，无法打开会话聊天');
+    // ===== 3. 绑定该聊天专属的世界书（chat_metadata.world_info，随聊天文件持久化） =====
+    const desiredWorld =
+        remoteSessions?.[key]?.world ||
+        msg.defaultWorld ||
+        remoteDefaults?.world ||
+        '';
+    if (desiredWorld) {
+        await applyChatWorld(getContext(), key, desiredWorld);
     }
+}
 
-    log(`[${key}] 切换到专属聊天 → ${target}`);
-    switchingChat = true;
+/**
+ * 空聊天时注入角色开场白。
+ * openCharacterChat 新建的聊天没有消息，模型不知道场景，先补 first_mes。
+ */
+async function ensureGreeting(ctx, key) {
     try {
-        await getContext().openCharacterChat(target);
-        log(`[${key}] 已进入聊天: ${getContext().getCurrentChatId()}`);
-    } finally {
-        switchingChat = false;
+        const chatArr = ctx.chat ?? [];
+        const hasRealMessage = chatArr.some((m) => m && !m.is_system && (m.mes ?? '').trim());
+        if (hasRealMessage) return;
+
+        const char = (ctx.characters ?? [])[ctx.characterId];
+        const first = char?.first_mes || char?.data?.first_mes || '';
+        if (!first) {
+            log(`[${key}] 角色无开场白，跳过`);
+            return;
+        }
+        log(`[${key}] 空聊天 → 注入角色开场白`);
+        await ctx.executeSlashCommandsWithOptions(`/sendas name="${char.name}" ${JSON.stringify(first)}`);
+        await new Promise((r) => setTimeout(r, 500));
+    } catch (e) {
+        log(`[${key}] 注入开场白失败(忽略):`, e.message);
+    }
+}
+
+/**
+ * 为该聊天绑定世界书（chat-bound lorebook）。
+ * ST 用 chat_metadata.world_info 记录聊天级世界书，随聊天文件保存，
+ * 因此每个 QQ 会话可以有独立世界书，互不干扰。
+ */
+async function applyChatWorld(ctx, key, worldName) {
+    try {
+        const meta = ctx.chatMetadata;
+        if (meta && meta.world_info === worldName) return;
+
+        if (meta) {
+            meta.world_info = worldName;
+            log(`[${key}] 聊天级世界书已绑定「${worldName}」`);
+            if (typeof ctx.saveMetadata === 'function') {
+                await ctx.saveMetadata();
+            }
+        } else {
+            log(`[${key}] 无 chatMetadata，降级为全局 /world`);
+            await ctx.executeSlashCommandsWithOptions(`/world ${JSON.stringify(worldName)}`);
+        }
+    } catch (e) {
+        log(`[${key}] 世界书绑定失败(忽略):`, e.message);
     }
 }
 
@@ -497,3 +543,4 @@ jQuery(async () => {
     if (extension_settings[extensionName].autoConnect) connect();
     log('扩展初始化完成');
 });
+

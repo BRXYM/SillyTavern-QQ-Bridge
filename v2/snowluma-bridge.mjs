@@ -269,6 +269,47 @@ const stClients = new Set();
 /** 从扩展上报的角色/世界书清单（控制台下拉用） */
 const catalogs = { characters: [], worlds: [], updatedAt: null };
 
+/**
+ * 直接扫描 SillyTavern 数据目录，得到角色/世界书清单。
+ * 作为扩展上报的兜底（扩展未上报或酒馆未刷新时也能用）。
+ */
+function scanStCatalog() {
+    const stData = cfg.stDataDir || 'D:\\WorkSpace\\SillyTavern\\data\\default-user';
+    const out = { characters: [], worlds: [], updatedAt: new Date().toISOString() };
+    try {
+        const charDir = path.join(stData, 'characters');
+        for (const f of fs.readdirSync(charDir)) {
+            if (/\.(png|json)$/i.test(f)) {
+                out.characters.push(f.replace(/\.(png|json)$/i, ''));
+            }
+        }
+    } catch (e) {
+        log('⚠ 扫描角色目录失败:', e.message);
+    }
+    try {
+        const worldDir = path.join(stData, 'worlds');
+        for (const f of fs.readdirSync(worldDir)) {
+            if (/\.json$/i.test(f)) out.worlds.push(f.replace(/\.json$/i, ''));
+        }
+    } catch (e) {
+        log('⚠ 扫描世界书目录失败:', e.message);
+    }
+    out.characters = [...new Set(out.characters)].sort();
+    out.worlds = [...new Set(out.worlds)].sort();
+    return out;
+}
+
+/** 合并磁盘扫描结果与扩展上报结果 */
+function refreshCatalogsFromDisk() {
+    const disk = scanStCatalog();
+    // 扩展上报的更权威（有真实角色名），磁盘扫描作为补充
+    const chars = new Set([...(catalogs.characters ?? []), ...disk.characters]);
+    const worlds = new Set([...(catalogs.worlds ?? []), ...disk.worlds]);
+    catalogs.characters = [...chars].sort();
+    catalogs.worlds = [...worlds].sort();
+    catalogs.updatedAt = disk.updatedAt;
+}
+
 function broadcastToST(obj) {
     const data = JSON.stringify(obj);
     for (const c of stClients) {
@@ -418,6 +459,14 @@ button.small { padding:3px 10px; font-size:12px; }
     <div class="card">
       <h2>会话</h2>
       <div id="sessions"><span class="stat">暂无会话</span></div>
+    </div>
+
+    <div class="card">
+      <h2>会话级角色 / 世界书</h2>
+      <div class="hint" style="margin-bottom:8px">
+        每个 QQ 号可绑定独立的角色与世界书，互不干扰。世界书绑定在酒馆聊天文件里（chat-bound），随聊天持久化。
+      </div>
+      <div id="sessionChoices"></div>
     </div>
 
     <div class="card">
@@ -628,8 +677,64 @@ $('#saveDefaults').onclick = async () => {
   toast('默认角色/世界书已保存');
 };
 
-async function refresh() {
-  const s = await api('/status');
+// ===== 会话级角色/世界书编辑面板 =====
+function renderSessionChoices(s) {
+  const box = $('#sessionChoices');
+  if (!box) return;
+  const choices = s.sessionChoices ?? {};
+  const keys = Object.keys(choices);
+  const chars = s.catalogs?.characters ?? [];
+  const worlds = s.catalogs?.worlds ?? [];
+  const dflt = s.config?.defaults ?? {};
+
+  if (!keys.length) {
+    box.innerHTML = '<span class="stat">还没有会话记录（QQ 发过消息后自动出现）</span>';
+    return;
+  }
+
+  // 避免每 2 秒重绘打断用户操作
+  const focused = document.activeElement;
+  if (box.contains(focused) && focused.tagName === 'SELECT') return;
+
+  box.innerHTML = keys.map((k) => {
+    const c = choices[k] ?? {};
+    const charOpts = ['<option value="">（用默认）</option>']
+      .concat(chars.map((n) => '<option value="' + n + '"' + (c.character === n ? ' selected' : '') + '>' + n + '</option>'))
+      .join('');
+    const worldOpts = ['<option value="">（用默认）</option>']
+      .concat(worlds.map((n) => '<option value="' + n + '"' + (c.world === n ? ' selected' : '') + '>' + n + '</option>'))
+      .join('');
+    const rows = [
+      '      <div class="rule" data-key="' + k + '">',
+      '        <div class="head"><span class="tag">' + k + '</span>',
+      '          <button class="small danger s-del">清除</button>',
+      '        </div>',
+      '        <div class="kv"><span style="font-size:12px;width:56px">角色</span><select class="s-char" style="flex:1">' + charOpts + '</select></div>',
+      '        <div class="kv"><span style="font-size:12px;width:56px">世界书</span><select class="s-world" style="flex:1">' + worldOpts + '</select></div>',
+      '        <div class="hint">默认: 角色 ' + (dflt.character || '(未设)') + ' / 世界书 ' + (dflt.world || '(未设)') + '</div>',
+      '      </div>',
+    ];
+    return rows.join('\n');
+  }).join('');
+
+  box.querySelectorAll('.rule').forEach((div) => {
+    const key = div.dataset.key;
+    div.querySelector('.s-char').onchange = async (e) => {
+      await api('/session-choice', { sessionKey: key, character: e.target.value });
+      toast('已保存 ' + key + ' 的角色');
+    };
+    div.querySelector('.s-world').onchange = async (e) => {
+      await api('/session-choice', { sessionKey: key, world: e.target.value });
+      toast('已保存 ' + key + ' 的世界书');
+    };
+    div.querySelector('.s-del').onclick = async () => {
+      await api('/session-choice', { sessionKey: key, reset: true });
+      toast('已清除 ' + key + ' 的绑定');
+    };
+  });
+}
+
+async function refresh() {  const s = await api('/status');
   $('#obStatus').textContent = '上游: ' + (s.onebotConnected ? '已连接' : '未连接');
   $('#obStatus').style.color = s.onebotConnected ? '#7fe0a0' : '#ff8a9a';
   $('#stStatus').textContent = '下游: ' + (s.stClients > 0 ? \`已接入(\${s.stClients})\` : '未接入');
@@ -643,6 +748,8 @@ async function refresh() {
 
   $('#log').textContent = s.logs.join('\\n');
   $('#log').scrollTop = $('#log').scrollHeight;
+
+  renderSessionChoices(s);
 
   if (!state.loaded) {
     state.loaded = true;
@@ -676,6 +783,7 @@ const consoleServer = http.createServer((req, res) => {
         return;
     }
     if (req.method === 'GET' && req.url === '/api/status') {
+        refreshCatalogsFromDisk();          // 每次查询都刷新（文件系统扫描，开销可忽略）
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             onebotConnected: obSocket?.readyState === WebSocket.OPEN,
@@ -690,8 +798,9 @@ const consoleServer = http.createServer((req, res) => {
         return;
     }
     if (req.method === 'GET' && req.url === '/api/catalog/refresh') {
-        // 控制台“刷新清单”：向扩展索要最新清单
+        // 控制台“刷新清单”：向扩展索要最新清单 + 重扫磁盘
         broadcastToST({ type: 'sync_request' });
+        refreshCatalogsFromDisk();
         setTimeout(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true, catalogs }));
