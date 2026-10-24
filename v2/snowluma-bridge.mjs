@@ -599,6 +599,13 @@ function handleMessage(event) {
     sessionStats.get(key).in++;
     sessionStats.get(key).last = Date.now();
 
+    // 新会话自动建档：让控制台能立刻看到它（角色/世界书/管道留空 = 继承默认）
+    if (!sessions[key]) {
+        sessions[key] = { createdAt: new Date().toISOString() };
+        saveSessions();
+        log(`新会话已建档: ${key}`);
+    }
+
     log(`QQ消息 → 酒馆 [${key}]: [${senderName}] ${text}`);
     const def = sessionDefaults(key);
     broadcastToST({
@@ -1268,8 +1275,13 @@ function renderSessionChoices(s) {
   const box = $('#sessionChoices');
   if (!box) return;
 
+  // 合并两个来源：
+  //   sessionStats   —— 运行时出现过消息的会话（含首次发言的新用户）
+  //   sessionChoices —— 已持久化的配置
   const choices = s.sessionChoices ?? {};
-  const keys = Object.keys(choices);
+  const stats = s.sessions ?? {};
+  const allKeys = new Set([...Object.keys(stats), ...Object.keys(choices)]);
+  const keys = [...allKeys].sort();
   const chars = s.catalogs?.characters ?? [];
   const worlds = s.catalogs?.worlds ?? [];
   const dflt = s.config?.defaults ?? {};
@@ -1282,7 +1294,17 @@ function renderSessionChoices(s) {
 
   // 避免每 2 秒重绘打断用户正在操作的输入
   const focused = document.activeElement;
-  if (box.contains(focused) && ['SELECT', 'INPUT'].includes(focused.tagName)) return;
+  if (box.contains(focused) && ['SELECT', 'INPUT', 'TEXTAREA'].includes(focused.tagName)) return;
+
+  // 会话集合没变时跳过重绘（减少闪烁），但统计数字变化仍会更新
+  const sig = keys.join('|') + '::' + keys.map((k) => {
+    const st = stats[k] ?? {};
+    const c = choices[k] ?? {};
+    return [st.in ?? 0, st.out ?? 0, c.character ?? '', c.world ?? '',
+      Array.isArray(c.replyProcessors) ? c.replyProcessors.length : 'i'].join('/');
+  }).join(',');
+  if (state.sessionSig === sig) return;
+  state.sessionSig = sig;
 
   const modeOf = (c) => (Array.isArray(c.replyProcessors) ? 'custom' : 'inherit');
 
@@ -1297,9 +1319,15 @@ function renderSessionChoices(s) {
       .join('');
 
     const rules = Array.isArray(c.replyProcessors) ? c.replyProcessors : [];
+    const st = stats[k] ?? {};
+    const isNew = !choices[k];
+    const statText = st.in !== undefined
+      ? ' <span style="opacity:.6;font-size:11px">收 ' + (st.in ?? 0) + ' / 发 ' + (st.out ?? 0) + '</span>'
+      : '';
+    const newBadge = isNew ? ' <span class="tag" style="background:#2d5a2d;color:#a8e6a8">新</span>' : '';
     const rows = [
       '<div class="rule" data-key="' + k + '">',
-      '  <div class="head"><span class="tag">' + k + '</span>',
+      '  <div class="head"><span class="tag">' + k + '</span>' + newBadge + statText,
       '    <button class="small danger s-del">清除配置</button></div>',
       '  <div class="kv"><span style="font-size:12px;width:56px">角色</span><select class="s-char" style="flex:1">' + charOpts + '</select></div>',
       '  <div class="kv"><span style="font-size:12px;width:56px">世界书</span><select class="s-world" style="flex:1">' + worldOpts + '</select></div>',
