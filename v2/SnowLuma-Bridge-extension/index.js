@@ -232,6 +232,16 @@ async function handleCommand(msg) {
 function onQQMessage(msg) {
     const key = msg.sessionKey ?? `private_${msg.user_id ?? 'unknown'}`;
     const text = (msg.text ?? '').trim();
+
+    // 第一道诊断：用 HTTP 直连连接器（完全绕开 WebSocket 状态问题）
+    try {
+        fetch('http://127.0.0.1:9510/api/ext-log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: `[HTTP] onQQMessage 进入 key=${key} text=${text.slice(0, 40)}` }),
+        }).catch(() => {});
+    } catch { /* 忽略 */ }
+
     log(`收到 [${key}]: ${text.slice(0, 60)}`);
 
     if (isCommand(text)) {

@@ -781,6 +781,15 @@ setInterval(refresh, 2000);
 </html>`;
 
 const consoleServer = http.createServer((req, res) => {
+    // 允许酒馆页面（:8000）跨域调用诊断接口
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(PAGE());
@@ -834,6 +843,20 @@ const consoleServer = http.createServer((req, res) => {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: false, error: e.message }));
             }
+        });
+        return;
+    }
+    if (req.method === 'POST' && req.url === '/api/ext-log') {
+        // 扩展端诊断日志（HTTP 直连，绕开 WS 状态）
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+            try {
+                const { text } = JSON.parse(body);
+                log(text ?? '[HTTP] (空)');
+            } catch { /* 忽略 */ }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
         });
         return;
     }
