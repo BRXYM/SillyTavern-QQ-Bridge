@@ -221,11 +221,23 @@ function segmentText(text, opts = {}) {
 
     // ---------- 步骤 1：找出所有配对符区间的片段 ----------
     // 结果是一个 token 列表：{ text, isPair, pairIndex }
+    // 配对符归一化：支持三种写法
+    //   "**"            → [*, *]
+    //   "“”"             → [“, ”]
+    //   ["动作", "**"]   → [*, *]（带名称，便于界面展示）
+    //   {name, pair}    → [*, *]
     const pairs = [];
-    for (const p of pairChars) {
-        if (!p) continue;
-        if (p.length >= 2) pairs.push([p[0], p[1]]);
-        else pairs.push([p, p]);
+    for (const raw of pairChars) {
+        if (!raw) continue;
+        let token = raw;
+        if (Array.isArray(raw)) {
+            token = raw[1] ?? raw[0];        // [名称, 符号]
+        } else if (typeof raw === 'object') {
+            token = raw.pair ?? raw.symbol ?? '';
+        }
+        if (typeof token !== 'string' || !token) continue;
+        if (token.length >= 2) pairs.push([token[0], token[1]]);
+        else pairs.push([token, token]);
     }
 
     // 统一用占位符标记配对段落
@@ -389,7 +401,11 @@ function segmentText(text, opts = {}) {
             const p0 = (t[0] ?? '');
             const p1 = (t[t.length - 1] ?? '');
             return pairChars.some((pc) => {
-                const pair = pc.length >= 2 ? [pc[0], pc[1]] : [pc, pc];
+                let token = pc;
+                if (Array.isArray(pc)) token = pc[1] ?? pc[0];
+                else if (typeof pc === 'object') token = pc?.pair ?? pc?.symbol ?? '';
+                if (typeof token !== 'string' || !token) return false;
+                const pair = token.length >= 2 ? [token[0], token[1]] : [token, token];
                 return p0 === pair[0] && p1 === pair[1];
             });
         };
@@ -885,11 +901,10 @@ button.small { padding:3px 10px; font-size:12px; }
       <input id="segHard" type="text" placeholder="。！？!?…">
       <label>软分隔符（逗号类，仅超长时二次切分）</label>
       <input id="segSoft" type="text" placeholder="，,；;">
-      <label>配对符（成对内容保持完整，如 *动作* / "台词"）</label>
-      <div class="row">
-        <input id="segPair1" type="text" placeholder="*" style="max-width:70px">
-        <input id="segPair2" type="text" placeholder="&quot;" style="max-width:70px">
-        <input id="segPair3" type="text" placeholder="“”" style="max-width:70px">
+      <label>配对符列表（成对内容保持完整，并独立成段）</label>
+      <div id="pairList"></div>
+      <div class="row" style="margin-top:6px">
+        <button id="addPair" class="small">+ 添加配对符</button>
       </div>
       <label class="checkbox_label" style="margin-top:8px">
         <input id="segSplitOnPairs" type="checkbox"> 配对符内容作为独立消息分段
@@ -1092,10 +1107,99 @@ $('#saveGlobalPipeline').onclick = async () => {
 };
 
 // ===== 分段设置 =====
+// ===== 配对符预设（符号组合） =====
+const PAIR_PRESETS = [
+  { label: '星号（*动作*）',       open: '*',  close: '*' },
+  { label: '双引号（"台词"）',      open: '"',  close: '"' },
+  { label: '中文双引号（“台词”）',  open: '\u201c', close: '\u201d' },
+  { label: '单引号（' + "'" + '台词' + "'" + '）',  open: "'",  close: "'" },
+  { label: '中文单引号（‘台词’）',  open: '\u2018', close: '\u2019' },
+  { label: '圆括号（（动作））',    open: '（', close: '）' },
+  { label: '半角圆括号（(动作)）',  open: '(',  close: ')' },
+  { label: '方括号（[动作]）',     open: '[',  close: ']' },
+  { label: '方头括号（【动作】）',  open: '【', close: '】' },
+  { label: '书名号（《标题》）',    open: '《', close: '》' },
+  { label: '双书名号（〈标题〉）',  open: '〈', close: '〉' },
+  { label: '尖括号（<动作>）',     open: '<',  close: '>' },
+  { label: '花括号（{动作}）',     open: '{',  close: '}' },
+  { label: '波浪号（~动作~）',     open: '~',  close: '~' },
+  { label: '竖线（|动作|）',       open: '|',  close: '|' },
+  { label: '下划线（_动作_）',     open: '_',  close: '_' },
+  { label: '自定义',               open: '',   close: '' },
+];
+
+/** 生成一行配对符编辑器 */
+function pairRow(item, index) {
+  const div = document.createElement('div');
+  div.className = 'kv pair-item';
+  div.style.marginBottom = '5px';
+
+  const name = Array.isArray(item) ? (item[0] ?? '') : '';
+  const token = Array.isArray(item) ? (item[1] ?? '') : (item ?? '');
+
+  // 匹配预设
+  const matched = PAIR_PRESETS.find((p) => p.open && (p.open + p.close) === token);
+  const presetValue = matched ? (matched.open + matched.close) : (token ? 'custom' : PAIR_PRESETS[0].open + PAIR_PRESETS[0].close);
+
+  const opts = PAIR_PRESETS.map((p) => {
+    const v = p.open ? (p.open + p.close) : 'custom';
+    const sel = v === presetValue ? ' selected' : '';
+    return '<option value="' + v.replace(/"/g, '&quot;') + '"' + sel + '>' + p.label + '</option>';
+  }).join('');
+
+  const rows = [
+    '<input class="p-name" placeholder="名称" value="' + escapeAttr(name) + '" style="max-width:80px">',
+    '<select class="p-preset" style="flex:1">' + opts + '</select>',
+    '<input class="p-custom" placeholder="自定义符号" value="' + escapeAttr(presetValue === 'custom' ? token : '') + '"',
+    '       style="max-width:' + (presetValue === 'custom' ? '110px' : '0') + ';display:' + (presetValue === 'custom' ? 'inline-block' : 'none') + '">',
+    '<button class="small danger p-del">×</button>',
+  ];
+  div.innerHTML = rows.join('');
+
+  const presetSel = div.querySelector('.p-preset');
+  const customInput = div.querySelector('.p-custom');
+  presetSel.onchange = () => {
+    const v = presetSel.value;
+    const isCustom = v === 'custom';
+    customInput.style.display = isCustom ? 'inline-block' : 'none';
+    customInput.style.maxWidth = isCustom ? '110px' : '0';
+  };
+  div.querySelectorAll('input').forEach((el) => { el.onchange = () => {}; });
+  div.querySelector('.p-del').onclick = () => {
+    div.remove();
+  };
+  return div;
+}
+
+/** 读取配对符列表 */
+function readPairs() {
+  const out = [];
+  document.querySelectorAll('#pairList .pair-item').forEach((div) => {
+    const name = div.querySelector('.p-name').value.trim();
+    const preset = div.querySelector('.p-preset').value;
+    const custom = div.querySelector('.p-custom').value;
+    const token = preset === 'custom' ? custom : preset;
+    if (!token) return;
+    // 统一为 [名称, 符号] 结构，名称为空时用符号本身
+    out.push([name || token, token]);
+  });
+  return out;
+}
+
+/** 渲染配对符列表 */
+function renderPairs(pairs) {
+  const box = document.querySelector('#pairList');
+  if (!box) return;
+  box.innerHTML = '';
+  const list = Array.isArray(pairs) && pairs.length ? pairs : [
+    ['动作', '*'],
+    ['台词', '"'],
+  ];
+  list.forEach((p, i) => box.appendChild(pairRow(p, i)));
+}
+
 function readSegConfig() {
-  const pairs = [$('#segPair1').value, $('#segPair2').value, $('#segPair3').value]
-    .map((v) => v ?? '')
-    .filter((v) => v.length > 0);
+  const pairs = readPairs();
   const splitStrings = ($('#segSplitStrings').val() ?? '')
     .split('\\n')
     .map((l) => l.trim())
@@ -1117,6 +1221,11 @@ function readSegConfig() {
     ],
   };
 }
+
+$('#addPair').onclick = () => {
+  const box = document.querySelector('#pairList');
+  box.appendChild(pairRow(['', '*'], box.children.length));
+};
 
 $('#saveSeg').onclick = async () => {
   await api('/config', { segmentation: readSegConfig() });
@@ -1382,10 +1491,7 @@ async function refresh() {  const s = await api('/status');
     $('#segDelayMax').val(seg.delayMs?.[1] ?? 900);
     $('#segHard').val(seg.hardChars ?? '。！？!?…');
     $('#segSoft').val(seg.softChars ?? '，,；;');
-    const pc = seg.pairChars ?? ['*', '"', '“”'];
-    $('#segPair1').val(pc[0] ?? '');
-    $('#segPair2').val(pc[1] ?? '');
-    $('#segPair3').val(pc[2] ?? '');
+    renderPairs(seg.pairChars ?? [['动作', '*'], ['台词', '"']]);
     $('#segSplitOnPairs').prop('checked', seg.splitOnPairs !== false);
     $('#segSplitStrings').val((seg.splitStrings ?? []).join('\\n'));
     const img = s.config.imageReplies ?? {};
