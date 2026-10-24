@@ -488,7 +488,16 @@ wss.on('connection', (socket) => {
                 }
             }
             const route = sessionRoutes.get(key);
-            const processed = applyReplyProcessors(msg.text, cfg.replyProcessors);
+            // 三层策略：会话级独立配置 > 全局默认
+            //   sessions[key].replyProcessors === undefined/null → 继承全局
+            //   sessions[key].replyProcessors 为数组（含 []）      → 该会话独立使用
+            const sessionRules = sessions[key]?.replyProcessors;
+            const rules = Array.isArray(sessionRules)
+                ? sessionRules
+                : (cfg.replyProcessors ?? []);
+            const source = Array.isArray(sessionRules) ? '会话级' : '全局';
+            if (rules.length) log(`处理管道来源: ${source} (${rules.length} 条规则)`);
+            const processed = applyReplyProcessors(msg.text, rules);
             if (!processed) { log('回复经规则处理后为空，不发送'); return; }
             sendQQ({ ...route, text: processed, sessionKey: key });
         } else if (msg.type === 'command_reply') {
@@ -585,29 +594,15 @@ button.small { padding:3px 10px; font-size:12px; }
 <main>
   <section>
     <div class="card">
-      <h2>回复处理管道（按顺序执行）</h2>
-      <div id="rules"></div>
-      <div class="row" style="margin-top:10px">
-        <button id="addRule">+ 添加规则</button>
-        <button id="testPipeline">测试管道（输入样例）</button>
-      </div>
-      <div id="testArea" style="display:none; margin-top:10px">
-        <label>样例文本（AI 原始回复）</label>
-        <input id="testInput" value="*她微微一笑* 你好呀！[CQ:face] 今天天气不错。">
-        <label>处理结果</label>
-        <input id="testOutput" readonly>
-      </div>
-    </div>
-
-    <div class="card">
       <h2>会话</h2>
       <div id="sessions"><span class="stat">暂无会话</span></div>
     </div>
 
     <div class="card">
-      <h2>会话级角色 / 世界书</h2>
+      <h2>会话级配置</h2>
       <div class="hint" style="margin-bottom:8px">
-        每个 QQ 号可绑定独立的角色与世界书，互不干扰。世界书绑定在酒馆聊天文件里（chat-bound），随聊天持久化。
+        每个 QQ 号可独立设置角色、世界书、回复处理管道。<br>
+        管道留空 = 继承「全局默认管道」；点了「独立配置」则只用自己的规则。
       </div>
       <div id="sessionChoices"></div>
     </div>
@@ -653,6 +648,25 @@ button.small { padding:3px 10px; font-size:12px; }
         <button id="refreshCatalog" class="small">刷新清单</button>
       </div>
       <div class="hint" id="catalogInfo"></div>
+    </div>
+
+    <div class="card">
+      <h2>全局默认回复管道</h2>
+      <div class="hint" style="margin-bottom:8px">
+        所有「未单独配置管道」的会话都会使用这里的规则。按顺序执行。
+      </div>
+      <div id="rules"></div>
+      <div class="row" style="margin-top:10px">
+        <button id="addRule">+ 添加规则</button>
+        <button id="testPipeline">测试管道</button>
+      </div>
+      <div id="testArea" style="display:none; margin-top:10px">
+        <label>样例文本（AI 原始回复）</label>
+        <input id="testInput" value="*她微微一笑* 你好呀！[CQ:face] 今天天气不错。">
+        <label>处理结果</label>
+        <input id="testOutput" readonly>
+      </div>
+      <div style="margin-top:12px"><button id="saveGlobalPipeline">保存全局管道</button></div>
     </div>
 
     <div class="card">
@@ -847,6 +861,13 @@ $('#saveDefaults').onclick = async () => {
   toast('默认角色/世界书已保存');
 };
 
+// ===== 全局默认管道 =====
+$('#saveGlobalPipeline').onclick = async () => {
+  const rules = collectRules();
+  await api('/config', { replyProcessors: rules });
+  toast('全局默认管道已保存（' + rules.length + ' 条规则）');
+};
+
 // ===== 分段设置 =====
 $('#saveSeg').onclick = async () => {
   const seg = {
@@ -874,48 +895,71 @@ $('#saveImg').onclick = async () => {
   toast('图片设置已保存');
 };
 
-// ===== 会话级角色/世界书编辑面板 =====
+// ===== 会话级配置面板（角色 / 世界书 / 独立管道） =====
 function renderSessionChoices(s) {
   const box = $('#sessionChoices');
   if (!box) return;
+
   const choices = s.sessionChoices ?? {};
   const keys = Object.keys(choices);
   const chars = s.catalogs?.characters ?? [];
   const worlds = s.catalogs?.worlds ?? [];
   const dflt = s.config?.defaults ?? {};
+  const globalRules = s.config?.replyProcessors ?? [];
 
   if (!keys.length) {
     box.innerHTML = '<span class="stat">还没有会话记录（QQ 发过消息后自动出现）</span>';
     return;
   }
 
-  // 避免每 2 秒重绘打断用户操作
+  // 避免每 2 秒重绘打断用户正在操作的输入
   const focused = document.activeElement;
-  if (box.contains(focused) && focused.tagName === 'SELECT') return;
+  if (box.contains(focused) && ['SELECT', 'INPUT'].includes(focused.tagName)) return;
+
+  const modeOf = (c) => (Array.isArray(c.replyProcessors) ? 'custom' : 'inherit');
 
   box.innerHTML = keys.map((k) => {
     const c = choices[k] ?? {};
+    const mode = modeOf(c);
     const charOpts = ['<option value="">（用默认）</option>']
       .concat(chars.map((n) => '<option value="' + n + '"' + (c.character === n ? ' selected' : '') + '>' + n + '</option>'))
       .join('');
     const worldOpts = ['<option value="">（用默认）</option>']
       .concat(worlds.map((n) => '<option value="' + n + '"' + (c.world === n ? ' selected' : '') + '>' + n + '</option>'))
       .join('');
+
+    const rules = Array.isArray(c.replyProcessors) ? c.replyProcessors : [];
     const rows = [
-      '      <div class="rule" data-key="' + k + '">',
-      '        <div class="head"><span class="tag">' + k + '</span>',
-      '          <button class="small danger s-del">清除</button>',
-      '        </div>',
-      '        <div class="kv"><span style="font-size:12px;width:56px">角色</span><select class="s-char" style="flex:1">' + charOpts + '</select></div>',
-      '        <div class="kv"><span style="font-size:12px;width:56px">世界书</span><select class="s-world" style="flex:1">' + worldOpts + '</select></div>',
-      '        <div class="hint">默认: 角色 ' + (dflt.character || '(未设)') + ' / 世界书 ' + (dflt.world || '(未设)') + '</div>',
-      '      </div>',
+      '<div class="rule" data-key="' + k + '">',
+      '  <div class="head"><span class="tag">' + k + '</span>',
+      '    <button class="small danger s-del">清除配置</button></div>',
+      '  <div class="kv"><span style="font-size:12px;width:56px">角色</span><select class="s-char" style="flex:1">' + charOpts + '</select></div>',
+      '  <div class="kv"><span style="font-size:12px;width:56px">世界书</span><select class="s-world" style="flex:1">' + worldOpts + '</select></div>',
+      '  <div class="kv" style="margin-top:8px"><span style="font-size:12px;width:56px">管道</span>',
+      '    <select class="s-mode" style="flex:1">',
+      '      <option value="inherit"' + (mode === 'inherit' ? ' selected' : '') + '>继承全局（' + globalRules.length + ' 条规则）</option>',
+      '      <option value="custom"' + (mode === 'custom' ? ' selected' : '') + '>独立配置</option>',
+      '    </select></div>',
+      '  <div class="s-rules" style="display:' + (mode === 'custom' ? 'block' : 'none') + ';margin-top:8px">',
+      '    <div class="s-rule-list"></div>',
+      '    <button class="small s-add-rule" style="margin-top:6px">+ 添加规则</button>',
+      '  </div>',
+      '  <div class="hint">默认: 角色 ' + (dflt.character || '(未设)') + ' / 世界书 ' + (dflt.world || '(未设)') + '</div>',
+      '</div>',
     ];
-    return rows.join('\\n');
+    const html = rows.join('\\n');
+
+    // 用占位符承载规则，渲染后由 JS 挂载规则编辑器
+    return html.replace(
+      '<div class="s-rule-list"></div>',
+      '<div class="s-rule-list" data-rules="' + encodeURIComponent(JSON.stringify(rules)) + '"></div>',
+    );
   }).join('');
 
+  // ---- 绑定事件 ----
   box.querySelectorAll('.rule').forEach((div) => {
     const key = div.dataset.key;
+
     div.querySelector('.s-char').onchange = async (e) => {
       await api('/session-choice', { sessionKey: key, character: e.target.value });
       toast('已保存 ' + key + ' 的角色');
@@ -926,9 +970,119 @@ function renderSessionChoices(s) {
     };
     div.querySelector('.s-del').onclick = async () => {
       await api('/session-choice', { sessionKey: key, reset: true });
-      toast('已清除 ' + key + ' 的绑定');
+      toast('已清除 ' + key + ' 的全部配置');
     };
+
+    const modeSel = div.querySelector('.s-mode');
+    const rulesBox = div.querySelector('.s-rules');
+    const listEl = div.querySelector('.s-rule-list');
+    let rules = [];
+    try {
+      rules = JSON.parse(decodeURIComponent(listEl.dataset.rules || '%5B%5D'));
+    } catch { rules = []; }
+
+    const mountRules = () => {
+      listEl.innerHTML = '';
+      rules.forEach((r, i) => listEl.appendChild(makeRuleEditor(r, i, () => persist())));
+      if (!rules.length) {
+        listEl.innerHTML = '<div class="hint" style="opacity:.6">暂无规则（空管道 = 原文直出）</div>';
+      }
+    };
+
+    const persist = async () => {
+      rules = [...listEl.querySelectorAll('.s-rule-item')].map(collectOneRule).filter(Boolean);
+      await api('/session-choice', { sessionKey: key, replyProcessors: rules });
+    };
+
+    modeSel.onchange = async () => {
+      const m = modeSel.value;
+      rulesBox.style.display = m === 'custom' ? 'block' : 'none';
+      if (m === 'custom') {
+        if (!rules.length) rules = [];
+        mountRules();
+        await api('/session-choice', { sessionKey: key, replyProcessors: rules });
+        toast(key + '：已切换为独立管道');
+      } else {
+        await api('/session-choice', { sessionKey: key, reset: 'pipeline' });
+        toast(key + '：已恢复继承全局管道');
+      }
+    };
+
+    div.querySelector('.s-add-rule').onclick = async () => {
+      rules.push({ type: 'replace', pattern: '', flags: 'g', replacement: '', enabled: true });
+      mountRules();
+      await persist();
+    };
+
+    if (mode === 'custom') mountRules();
   });
+}
+
+/** 单条规则的编辑器（会话级用，紧凑版） */
+function makeRuleEditor(rule, index, onChange) {
+  const div = document.createElement('div');
+  div.className = 'rule s-rule-item';
+  div.style.marginBottom = '6px';
+  div.dataset.type = rule.type ?? 'replace';
+
+  const typeOpts = ['replace', 'remove', 'strip']
+    .map((t) => '<option value="' + t + '"' + (rule.type === t ? ' selected' : '') + '>' + t + '</option>')
+    .join('');
+
+  const rows = [
+    '<div class="head"><span style="display:flex;gap:6px;align-items:center">',
+    '  <label style="margin:0;font-size:11px">启用 <input class="r-enabled" type="checkbox"' + (rule.enabled === false ? '' : ' checked') + ' style="vertical-align:middle"></label>',
+    '  <select class="r-type" style="background:#0d1220;color:#9ec1ff;border:none">' + typeOpts + '</select>',
+    '</span><button class="small danger r-del">×</button></div>',
+    '<div class="kv r-regex"><input class="r-pattern" placeholder="正则" value="' + escapeAttr(rule.pattern ?? '') + '">',
+    '  <input class="r-flags" placeholder="flags" value="' + escapeAttr(rule.flags ?? 'g') + '" style="max-width:60px">',
+    '  <input class="r-replacement" placeholder="替换为" value="' + escapeAttr(rule.replacement ?? '') + '"></div>',
+    '<div class="kv r-strip" style="display:none"><input class="r-begin" placeholder="开始" value="' + escapeAttr(rule.begin ?? '') + '">',
+    '  <input class="r-end" placeholder="结束" value="' + escapeAttr(rule.end ?? '') + '">',
+    '  <label style="margin:0;flex-shrink:0;font-size:11px">保留内容 <input class="r-keep" type="checkbox"' + (rule.keep === true ? ' checked' : '') + '></label></div>',
+  ];
+  div.innerHTML = rows.join('\\n');
+
+  const sync = () => {
+    const t = div.querySelector('.r-type').value;
+    div.dataset.type = t;
+    div.querySelector('.r-regex').style.display = t === 'strip' ? 'none' : 'flex';
+    div.querySelector('.r-strip').style.display = t === 'strip' ? 'flex' : 'none';
+    div.style.opacity = div.querySelector('.r-enabled').checked ? '1' : '.5';
+  };
+  div.querySelector('.r-type').onchange = () => { sync(); onChange(); };
+  div.querySelector('.r-enabled').onchange = () => { sync(); onChange(); };
+  div.querySelectorAll('input').forEach((el) => { el.onchange = onChange; });
+  div.querySelector('.r-del').onclick = () => {
+    div.remove();
+    onChange();
+  };
+  sync();
+  return div;
+}
+
+function collectOneRule(div) {
+  const type = div.querySelector('.r-type').value;
+  const enabled = div.querySelector('.r-enabled').checked;
+  if (type === 'strip') {
+    const begin = div.querySelector('.r-begin').value;
+    const end = div.querySelector('.r-end').value;
+    if (!begin || !end) return null;
+    return { type, enabled, begin, end, keep: div.querySelector('.r-keep').checked };
+  }
+  const pattern = div.querySelector('.r-pattern').value;
+  if (!pattern) return null;
+  return {
+    type,
+    enabled,
+    pattern,
+    flags: div.querySelector('.r-flags').value || 'g',
+    replacement: div.querySelector('.r-replacement').value,
+  };
+}
+
+function escapeAttr(v) {
+  return String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
 async function refresh() {  const s = await api('/status');
@@ -1028,15 +1182,23 @@ const consoleServer = http.createServer((req, res) => {
         req.on('data', (c) => (body += c));
         req.on('end', () => {
             try {
-                const { sessionKey, character, world, reset } = JSON.parse(body);
+                const { sessionKey, character, world, replyProcessors, reset } = JSON.parse(body);
                 if (!sessionKey) throw new Error('sessionKey required');
-                if (reset) {
+                if (reset === 'pipeline') {
+                    // 只清除管道配置，恢复继承全局
+                    if (sessions[sessionKey]) {
+                        delete sessions[sessionKey].replyProcessors;
+                        sessions[sessionKey].updatedAt = new Date().toISOString();
+                        saveSessions();
+                    }
+                } else if (reset) {
                     delete sessions[sessionKey];
                     saveSessions();
                 } else {
                     rememberSession(sessionKey, {
                         ...(character !== undefined ? { character } : {}),
                         ...(world !== undefined ? { world } : {}),
+                        ...(replyProcessors !== undefined ? { replyProcessors } : {}),
                     });
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
