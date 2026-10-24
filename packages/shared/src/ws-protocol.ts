@@ -60,6 +60,8 @@ export interface SegmentationConfig {
     pairChars: PairDelimiter[];
     splitStrings: string[];
     splitOnPairs: boolean;
+    /** 配对符内容短于该长度时不作为独立分段（0 = 不限制） */
+    pairMinLen: number;
     convertActionMarkers: boolean;
     delayMs: [min: number, max: number];
 }

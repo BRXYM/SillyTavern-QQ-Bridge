@@ -18,6 +18,8 @@ export const segmentationSchema = z.object({
     ]),
     splitStrings: z.array(z.string()).default([]),
     splitOnPairs: z.boolean().default(true),
+    /** 配对符内容短于该长度时不作为独立分段（避免 "菜" 这种单字引用被拆开） */
+    pairMinLen: z.number().int().min(0).max(50).default(3),
     convertActionMarkers: z.boolean().default(true),
     delayMs: z.tuple([z.number().int().min(0), z.number().int().min(0)]).default([300, 900]),
 });

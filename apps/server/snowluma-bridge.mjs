@@ -248,6 +248,7 @@ function segmentText(text, opts = {}) {
         pairChars = ['*', '"', '\u201c\u201d'],
         splitStrings = [],
         splitOnPairs = true,      // 配对符本身是否作为分段边界
+        pairMinLen = 3,           // 配对符内容短于该长度时不独立成段（0=不限制）
         delayMs = [300, 900],
         keepDelimiter = true,
     } = opts;
@@ -280,10 +281,18 @@ function segmentText(text, opts = {}) {
     // 统一用占位符标记配对段落
     const pairSegments = [];
     let work = trimmed;
+    // 配对符「内容」的最小长度：内容过短时不独立成段。
+    // 例如 AI 强调单字 `"菜"`，不应被切成单独一条消息。
+    const minPairContent = Math.max(0, pairMinLen ?? 3);
     for (const [open, close] of pairs) {
         const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const re = new RegExp(esc(open) + '[^' + esc(open) + esc(close) + ']*?' + esc(close), 'g');
         work = work.replace(re, (m) => {
+            const contentLen = Math.max(0, m.length - open.length - close.length);
+            if (minPairContent > 0 && contentLen < minPairContent) {
+                // 太短：不占位保护，原样参与正常切分与合并
+                return m;
+            }
             const idx = pairSegments.length;
             pairSegments.push(m);
             return `\u0000P${idx}\u0000`;

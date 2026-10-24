@@ -22,6 +22,7 @@ export const DEFAULT_SEGMENTATION: SegmentationConfig = {
     ],
     splitStrings: [],
     splitOnPairs: true,
+    pairMinLen: 3,
     convertActionMarkers: true,
     delayMs: [300, 900],
 };
@@ -72,6 +73,7 @@ export function segmentText(
         pairChars,
         splitStrings,
         splitOnPairs,
+        pairMinLen,
         convertActionMarkers: convertMarkers,
         delayMs,
     } = cfg;
@@ -85,6 +87,11 @@ export function segmentText(
     const pairSegments: string[] = [];
     let work = trimmed;
 
+    // 配对符「内容」的最小长度：内容短于该值时不作为独立分段。
+    // 例如 AI 强调某个字 `"菜"`，内容仅 1 字，不应被切成单独一条消息。
+    // 传入 0 或负数表示不限制（保持旧行为）。
+    const minPairContent = Math.max(0, pairMinLen ?? 3);
+
     for (const [open, close] of pairs) {
         const esc = (c: string) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const re = new RegExp(
@@ -92,6 +99,12 @@ export function segmentText(
             'g',
         );
         work = work.replace(re, (m) => {
+            // 内容长度 = 去掉首尾配对符后的长度
+            const contentLen = Math.max(0, m.length - open.length - close.length);
+            if (minPairContent > 0 && contentLen < minPairContent) {
+                // 太短：不做占位保护，原样留在文本里参与正常切分/合并
+                return m;
+            }
             const idx = pairSegments.length;
             pairSegments.push(m);
             return `\u0000P${idx}\u0000`;

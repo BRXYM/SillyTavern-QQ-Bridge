@@ -22,6 +22,7 @@ const maxSegments = ref(8);
 const hardChars = ref('。！？!?…');
 const softChars = ref('，,；;');
 const splitOnPairs = ref(true);
+const pairMinLen = ref(3);
 const convertMarkers = ref(true);
 const delayMin = ref(300);
 const delayMax = ref(900);
@@ -53,10 +54,49 @@ const testText = ref('*她抬起头，眼睛里闪着光。* "你来啦！我等
 const preview = ref<Array<{ text: string; delayMs: number }>>([]);
 const previewError = ref('');
 
-onMounted(() => {
-    void store.refresh();
+onMounted(async () => {
+    await store.refresh();
+    loadFromStore();
     void runPreview();
 });
+
+/** 从后端状态回填已保存的分段配置 */
+function loadFromStore() {
+    const raw = (store.status?.config?.['segmentation'] ?? {}) as Record<string, unknown>;
+    if (!raw || Object.keys(raw).length === 0) return;
+
+    if (typeof raw.enabled === 'boolean') enabled.value = raw.enabled;
+    if (typeof raw.maxLen === 'number') maxLen.value = raw.maxLen;
+    if (typeof raw.minLen === 'number') minLen.value = raw.minLen;
+    if (typeof raw.maxSegments === 'number') maxSegments.value = raw.maxSegments;
+    if (typeof raw.hardChars === 'string') hardChars.value = raw.hardChars;
+    if (typeof raw.softChars === 'string') softChars.value = raw.softChars;
+    if (typeof raw.splitOnPairs === 'boolean') splitOnPairs.value = raw.splitOnPairs;
+    // 后端未配置时按 DEFAULT 的 3 处理
+    pairMinLen.value = typeof raw.pairMinLen === 'number' ? raw.pairMinLen : 3;
+    if (typeof raw.convertActionMarkers === 'boolean') convertMarkers.value = raw.convertActionMarkers;
+
+    if (Array.isArray(raw.delayMs) && raw.delayMs.length >= 2) {
+        delayMin.value = Number(raw.delayMs[0]) || 0;
+        delayMax.value = Number(raw.delayMs[1]) || 0;
+    }
+
+    if (Array.isArray(raw.pairChars)) {
+        const next: Pair[] = [];
+        for (const item of raw.pairChars as unknown[]) {
+            if (Array.isArray(item) && typeof item[1] === 'string') {
+                next.push({ name: String(item[0] ?? item[1]), token: item[1] });
+            }
+        }
+        if (next.length) pairs.value = next;
+    }
+
+    if (Array.isArray(raw.splitStrings)) {
+        splitStrings.value = (raw.splitStrings as unknown[])
+            .filter((s): s is string => typeof s === 'string')
+            .join('\n');
+    }
+}
 
 function currentConfig() {
     return {
@@ -69,6 +109,7 @@ function currentConfig() {
         pairChars: pairs.value.map((p) => [p.name || p.token, p.token]),
         splitStrings: splitStrings.value.split('\n').map((s) => s.trim()).filter(Boolean),
         splitOnPairs: splitOnPairs.value,
+        pairMinLen: pairMinLen.value,
         convertActionMarkers: convertMarkers.value,
         delayMs: [delayMin.value, delayMax.value],
     };
@@ -184,6 +225,27 @@ const totalChars = computed(() => preview.value.reduce((n, s) => n + s.text.leng
                         <Plus class="size-4" />
                         添加配对符
                     </UiButton>
+                </div>
+
+                <div class="border-t border-border/40 px-5 py-4">
+                    <div class="flex items-center gap-4">
+                        <div class="min-w-0 flex-1">
+                            <label class="text-xs font-medium text-muted-foreground">忽略长度</label>
+                            <p class="mt-1 text-xs leading-relaxed text-muted-foreground/80">
+                                配对符内少于该字数时不单独成段，避免
+                                <code class="font-mono text-primary">"菜"</code>
+                                这类单字强调被拆开；设为 0 关闭限制
+                            </p>
+                        </div>
+                        <div class="w-20 shrink-0">
+                            <UiInput
+                                v-model.number="pairMinLen"
+                                type="number"
+                                min="0"
+                                max="50"
+                            />
+                        </div>
+                    </div>
                 </div>
 
                 <div class="border-t border-border/40 px-5 py-4">

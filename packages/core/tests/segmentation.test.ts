@@ -66,7 +66,10 @@ describe('segmentText', () => {
     });
 
     it('限制条数时不破坏配对块', () => {
-        const text = '*a* *b* *c* *d* 句子一。句子二。句子三。';
+        // 用内容足够长的配对块（≥ pairMinLen），确保它们被独立保留
+        const text =
+            '*她轻轻抬起头看向窗外。*句子一。句子二。' +
+            '*她叹了口气放下手中的书。*句子三。';
         const r = segmentText(text, cfg({ maxSegments: 4, convertActionMarkers: false }));
         expect(r.length).toBeLessThanOrEqual(4);
         // 至少有一个配对块完整保留
@@ -100,5 +103,50 @@ describe('segmentText', () => {
         const text = '（她笑了笑）你好呀。';
         const r = segmentText(text, cfg({ convertActionMarkers: false }));
         expect(r[0]!.text).toBe('（她笑了笑）');
+    });
+});
+
+describe('pairMinLen（配对符忽略长度）', () => {
+    it('单字引用不被拆成独立段', () => {
+        const text = '你真"菜"。我可不这么认为。';
+        const r = segmentText(text, cfg({ convertActionMarkers: false, pairMinLen: 3 }));
+        // "菜" 内容仅 1 字 < 3，应与前后文粘在一起，而不是单独一条
+        expect(r.some((s) => s.text.trim() === '"菜"')).toBe(false);
+        expect(r.some((s) => s.text.includes('你真"菜"'))).toBe(true);
+    });
+
+    it('两字引用同样不独立成段', () => {
+        const text = '他说"不行"。然后就走了。';
+        const r = segmentText(text, cfg({ convertActionMarkers: false, pairMinLen: 3 }));
+        expect(r.some((s) => s.text.trim() === '"不行"')).toBe(false);
+    });
+
+    it('达到阈值的配对符仍独立成段', () => {
+        const text = '*她抬起头。*你好呀。';
+        const r = segmentText(text, cfg({ convertActionMarkers: false, pairMinLen: 3 }));
+        // 内容 "她抬起头。" 共 5 字 ≥ 3，保持独立
+        expect(r.some((s) => s.text.includes('她抬起头'))).toBe(true);
+    });
+
+    it('pairMinLen=0 时关闭限制，单字也会独立成段', () => {
+        const text = '你真"菜"。我可不这么认为。';
+        const r = segmentText(text, cfg({ convertActionMarkers: false, pairMinLen: 0 }));
+        expect(r.some((s) => s.text.trim() === '"菜"')).toBe(true);
+    });
+
+    it('星号单字动作不独立成段', () => {
+        const text = '*笑* 你好呀。';
+        const r = segmentText(text, cfg({ convertActionMarkers: false, pairMinLen: 3 }));
+        expect(r.some((s) => s.text.trim() === '*笑*')).toBe(false);
+    });
+
+    it('中文引号单字同样受保护', () => {
+        const text = '他喊了一声“滚”。现场安静了。';
+        const r = segmentText(text, cfg({ convertActionMarkers: false, pairMinLen: 3 }));
+        expect(r.some((s) => s.text.trim() === '“滚”')).toBe(false);
+    });
+
+    it('默认配置的 pairMinLen 为 3', () => {
+        expect(DEFAULT_SEGMENTATION.pairMinLen).toBe(3);
     });
 });
