@@ -1205,6 +1205,30 @@ function renderPairs(pairs) {
   list.forEach((p, i) => box.appendChild(pairRow(p, i)));
 }
 
+/** 回填分段/图片配置（幂等，可重复调用） */
+function applySegConfig(seg, img) {
+  try {
+    $('#segEnabled').prop('checked', seg.enabled !== false);
+    $('#segMaxLen').val(seg.maxLen ?? 100);
+    $('#segMaxSeg').val(seg.maxSegments ?? 8);
+    $('#segDelayMin').val(seg.delayMs?.[0] ?? 300);
+    $('#segDelayMax').val(seg.delayMs?.[1] ?? 900);
+    $('#segHard').val(seg.hardChars ?? '。！？!?…');
+    $('#segSoft').val(seg.softChars ?? '，,；;');
+    renderPairs(seg.pairChars ?? [['动作', '*'], ['台词', '"']]);
+    $('#segSplitOnPairs').prop('checked', seg.splitOnPairs !== false);
+    $('#segSplitStrings').val((seg.splitStrings ?? []).join('\\n'));
+
+    $('#imgEnabled').prop('checked', img.enabled !== false);
+    $('#imgBaseUrl').val(img.baseUrl ?? '');
+
+    state.segFilled = true;
+    console.log('[applySegConfig] 已回填分段配置');
+  } catch (e) {
+    console.error('[applySegConfig] 失败:', e.message);
+  }
+}
+
 function readSegConfig() {
   const pairs = readPairs();
   const splitStrings = ($('#segSplitStrings').val() ?? '')
@@ -1481,7 +1505,8 @@ function escapeAttr(v) {
   return String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
-async function refresh() {  const s = await api('/status');
+async function refresh() {
+  const s = await api('/status');
   $('#obStatus').textContent = '上游: ' + (s.onebotConnected ? '已连接' : '未连接');
   $('#obStatus').style.color = s.onebotConnected ? '#7fe0a0' : '#ff8a9a';
   $('#stStatus').textContent = '下游: ' + (s.stClients > 0 ? \`已接入(\${s.stClients})\` : '未接入');
@@ -1511,20 +1536,11 @@ async function refresh() {  const s = await api('/status');
     renderRules(s.config.replyProcessors ?? []);
     state.defaultCharacter = s.config.defaults?.character ?? '';
     state.defaultWorld = s.config.defaults?.world ?? '';
-    const seg = s.config.segmentation ?? {};
-    $('#segEnabled').prop('checked', seg.enabled !== false);
-    $('#segMaxLen').val(seg.maxLen ?? 120);
-    $('#segMaxSeg').val(seg.maxSegments ?? 4);
-    $('#segDelayMin').val(seg.delayMs?.[0] ?? 300);
-    $('#segDelayMax').val(seg.delayMs?.[1] ?? 900);
-    $('#segHard').val(seg.hardChars ?? '。！？!?…');
-    $('#segSoft').val(seg.softChars ?? '，,；;');
-    renderPairs(seg.pairChars ?? [['动作', '*'], ['台词', '"']]);
-    $('#segSplitOnPairs').prop('checked', seg.splitOnPairs !== false);
-    $('#segSplitStrings').val((seg.splitStrings ?? []).join('\\n'));
-    const img = s.config.imageReplies ?? {};
-    $('#imgEnabled').prop('checked', img.enabled !== false);
-    $('#imgBaseUrl').val(img.baseUrl ?? '');
+    applySegConfig(s.config.segmentation ?? {}, s.config.imageReplies ?? {});
+  }
+  // 兜底：若首次回填因异常未完成，后续刷新时补上（幂等）
+  if (!state.segFilled) {
+    applySegConfig(s.config.segmentation ?? {}, s.config.imageReplies ?? {});
   }
   // 每次刷新都同步清单（扩展上报后自动出现在下拉里，保留当前选中值）
   if (s.catalogs && (s.catalogs.characters?.length || s.catalogs.worlds?.length)) {
