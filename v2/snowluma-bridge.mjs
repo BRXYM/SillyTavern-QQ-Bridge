@@ -187,22 +187,160 @@ function callOnebot(action, params) {
     });
 }
 
+/**
+ * 按标点切分长文本，模拟真人聊天的多条短消息。
+ * 规则（可在 config.segmentation 调整）：
+ *   - 按 。！？!?… 分句
+ *   - 单段超过 maxLen 时按逗号二次切分
+ *   - 过短的片段合并（避免碎成单字）
+ */
+function segmentText(text, opts = {}) {
+    const {
+        enabled = true,
+        maxLen = 120,          // 单条最大字数
+        minLen = 8,            // 单条最小字数（低于则与下一条合并）
+        maxSegments = 4,       // 最多分几条（防止刷屏）
+        splitChars = '。！？!?…\n',
+        softChars = '，,；;',
+        delayMs = [300, 900],  // 每条之间的随机延迟
+    } = opts;
+
+    if (!enabled) return [{ text, delayMs: 0 }];
+
+    const trimmed = (text ?? '').trim();
+    if (!trimmed) return [];
+
+    // 1) 按硬标点切分（保留标点）
+    const hardRe = new RegExp(`([^${splitChars}]+[${splitChars}]*)`, 'g');
+    let parts = trimmed.match(hardRe) ?? [trimmed];
+    parts = parts.map((p) => p.trim()).filter(Boolean);
+
+    // 2) 超长片段按软标点二次切分
+    const expanded = [];
+    for (const p of parts) {
+        if (p.length <= maxLen) {
+            expanded.push(p);
+            continue;
+        }
+        const softRe = new RegExp(`([^${softChars}]+[${softChars}]*)`, 'g');
+        const subs = p.match(softRe) ?? [p];
+        let buf = '';
+        for (const sub of subs) {
+            if ((buf + sub).length > maxLen && buf) {
+                expanded.push(buf.trim());
+                buf = sub;
+            } else {
+                buf += sub;
+            }
+        }
+        if (buf.trim()) expanded.push(buf.trim());
+    }
+
+    // 3) 合并过短片段
+    const merged = [];
+    let acc = '';
+    for (const p of expanded) {
+        if (!acc) {
+            acc = p;
+        } else if (acc.length < minLen) {
+            acc += p;
+        } else {
+            merged.push(acc);
+            acc = p;
+        }
+    }
+    if (acc) merged.push(acc);
+
+    // 4) 限制条数：超出部分合并到最后一条
+    let result = merged;
+    if (result.length > maxSegments) {
+        const head = result.slice(0, maxSegments - 1);
+        const tail = result.slice(maxSegments - 1).join('');
+        result = [...head, tail];
+    }
+
+    // 5) 最终长度兜底
+    result = result.map((t) => (t.length > cfg.maxMessageLength
+        ? t.slice(0, cfg.maxMessageLength) + '…'
+        : t));
+
+    // 6) 附加随机延迟
+    const [dMin, dMax] = delayMs;
+    return result.map((t, i) => ({
+        text: t,
+        delayMs: i === 0 ? 0 : dMin + Math.floor(Math.random() * Math.max(1, dMax - dMin)),
+    }));
+}
+
+/** 发送一条消息（文本或消息段数组） */
+async function sendOne(msg, payload) {
+    const action = msg.message_type === 'group' ? 'send_group_msg' : 'send_private_msg';
+    const params = msg.message_type === 'group'
+        ? { group_id: msg.group_id, message: payload }
+        : { user_id: msg.user_id, message: payload };
+    await callOnebot(action, params);
+}
+
 async function sendQQ(msg) {
     const text = (msg.text ?? '').trim();
     if (!text) return;
-    const trimmed = text.length > cfg.maxMessageLength ? text.slice(0, cfg.maxMessageLength) + '…' : text;
-    const params = msg.message_type === 'group'
-        ? { group_id: msg.group_id, message: trimmed }
-        : { user_id: msg.user_id, message: trimmed };
+
     const target = msg.message_type === 'group' ? `群${msg.group_id}` : `私聊${msg.user_id}`;
+    const segments = segmentText(text, cfg.segmentation ?? {});
+
+    if (!segments.length) return;
+
     try {
-        await callOnebot(msg.message_type === 'group' ? 'send_group_msg' : 'send_private_msg', params);
+        for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i];
+            if (seg.delayMs > 0) {
+                await new Promise((r) => setTimeout(r, seg.delayMs));
+            }
+            // 检测消息里的图片标记，转成消息段
+            const payload = buildOutgoingPayload(seg.text);
+            await sendOne(msg, payload);
+            log(`分段 ${i + 1}/${segments.length} 已发往QQ → ${target} (${seg.text.length}字)`);
+        }
         const st = sessionStats.get(msg.sessionKey);
         if (st) st.out++;
-        log(`回复已发往QQ → ${target}`);
     } catch (e) {
         log(`QQ 发送失败(${target}):`, e.message);
     }
+}
+
+/**
+ * 把文本里的图片标记转成 OneBot 消息段。
+ * 支持形式：
+ *   [img:https://...]  [image:https://...]  [图片:https://...]
+ *   <img src="...">    （从酒馆 HTML 里抓）
+ */
+function buildOutgoingPayload(text) {
+    const imgRe = /\[(?:img|image|图片|表情)[:：]\s*([^\]\s]+)\s*\]/gi;
+    const imgSrcRe = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+
+    const found = [];
+    let m;
+    while ((m = imgRe.exec(text)) !== null) found.push({ index: m.index, url: m[1], len: m[0].length });
+    while ((m = imgSrcRe.exec(text)) !== null) found.push({ index: m.index, url: m[1], len: m[0].length });
+
+    if (!found.length) return text;   // 纯文本
+
+    found.sort((a, b) => a.index - b.index);
+
+    const segs = [];
+    let cursor = 0;
+    for (const f of found) {
+        if (f.index > cursor) {
+            const t = text.slice(cursor, f.index).trim();
+            if (t) segs.push({ type: 'text', data: { text: t } });
+        }
+        segs.push({ type: 'image', data: { file: f.url } });
+        cursor = f.index + f.len;
+    }
+    const tail = text.slice(cursor).trim();
+    if (tail) segs.push({ type: 'text', data: { text: tail } });
+
+    return segs;
 }
 
 function parseMessage(message) {
@@ -370,6 +508,7 @@ wss.on('connection', (socket) => {
                     type: 'session_state',
                     sessions,
                     defaults: cfg.defaults ?? {},
+                    imageReplies: cfg.imageReplies ?? {},
                 }));
                 // 主动索要角色/世界书清单（扩展可能还没加载完，随后会重试）
                 socket.send(JSON.stringify({ type: 'sync_request' }));
@@ -514,6 +653,33 @@ button.small { padding:3px 10px; font-size:12px; }
         <button id="refreshCatalog" class="small">刷新清单</button>
       </div>
       <div class="hint" id="catalogInfo"></div>
+    </div>
+
+    <div class="card">
+      <h2>回复分段</h2>
+      <div class="hint" style="margin-bottom:8px">按标点把长回复拆成多条短消息，更像真人聊天。</div>
+      <label class="checkbox_label"><input id="segEnabled" type="checkbox"> 启用分段发送</label>
+      <div class="row">
+        <div><label>单条最大字数</label><input id="segMaxLen" type="number" min="20"></div>
+        <div><label>最多分几条</label><input id="segMaxSeg" type="number" min="1" max="10"></div>
+      </div>
+      <div class="row">
+        <div><label>间隔最小(ms)</label><input id="segDelayMin" type="number" min="0"></div>
+        <div><label>间隔最大(ms)</label><input id="segDelayMax" type="number" min="0"></div>
+      </div>
+      <div style="margin-top:12px"><button id="saveSeg">保存分段设置</button></div>
+      <div class="hint" id="segPreview"></div>
+    </div>
+
+    <div class="card">
+      <h2>图片 / 表情包</h2>
+      <div class="hint" style="margin-bottom:8px">
+        AI 用 <code>[图片:URL]</code> 标记即可发表情包。首条消息会向酒馆注入使用说明。
+      </div>
+      <label class="checkbox_label"><input id="imgEnabled" type="checkbox"> 启用图片回复</label>
+      <label>图片库地址（可选，供 AI 引用）</label>
+      <input id="imgBaseUrl" type="text" placeholder="https://example.com/emojis/">
+      <div style="margin-top:12px"><button id="saveImg">保存图片设置</button></div>
     </div>
 
     <div class="card">
@@ -681,6 +847,33 @@ $('#saveDefaults').onclick = async () => {
   toast('默认角色/世界书已保存');
 };
 
+// ===== 分段设置 =====
+$('#saveSeg').onclick = async () => {
+  const seg = {
+    enabled: $('#segEnabled').checked,
+    maxLen: Number($('#segMaxLen').value) || 120,
+    maxSegments: Number($('#segMaxSeg').value) || 4,
+    delayMs: [
+      Number($('#segDelayMin').value) || 300,
+      Number($('#segDelayMax').value) || 900,
+    ],
+  };
+  await api('/config', { segmentation: seg });
+  toast('分段设置已保存');
+};
+
+// ===== 图片设置 =====
+$('#saveImg').onclick = async () => {
+  await api('/config', {
+    imageReplies: {
+      enabled: $('#imgEnabled').checked,
+      instruction: true,
+      baseUrl: $('#imgBaseUrl').value.trim(),
+    },
+  });
+  toast('图片设置已保存');
+};
+
 // ===== 会话级角色/世界书编辑面板 =====
 function renderSessionChoices(s) {
   const box = $('#sessionChoices');
@@ -768,6 +961,15 @@ async function refresh() {  const s = await api('/status');
     renderRules(s.config.replyProcessors ?? []);
     state.defaultCharacter = s.config.defaults?.character ?? '';
     state.defaultWorld = s.config.defaults?.world ?? '';
+    const seg = s.config.segmentation ?? {};
+    $('#segEnabled').prop('checked', seg.enabled !== false);
+    $('#segMaxLen').val(seg.maxLen ?? 120);
+    $('#segMaxSeg').val(seg.maxSegments ?? 4);
+    $('#segDelayMin').val(seg.delayMs?.[0] ?? 300);
+    $('#segDelayMax').val(seg.delayMs?.[1] ?? 900);
+    const img = s.config.imageReplies ?? {};
+    $('#imgEnabled').prop('checked', img.enabled !== false);
+    $('#imgBaseUrl').val(img.baseUrl ?? '');
   }
   // 每次刷新都同步清单（扩展上报后自动出现在下拉里，保留当前选中值）
   if (s.catalogs && (s.catalogs.characters?.length || s.catalogs.worlds?.length)) {

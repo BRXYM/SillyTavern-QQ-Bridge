@@ -1,0 +1,12 @@
+{
+    "stUrl": "http://127.0.0.1:8000",
+    "basicAuth": {
+        "username": "user",
+        "password": "password"
+    },
+    "chromePath": "",
+    "headless": true,
+    "startupWaitMs": 15000,
+    "restartDelayMs": 10000,
+    "maxRestarts": 0
+}

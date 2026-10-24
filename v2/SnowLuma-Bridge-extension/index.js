@@ -12,10 +12,11 @@
 
 import { extension_settings, getContext } from '../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../script.js';
-import { world_names } from '../../../world-info.js';
+// world_names 改为延迟获取（避免 world-info.js 与 SlashCommandParser 的循环依赖）
+let worldNamesCache = null;
 
 const extensionName = 'SnowLuma-Bridge';
-const version = '4.2.0';
+const version = '4.4.0';
 const defaultSettings = {
     bridgeUrl: 'ws://127.0.0.1:9500',
     autoConnect: true,
@@ -51,6 +52,28 @@ const pendingQueue = new Map();
 let activeSession = null;
 let busy = false;          // 处理中（防重入）
 let generatingFor = null;  // 正在为哪个会话生成（只有它的事件回调有效）
+
+/**
+ * 延迟获取世界书列表。
+ * 不在模块顶层 import，避免 world-info.js 初始化期访问 SlashCommandParser
+ * 造成的循环依赖错误（无头浏览器环境下会直接导致扩展加载失败）。
+ */
+function getWorldNames() {
+    try {
+        // ST 把世界书列表挂在全局（不同版本位置略有差异）
+        if (Array.isArray(window.world_names)) return window.world_names;
+        if (Array.isArray(window.worldInfo?.world_names)) return window.worldInfo.world_names;
+        // 从 DOM 里的世界书下拉框读取（最可靠）
+        const opts = document.querySelectorAll('#world_info option');
+        if (opts.length) {
+            const names = [...opts].map((o) => o.value).filter(Boolean);
+            if (names.length) return names;
+        }
+        return worldNamesCache ?? [];
+    } catch {
+        return worldNamesCache ?? [];
+    }
+}
 
 function chatNameOf(key) {
     if (key.startsWith('group_')) return 'GROUP_' + key.slice('group_'.length);
@@ -113,7 +136,10 @@ function connect() {
             return;
         }
 
-        log(`<<< 收到 WS 消息 type=${msg.type}`);   // 无条件记录每条入站消息
+        // 只记录业务消息，忽略心跳 pong（避免刷屏）
+        if (msg.type !== 'pong') {
+            log(`<<< 收到 WS 消息 type=${msg.type}`);
+        }
 
         try {
             if (msg.type === 'qq_message') {
@@ -123,6 +149,10 @@ function connect() {
             } else if (msg.type === 'session_state') {
                 remoteSessions = msg.sessions ?? {};
                 remoteDefaults = msg.defaults ?? {};
+                if (msg.imageReplies) {
+                    window.__snowlumaImageCfg = msg.imageReplies;
+                    setTimeout(injectImageInstruction, 500);
+                }
             } else if (msg.type === 'sync_request') {
                 reportCatalog();
             }
@@ -148,7 +178,7 @@ function reportCatalog() {
     try {
         const ctx = getContext();
         const chars = (ctx.characters ?? []).map((c) => c.name).filter(Boolean);
-        const worlds = (world_names ?? []).slice();
+        const worlds = getWorldNames();
         wsSend({ type: 'catalog', characters: chars, worlds });
         return chars.length > 0 || worlds.length > 0;
     } catch (e) {
@@ -183,7 +213,7 @@ function listCharacters() {
 }
 
 function listWorlds() {
-    return (world_names ?? []).map((n, i) => `${i + 1}. ${n}`).join('\n');
+    return getWorldNames().map((n, i) => `${i + 1}. ${n}`).join('\n');
 }
 
 function resolveEntry(input, list) {
@@ -242,7 +272,7 @@ async function handleCommand(msg) {
         }
         if (sub === 'select') {
             if (!argRaw) return '用法: /word select <世界书名称或编号>';
-            const worlds = world_names ?? [];
+            const worlds = getWorldNames();
             const hit = resolveEntry(argRaw, worlds);
             if (!hit) return `未找到世界书「${argRaw}」，用 /word list 查看`;
             await ctx.executeSlashCommandsWithOptions(`/world ${JSON.stringify(hit)}`);
@@ -524,5 +554,7 @@ jQuery(async () => {
     log('扩展初始化完成');
     log('调试入口已就绪：window.snowlumaDebug.state() / .simulate() / .cmd() / .httpTest()');
 });
+
+
 
 
