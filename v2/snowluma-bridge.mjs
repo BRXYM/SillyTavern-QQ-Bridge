@@ -331,6 +331,10 @@ wss.on('connection', (socket) => {
             try { socket.send(JSON.stringify({ type: 'pong' })); } catch { /* 忽略 */ }
             return;
         }
+        if (msg.type === 'ext_log') {        // 扩展内部日志：写入控制台便于排查
+            log(msg.text ?? '[EXT] (空)');
+            return;
+        }
         if (msg.type === 'st_reply') {
             let key = msg.sessionKey;
             // 兜底：扩展未携带 sessionKey（旧版本）时路由到最近活跃的会话
