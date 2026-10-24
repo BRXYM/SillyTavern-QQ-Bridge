@@ -15,7 +15,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 import { world_names } from '../../../world-info.js';
 
 const extensionName = 'SnowLuma-Bridge';
-const version = '4.1.0';
+const version = '4.2.0';
 const defaultSettings = {
     bridgeUrl: 'ws://127.0.0.1:9500',
     autoConnect: true,
@@ -293,14 +293,19 @@ function pump() {
     const item = pendingQueue.get(key).shift();
     busy = true;
     activeSession = key;
-    processMessage(item)
-        .catch((e) => log(`[${key}] 处理失败:`, e.message))
-        .finally(() => {
-            activeSession = null;
-            generatingFor = null;
-            busy = false;
-            setTimeout(pump, 300);
-        });
+    processMessage(item).catch((e) => {
+        log(`[${key}] 处理失败:`, e.message);
+        // 只有出错时才立即释放（正常路径由回复事件释放）
+        releaseBusy();
+    });
+}
+
+/** 释放忙碌状态并处理队列中的下一条 */
+function releaseBusy() {
+    busy = false;
+    generatingFor = null;
+    activeSession = null;
+    setTimeout(pump, 300);
 }
 
 async function processMessage(item) {
@@ -325,73 +330,64 @@ async function processMessage(item) {
         const names = chars.map((c) => c.name);
         const avatars = chars.map((c) => c.avatar ?? '');
 
-        // 依次尝试：精确名 → 名包含 → avatar 文件名匹配（去扩展名）
         let idx = names.indexOf(desired);
         if (idx < 0) idx = names.findIndex((n) => n && n.includes(desired));
         if (idx < 0) {
-            idx = avatars.findIndex((a) => {
-                const base = String(a).replace(/\.(png|json)$/i, '');
-                return base === desired;
-            });
+            idx = avatars.findIndex((a) => String(a).replace(/\.(png|json)$/i, '') === desired);
         }
         if (idx < 0) {
-            const detail = chars.map((c, i) => `${i}:${c.name}(${c.avatar})`).join(' ');
+            const detail = chars.map((c, i) => `${i}:${c.name}`).join(' ');
             throw new Error(`默认角色「${desired}」不在角色列表。现有: ${detail}`);
         }
 
         log(`[${item.sessionKey}] 自动选择角色「${names[idx]}」(index=${idx})`);
-        try {
-            // switchMenu:false 避免切换左侧菜单导致界面重绘异常
-            await ctx.selectCharacterById(idx, { switchMenu: false });
-            await new Promise((r) => setTimeout(r, 1200));
-            ctx = getContext();
-            log(`[${item.sessionKey}] 角色已就绪: ${ctx.name2} (characterId=${ctx.characterId})`);
-        } catch (e) {
-            throw new Error(`自动选择角色失败: ${e.message}`);
-        }
-
-        if (ctx.characterId === null || ctx.characterId === undefined || ctx.characterId === '') {
-            throw new Error('自动选择角色后 characterId 仍为空，请手动在酒馆中选一个角色');
-        }
+        await ctx.selectCharacterById(idx, { switchMenu: false });
+        await new Promise((r) => setTimeout(r, 1200));
+        ctx = getContext();
+        log(`[${item.sessionKey}] 角色就绪: ${ctx.name2} (id=${ctx.characterId})`);
     }
 
-    // 切到该 QQ 的专属聊天（仅当不同）
+    // ===== 切到该 QQ 的专属聊天 =====
     const target = chatNameOf(item.sessionKey);
     if (ctx.getCurrentChatId() !== target) {
         log(`[${item.sessionKey}] 切换聊天 → ${target}`);
         await ctx.openCharacterChat(target);
-        log(`[${item.sessionKey}] 现在聊天: ${getContext().getCurrentChatId()}`);
+        await new Promise((r) => setTimeout(r, 600));
+        ctx = getContext();
+        log(`[${item.sessionKey}] 当前聊天: ${ctx.getCurrentChatId()}`);
     }
 
-    const c2 = getContext();
     const rendered = extension_settings[extensionName].messageTemplate
         .replace('{sender}', item.sender)
         .replace('{text}', item.text);
 
-    // 用内部 API 写入用户消息（不经过 slash 解析器）
-    const mes = {
-        name: c2.name1 || 'You',
-        is_user: true,
-        is_system: false,
-        send_date: new Date().toLocaleString(),
-        mes: rendered,
-        extra: {},
-    };
-
-    log(`[${item.sessionKey}] 写入消息`);
-    if (typeof c2.addOneMessage === 'function') {
-        c2.addOneMessage(mes);
-    } else {
-        c2.chat.push(mes);
-        c2.printMessages?.();
+    // ===== 关键：走 ST 自己的发送流程 =====
+    // 直接把文本写进输入框再点击发送按钮，让 ST 完整处理：
+    //   - 正确区分 generate type（normal 而非 continue）
+    //   - 触发 MESSAGE_SENT / MESSAGE_RECEIVED 事件链
+    //   - 正确的 UI 渲染与滚动
+    const $ta = $('#send_textarea');
+    if (!$ta.length) {
+        throw new Error('找不到 #send_textarea，酒馆界面可能未就绪');
     }
 
-    await new Promise((r) => setTimeout(r, 150));
+    log(`[${item.sessionKey}] 写入输入框并发送: ${rendered.slice(0, 60)}`);
+    $ta.val(rendered);
+    $ta[0].dispatchEvent(new Event('input', { bubbles: true }));
 
-    log(`[${item.sessionKey}] 触发生成`);
     generatingFor = item.sessionKey;
-    await c2.generate('normal');
-    log(`[${item.sessionKey}] 生成返回`);
+
+    // 点击发送按钮（和用户手动发消息完全一致的路径）
+    const $btn = $('#send_but');
+    if ($btn.length) {
+        $btn.trigger('click');
+    } else {
+        // 兜底：直接调用 generate
+        log(`[${item.sessionKey}] 未找到发送按钮，回退 generate('normal')`);
+        await ctx.generate('normal');
+    }
+
+    log(`[${item.sessionKey}] 已触发发送，等待回复事件`);
 }
 
 // ================= 事件 =================
@@ -413,9 +409,9 @@ function hookEvents() {
         if (!text) return;
 
         const key = generatingFor;
-        generatingFor = null;   // 只发一次
         log(`[${key}] 回复就绪 (${text.length} 字)`);
         wsSend({ type: 'st_reply', sessionKey: key, text });
+        releaseBusy();          // 释放后才能处理下一条
     };
 
     eventSource.on(eventTypes.MESSAGE_RECEIVED, () => {
@@ -528,4 +524,5 @@ jQuery(async () => {
     log('扩展初始化完成');
     log('调试入口已就绪：window.snowlumaDebug.state() / .simulate() / .cmd() / .httpTest()');
 });
+
 
