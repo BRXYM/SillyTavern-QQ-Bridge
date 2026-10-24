@@ -1,6 +1,10 @@
-# SnowLuma Bridge V3
+# SillyTavern QQ Bridge
 
-把 **QQ（SnowLuma / OneBot v11）** 与 **SillyTavern** 连接起来的桥接中枢，带 Web 控制台。
+**[SillyTavern (酒馆)](https://github.com/SillyTavern/SillyTavern) ↔ QQ 双向桥接** —— 让酒馆里的 AI 角色直接在 QQ 上和真人聊天。
+
+支持 **SnowLuma / NapCat / Lagrange / go-cqhttp** 等所有 **OneBot v11** 协议端，自带 Web 控制台。
+
+> **关键词**：SillyTavern 酒馆 QQ 机器人 · OneBot v11 · SnowLuma · NapCat · Lagrange · QQ Bot · AI 角色扮演 · 多会话隔离 · 回复分段 · 表情包
 
 前后端分离的 monorepo：Vue 3 + TypeScript + Vite 7 + Tailwind CSS v4。
 
@@ -42,8 +46,8 @@
 ### 安装
 
 ```bash
-git clone -b next https://github.com/BRXYM/snowluma-st-bridge.git
-cd snowluma-st-bridge
+git clone https://github.com/BRXYM/SillyTavern-QQ-Bridge.git
+cd SillyTavern-QQ-Bridge
 pnpm install
 ```
 
@@ -72,7 +76,7 @@ pnpm dev
 一条命令同时拉起后端与前端：
 
 ```
-SnowLuma Bridge V3
+SillyTavern QQ Bridge
 [dev] 模式：前后端一体
 [dev] 启动后端 .../apps/server/snowluma-bridge.mjs
 [api] 酒馆扩展 WS 服务已启动: ws://127.0.0.1:9500
@@ -139,7 +143,7 @@ $env:WEB_PORT='5180'; $env:API_PORT='9520'; $env:EXT_PORT='9521'; pnpm dev
 ## 项目结构
 
 ```
-snowluma-st-bridge/
+SillyTavern-QQ-Bridge/
 ├── apps/
 │   ├── web/                  # Vue 3 控制台
 │   │   └── src/

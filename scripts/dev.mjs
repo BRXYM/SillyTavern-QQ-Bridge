@@ -245,7 +245,7 @@ function openBrowser() {
 }
 
 async function main() {
-    banner('SnowLuma Bridge V3');
+    banner('SillyTavern QQ Bridge');
     if (WEB_ONLY) line(sysTag, dim('模式：仅前端'));
     else if (API_ONLY) line(sysTag, dim('模式：仅后端'));
     else line(sysTag, dim('模式：前后端一体'));

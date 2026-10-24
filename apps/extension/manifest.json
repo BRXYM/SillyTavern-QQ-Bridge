@@ -1,11 +1,11 @@
 {
-  "display_name": "SnowLuma Bridge",
+  "display_name": "SillyTavern QQ Bridge",
   "loading_order": 15,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
-  "author": "bridge",
+  "author": "BRXYM",
   "version": "4.5.0",
-  "homePage": ""
+  "homePage": "https://github.com/BRXYM/SillyTavern-QQ-Bridge"
 }
