@@ -954,7 +954,118 @@ button.small { padding:3px 10px; font-size:12px; }
 </main>
 <div class="toast" id="toast"></div>
 <script>
-const $ = (s) => document.querySelector(s);
+/**
+ * 轻量 jQuery 风格包装（控制台页面没有引入 jQuery）。
+ * 只实现本项目用到的 API：val / prop / text / html / css / on / trigger /
+ * find / first / scrollTop / length / [0] / forEach。
+ */
+function $(selector) {
+    let nodes = [];
+    try {
+        if (typeof selector === 'string') {
+            nodes = [...document.querySelectorAll(selector)];
+        } else if (selector instanceof Element) {
+            nodes = [selector];
+        }
+    } catch (e) {
+        // 非法选择器（例如包含特殊字符的 id）不应让整页崩溃
+        console.warn('[shim] 无效选择器:', selector, e.message);
+        nodes = [];
+    }
+    return wrap(nodes);
+}
+
+function wrap(nodes) {
+    const api = {
+        length: nodes.length,
+        0: nodes[0],
+        get(i = 0) { return nodes[i]; },
+        [Symbol.iterator]() { return nodes[Symbol.iterator](); },
+        forEach(fn) { nodes.forEach((n, i) => fn(n, i)); return api; },
+
+        val(v) {
+            if (v === undefined) return nodes[0]?.value ?? '';
+            nodes.forEach((n) => { n.value = v; });
+            return api;
+        },
+        prop(name, v) {
+            if (v === undefined) return nodes[0]?.[name];
+            nodes.forEach((n) => { n[name] = v; });
+            return api;
+        },
+        text(v) {
+            if (v === undefined) return nodes[0]?.textContent ?? '';
+            nodes.forEach((n) => { n.textContent = v; });
+            return api;
+        },
+        html(v) {
+            if (v === undefined) return nodes[0]?.innerHTML ?? '';
+            nodes.forEach((n) => { n.innerHTML = v; });
+            return api;
+        },
+        css(name, v) {
+            if (v === undefined) return nodes[0]?.style?.[name] ?? '';
+            nodes.forEach((n) => { if (n.style) n.style[name] = v; });
+            return api;
+        },
+        on(evt, fn) {
+            nodes.forEach((n) => n.addEventListener(evt, fn));
+            return api;
+        },
+        trigger(evt) {
+            nodes.forEach((n) => n.dispatchEvent(new Event(evt, { bubbles: true })));
+            return api;
+        },
+        find(sel) {
+            const found = [];
+            nodes.forEach((n) => found.push(...n.querySelectorAll(sel)));
+            return wrap(found);
+        },
+        first() { return wrap(nodes.slice(0, 1)); },
+        append(child) {
+            nodes.forEach((n) => {
+                if (typeof child === 'string') n.insertAdjacentHTML('beforeend', child);
+                else if (child instanceof Element) n.appendChild(child);
+                else if (child?.node) n.appendChild(child.node);
+            });
+            return api;
+        },
+        scrollTop(v) {
+            if (v === undefined) return nodes[0]?.scrollTop ?? 0;
+            nodes.forEach((n) => { n.scrollTop = v; });
+            return api;
+        },
+        remove() {
+            nodes.forEach((n) => n.remove());
+            return api;
+        },
+
+        // ---- 原生元素方法代理（供直接调用 document API 的代码使用）----
+        contains(other) {
+            const target = other?.node ?? other?.[0] ?? other;
+            return nodes.some((n) => n.contains(target));
+        },
+        querySelector(sel) { return nodes[0]?.querySelector(sel) ?? null; },
+        querySelectorAll(sel) { return nodes[0]?.querySelectorAll(sel) ?? []; },
+        appendChild(child) {
+            const c = child?.node ?? child;
+            if (nodes[0] && c) nodes[0].appendChild(c);
+            return api;
+        },
+        addEventListener(evt, fn) {
+            nodes.forEach((n) => n.addEventListener(evt, fn));
+            return api;
+        },
+        closest(sel) { return nodes[0]?.closest(sel) ?? null; },
+        getAttribute(name) { return nodes[0]?.getAttribute(name) ?? null; },
+        setAttribute(name, v) { nodes.forEach((n) => n.setAttribute(name, v)); return api; },
+        get classList() { return nodes[0]?.classList; },
+        get dataset() { return nodes[0]?.dataset; },
+        get style() { return nodes[0]?.style; },
+        get node() { return nodes[0]; },
+    };
+    return api;
+}
 const state = {};
 
 function toast(msg) {
@@ -1088,8 +1199,8 @@ function applyCatalog(c) {
   if (!c) return;
   fillSelect('#defaultCharacter', c.characters ?? [], state.defaultCharacter);
   fillSelect('#defaultWorld', c.worlds ?? [], state.defaultWorld);
-  $('#catalogInfo').textContent = '清单更新于 ' + (c.updatedAt ? new Date(c.updatedAt).toLocaleTimeString() : '--')
-    + ' · ' + (c.characters ?? []).length + ' 角色 / ' + (c.worlds ?? []).length + ' 世界书';
+  $('#catalogInfo').text('清单更新于 ' + (c.updatedAt ? new Date(c.updatedAt).toLocaleTimeString() : '--')
+    + ' · ' + (c.characters ?? []).length + ' 角色 / ' + (c.worlds ?? []).length + ' 世界书');
 }
 
 $('#refreshCatalog').onclick = async () => {
@@ -1115,24 +1226,26 @@ $('#saveGlobalPipeline').onclick = async () => {
 
 // ===== 分段设置 =====
 // ===== 配对符预设（符号组合） =====
+// 配对符号：token 为实际存储值。
+// 单字符对称符（星号/引号等）存 1 个字符；双字符不对称符（“”）存 2 个字符。
 const PAIR_PRESETS = [
-  { label: '星号（*动作*）',       open: '*',  close: '*' },
-  { label: '双引号（"台词"）',      open: '"',  close: '"' },
-  { label: '中文双引号（“台词”）',  open: '\u201c', close: '\u201d' },
-  { label: '单引号（' + "'" + '台词' + "'" + '）',  open: "'",  close: "'" },
-  { label: '中文单引号（‘台词’）',  open: '\u2018', close: '\u2019' },
-  { label: '圆括号（（动作））',    open: '（', close: '）' },
-  { label: '半角圆括号（(动作)）',  open: '(',  close: ')' },
-  { label: '方括号（[动作]）',     open: '[',  close: ']' },
-  { label: '方头括号（【动作】）',  open: '【', close: '】' },
-  { label: '书名号（《标题》）',    open: '《', close: '》' },
-  { label: '双书名号（〈标题〉）',  open: '〈', close: '〉' },
-  { label: '尖括号（<动作>）',     open: '<',  close: '>' },
-  { label: '花括号（{动作}）',     open: '{',  close: '}' },
-  { label: '波浪号（~动作~）',     open: '~',  close: '~' },
-  { label: '竖线（|动作|）',       open: '|',  close: '|' },
-  { label: '下划线（_动作_）',     open: '_',  close: '_' },
-  { label: '自定义',               open: '',   close: '' },
+  { label: '星号（*动作*）',       open: '*',  close: '*', token: '*' },
+  { label: '双引号（"台词"）',      open: '"',  close: '"', token: '"' },
+  { label: '中文双引号（“台词”）',  open: '\u201c', close: '\u201d', token: '\u201c\u201d' },
+  { label: '单引号（' + "'" + '台词' + "'" + '）',  open: "'",  close: "'", token: "'" },
+  { label: '中文单引号（‘台词’）',  open: '\u2018', close: '\u2019', token: '\u2018\u2019' },
+  { label: '圆括号（（动作））',    open: '（', close: '）', token: '（）' },
+  { label: '半角圆括号（(动作)）',  open: '(',  close: ')', token: '()' },
+  { label: '方括号（[动作]）',     open: '[',  close: ']', token: '[]' },
+  { label: '方头括号（【动作】）',  open: '【', close: '】', token: '【】' },
+  { label: '书名号（《标题》）',    open: '《', close: '》', token: '《》' },
+  { label: '双书名号（〈标题〉）',  open: '〈', close: '〉', token: '〈〉' },
+  { label: '尖括号（<动作>）',     open: '<',  close: '>', token: '<>' },
+  { label: '花括号（{动作}）',     open: '{',  close: '}', token: '{}' },
+  { label: '波浪号（~动作~）',     open: '~',  close: '~', token: '~' },
+  { label: '竖线（|动作|）',       open: '|',  close: '|', token: '|' },
+  { label: '下划线（_动作_）',     open: '_',  close: '_', token: '_' },
+  { label: '自定义',               open: '',   close: '', token: 'custom' },
 ];
 
 /** 生成一行配对符编辑器 */
@@ -1144,12 +1257,12 @@ function pairRow(item, index) {
   const name = Array.isArray(item) ? (item[0] ?? '') : '';
   const token = Array.isArray(item) ? (item[1] ?? '') : (item ?? '');
 
-  // 匹配预设
-  const matched = PAIR_PRESETS.find((p) => p.open && (p.open + p.close) === token);
-  const presetValue = matched ? (matched.open + matched.close) : (token ? 'custom' : PAIR_PRESETS[0].open + PAIR_PRESETS[0].close);
+  // 匹配预设（按 token 精确比对）
+  const matched = PAIR_PRESETS.find((p) => p.token && p.token !== 'custom' && p.token === token);
+  const presetValue = matched ? matched.token : (token ? 'custom' : '*');
 
   const opts = PAIR_PRESETS.map((p) => {
-    const v = p.open ? (p.open + p.close) : 'custom';
+    const v = p.token ?? 'custom';
     const sel = v === presetValue ? ' selected' : '';
     return '<option value="' + v.replace(/"/g, '&quot;') + '"' + sel + '>' + p.label + '</option>';
   }).join('');
@@ -1296,8 +1409,9 @@ $('#saveImg').onclick = async () => {
 
 // ===== 会话级配置面板（角色 / 世界书 / 独立管道） =====
 function renderSessionChoices(s) {
-  const box = $('#sessionChoices');
-  if (!box) return;
+  const boxEl = $('#sessionChoices');
+  if (!boxEl.length) return;
+  const box = boxEl.node;
 
   // 合并两个来源：
   //   sessionStats   —— 运行时出现过消息的会话（含首次发言的新用户）
@@ -1396,6 +1510,7 @@ function renderSessionChoices(s) {
     const modeSel = div.querySelector('.s-mode');
     const rulesBox = div.querySelector('.s-rules');
     const listEl = div.querySelector('.s-rule-list');
+    const mode = modeSel?.value === 'custom' ? 'custom' : 'inherit';
     let rules = [];
     try {
       rules = JSON.parse(decodeURIComponent(listEl.dataset.rules || '%5B%5D'));
@@ -1507,18 +1622,18 @@ function escapeAttr(v) {
 
 async function refresh() {
   const s = await api('/status');
-  $('#obStatus').textContent = '上游: ' + (s.onebotConnected ? '已连接' : '未连接');
-  $('#obStatus').style.color = s.onebotConnected ? '#7fe0a0' : '#ff8a9a';
-  $('#stStatus').textContent = '下游: ' + (s.stClients > 0 ? \`已接入(\${s.stClients})\` : '未接入');
-  $('#stStatus').style.color = s.stClients > 0 ? '#7fe0a0' : '#ff8a9a';
-  $('#botInfo').textContent = '机器人: ' + (s.selfId ?? '--');
+  $('#obStatus').text('上游: ' + (s.onebotConnected ? '已连接' : '未连接'));
+  $('#obStatus').css('color', s.onebotConnected ? '#7fe0a0' : '#ff8a9a');
+  $('#stStatus').text('下游: ' + (s.stClients > 0 ? \`已接入(\${s.stClients})\` : '未接入'));
+  $('#stStatus').css('color', s.stClients > 0 ? '#7fe0a0' : '#ff8a9a');
+  $('#botInfo').text('机器人: ' + (s.selfId ?? '--'));
 
   const sess = Object.entries(s.sessions);
-  $('#sessions').innerHTML = sess.length
+  $('#sessions').html(sess.length
     ? sess.map(([k, v]) => \`<span class="stat"><b>\${k}</b> · 收 \${v.in} / 发 \${v.out} · \${new Date(v.last).toLocaleTimeString()}</span>\`).join('')
-    : '<span class="stat">暂无会话</span>';
+    : '<span class="stat">暂无会话</span>');
 
-  $('#log').textContent = s.logs.join('\\n');
+  $('#log').text(s.logs.join('\\n'));
   $('#log').scrollTop = $('#log').scrollHeight;
 
   renderSessionChoices(s);
