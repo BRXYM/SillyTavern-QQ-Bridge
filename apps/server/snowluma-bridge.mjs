@@ -81,12 +81,16 @@ function sessionDefaults(key) {
 }
 
 
+let configFileExisted = true;
+
 function loadConfig() {
     let base;
+    let existed = true;
     try {
         base = { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) };
     } catch {
         base = { ...DEFAULT_CONFIG };
+        existed = false;
     }
     // 环境变量覆盖（便于一个仓库内多实例 / 端口冲突时切换）
     if (process.env.API_PORT) base.consolePort = Number(process.env.API_PORT);
@@ -94,7 +98,32 @@ function loadConfig() {
     if (process.env.ONEBOT_URL) base.onebotUrl = process.env.ONEBOT_URL;
     if (process.env.ONEBOT_TOKEN) base.onebotToken = process.env.ONEBOT_TOKEN;
     if (process.env.ST_DATA_DIR) base.stDataDir = process.env.ST_DATA_DIR;
+    configFileExisted = existed;
+    if (existed && !base.stDataDir) {
+        const detected = detectStDataDirQuiet();
+        if (detected) base.stDataDir = detected;
+    }
     return base;
+}
+
+/** 启动期探测酒馆目录（不打印警告，避免每次启动刷屏） */
+function detectStDataDirQuiet() {
+    const fromEnv = process.env.ST_DATA_DIR;
+    if (fromEnv) return fromEnv;
+    const candidates = [
+        path.resolve(__dirname, '../../../SillyTavern/data/default-user'),
+        path.resolve(__dirname, '../../SillyTavern/data/default-user'),
+        path.resolve(process.cwd(), '../SillyTavern/data/default-user'),
+        path.resolve(process.cwd(), 'SillyTavern/data/default-user'),
+    ];
+    for (const dir of candidates) {
+        try {
+            if (fs.existsSync(path.join(dir, 'characters'))) return dir;
+        } catch {
+            /* ignore */
+        }
+    }
+    return null;
 }
 let cfg = loadConfig();
 loadSessions();
@@ -643,24 +672,7 @@ const catalogs = { characters: [], worlds: [], updatedAt: null };
  * 未找到时返回 null（由调用方跳过扫描）。
  */
 function detectStDataDir() {
-    const fromEnv = process.env.ST_DATA_DIR;
-    if (fromEnv) return fromEnv;
-
-    // 与服务同级的 SillyTavern 安装目录（monorepo 布局）
-    const candidates = [
-        path.resolve(__dirname, '../../../SillyTavern/data/default-user'),
-        path.resolve(__dirname, '../../SillyTavern/data/default-user'),
-        path.resolve(process.cwd(), '../SillyTavern/data/default-user'),
-        path.resolve(process.cwd(), 'SillyTavern/data/default-user'),
-    ];
-    for (const dir of candidates) {
-        try {
-            if (fs.existsSync(path.join(dir, 'characters'))) return dir;
-        } catch {
-            /* ignore */
-        }
-    }
-    return null;
+    return detectStDataDirQuiet();
 }
 
 /**
@@ -1859,5 +1871,25 @@ consoleServer.listen(cfg.consolePort ?? 9510, '127.0.0.1', () =>
     log(`Web 控制台已启动: http://127.0.0.1:${cfg.consolePort ?? 9510}`));
 
 connectOnebot();
-log(`连接器 v2.1 已启动: SnowLuma=${cfg.onebotUrl} | 扩展端口=${cfg.stExtPort} | 控制台=${cfg.consolePort ?? 9510}`);
+log(`连接器 v3 已启动: SnowLuma=${cfg.onebotUrl} | 扩展端口=${cfg.stExtPort} | 控制台=${cfg.consolePort ?? 9510}`);
+
+// ===== 启动检查：把「静默失败」变成明确提示 =====
+if (!configFileExisted) {
+    if (cfg.onebotToken) {
+        log('ℹ 未找到 config.json，当前使用默认配置 + 环境变量提供的 token');
+    } else {
+        log('─'.repeat(64));
+        log('⚠ 未找到 config.json，当前使用默认配置（OneBot token 为空）');
+        log(`   请执行：cp config.example.json config.json`);
+        log(`   路径应为：${CONFIG_PATH}`);
+        log('   若 SnowLuma 开启了 Access Token，连接会一直返回 401。');
+        log('─'.repeat(64));
+    }
+} else if (!cfg.onebotToken) {
+    log('⚠ config.json 中 onebotToken 为空；若 SnowLuma 开启了 Access Token，将返回 401');
+}
+if (!cfg.stDataDir) {
+    log('⚠ 未能定位酒馆数据目录（stDataDir），角色/世界书清单将仅依赖扩展上报');
+    log('   可在系统设置中填写，或设置环境变量 ST_DATA_DIR');
+}
 

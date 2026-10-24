@@ -16,7 +16,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 let worldNamesCache = null;
 
 const extensionName = 'SnowLuma-Bridge';
-const version = '4.4.0';
+const version = '4.5.0';
 const defaultSettings = {
     bridgeUrl: 'ws://127.0.0.1:9500',
     autoConnect: true,
@@ -79,6 +79,65 @@ function chatNameOf(key) {
     if (key.startsWith('group_')) return 'GROUP_' + key.slice('group_'.length);
     if (key.startsWith('private_')) return 'QQ_' + key.slice('private_'.length);
     return 'QQ_' + key;
+}
+
+/**
+ * 图片回复：向酒馆注入提示词，告知 AI 可以直接用图片标记。
+ *
+ * 标记会被后端 media 模块解析为 OneBot 消息段：
+ *   [图片:URL] / [表情:URL] / <img src="URL">
+ *
+ * 注入位置为「作者注记」之后的深度 4，作用范围是当前聊天，
+ * 因此切换会话时由 session_state 重新下发并覆盖即可。
+ */
+const IMAGE_PROMPT_KEY = 'snowluma_image_hint';
+
+function injectImageInstruction() {
+    const cfg = window.__snowlumaImageCfg;
+    if (!cfg || cfg.enabled === false || cfg.instruction === false) {
+        removeImageInstruction();
+        return;
+    }
+
+    const ctx = getContext();
+    if (typeof ctx?.setExtensionPrompt !== 'function') {
+        log('当前酒馆版本不支持 setExtensionPrompt，跳过图片提示注入');
+        return;
+    }
+
+    const base = String(cfg.baseUrl ?? '').trim();
+    const baseHint = base
+        ? `图片库根地址：${base}（可直接拼接文件名使用）`
+        : '可使用任意公网可访问的图片直链';
+
+    const instruction = [
+        '【图片回复能力】',
+        '你可以在回复中直接发送图片，客户端会自动渲染为图片消息。',
+        '用法：在需要配图的位置插入以下任一标记（标记本身不会显示给用户）：',
+        '  [图片:图片URL]',
+        '  [表情:图片URL]',
+        '  <img src="图片URL">',
+        baseHint,
+        '注意：图片标记请单独成行或紧跟在句末，不要包裹在代码块中；无合适图片时不必强行配图。',
+    ].join('\n');
+
+    try {
+        // position: 1 = IN_PROMPT（并入提示词），depth: 4
+        ctx.setExtensionPrompt(IMAGE_PROMPT_KEY, instruction, 1, 4, false);
+        log('已注入图片回复提示');
+    } catch (e) {
+        log('图片提示注入失败:', e.message);
+    }
+}
+
+function removeImageInstruction() {
+    const ctx = getContext();
+    if (typeof ctx?.setExtensionPrompt !== 'function') return;
+    try {
+        ctx.setExtensionPrompt(IMAGE_PROMPT_KEY, '', 1, 4, false);
+    } catch {
+        /* ignore */
+    }
 }
 
 /**
@@ -151,7 +210,14 @@ function connect() {
                 remoteDefaults = msg.defaults ?? {};
                 if (msg.imageReplies) {
                     window.__snowlumaImageCfg = msg.imageReplies;
-                    setTimeout(injectImageInstruction, 500);
+                    // 提示注入依赖酒馆上下文就绪，稍作延迟
+                    setTimeout(() => {
+                        try {
+                            injectImageInstruction();
+                        } catch (e) {
+                            log('图片提示注入异常(已隔离):', e.message);
+                        }
+                    }, 500);
                 }
             } else if (msg.type === 'sync_request') {
                 reportCatalog();
