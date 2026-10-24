@@ -1,5 +1,5 @@
 {
-    "name": "snowluma-bridge-v3",
+    "name": "snowluma-st-bridge",
     "version": "3.0.0",
     "private": true,
     "type": "module",
@@ -11,13 +11,11 @@
         "dev": "node scripts/dev.mjs",
         "dev:web": "node scripts/dev.mjs --web-only",
         "dev:api": "node scripts/dev.mjs --api-only",
-        "build": "pnpm -r build",
-        "build:web": "pnpm --filter @bridge/web build",
-        "build:server": "pnpm --filter @bridge/server build",
-        "build:extension": "pnpm --filter @bridge/extension build",
+        "build": "pnpm --filter @bridge/web build",
         "start": "pnpm --filter @bridge/server start",
         "test": "pnpm -r test",
-        "typecheck": "pnpm -r typecheck"
+        "test:console": "pnpm --filter @bridge/server test:console",
+        "typecheck": "pnpm --filter @bridge/web typecheck"
     },
     "devDependencies": {
         "typescript": "~5.9.3"

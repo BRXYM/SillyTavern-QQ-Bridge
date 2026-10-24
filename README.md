@@ -4,9 +4,9 @@
 
 前后端分离的 monorepo：Vue 3 + TypeScript + Vite 7 + Tailwind CSS v4。
 
-> 当前状态：**阶段 2 完成**。Web 控制台 7 个页面全部可用，核心逻辑（分段 / 管道 / 会话 / 图片）已抽为独立包并覆盖 56 个单元测试。后端仍复用 v2 桥接服务（`:9510`），Fastify 后端与服务编排器在阶段 3 实现。
+> 当前状态：**后端已整合**。Web 控制台 7 个页面可用，桥接后端与酒馆扩展已并入同一仓库，`pnpm dev` 即可完整运行。核心逻辑（分段 / 管道 / 会话 / 图片）抽为独立包并覆盖 56 个单元测试。
 
-> **分支说明**：本分支（`next`）是下一代主线，仓库根目录即 V3 完整工程。v1 / v2 的历史版本仍可在 `main` 分支查看。
+> **分支说明**：本分支（`next`）是下一代主线，仓库根目录即完整前后端工程。v1 / v2 的历史版本仍可在 `main` 分支查看。
 
 ---
 
@@ -25,10 +25,10 @@
 
 ### 规划中
 
-- `apps/server` — Fastify 后端，替代 v2，SSE 推送替代轮询
-- `apps/extension` — 酒馆扩展 TypeScript 化
-- 服务编排器 — SnowLuma / SillyTavern 的下载、启停、健康检查
-- SQLite 持久化
+- **Fastify 后端** — 逐步替代现有 v2 后端，SSE 推送替代轮询
+- **酒馆扩展 TypeScript 化** — 当前为 ES 模块 JS
+- **服务编排器** — SnowLuma / SillyTavern 的下载、启停、健康检查
+- **SQLite 持久化** — 替代 `config.json` / `sessions.json`
 
 ---
 
@@ -42,9 +42,25 @@
 ### 安装
 
 ```bash
-git clone https://github.com/BRXYM/snowluma-st-bridge.git
+git clone -b next https://github.com/BRXYM/snowluma-st-bridge.git
 cd snowluma-st-bridge
 pnpm install
+```
+
+### 首次配置
+
+```bash
+cp apps/server/config.example.json apps/server/config.json
+```
+
+编辑 `config.json` 填入你的 OneBot token：
+
+```jsonc
+{
+    "onebotUrl": "ws://127.0.0.1:3001",
+    "onebotToken": "你的 SnowLuma Access Token",
+    "stDataDir": ""   // 留空则自动探测，或填写 <SillyTavern>/data/default-user
+}
 ```
 
 ### 启动
@@ -58,13 +74,27 @@ pnpm dev
 ```
 SnowLuma Bridge V3
 [dev] 模式：前后端一体
-[dev] 启动后端 .../snowluma-st-bridge/snowluma-bridge.mjs
+[dev] 启动后端 .../apps/server/snowluma-bridge.mjs
+[api] 酒馆扩展 WS 服务已启动: ws://127.0.0.1:9500
 [api] Web 控制台已启动: http://127.0.0.1:9510
 [dev] 后端就绪 → http://127.0.0.1:9510
-[web] VITE v7.3.7  ready in 600 ms
+[web] VITE v7.3.7  ready in 790 ms
   ➜  控制台   http://localhost:5178
   ➜  后端 API  http://127.0.0.1:9510/api/status
 ```
+
+打开 <http://localhost:5178> 即可。
+
+### 安装酒馆扩展
+
+把 `apps/extension/` 整个目录复制到酒馆的第三方扩展目录：
+
+```bash
+# 目标位置
+<SillyTavern>/public/scripts/extensions/third-party/SnowLuma-Bridge/
+```
+
+然后重启酒馆，在扩展面板确认「已连接 ws://127.0.0.1:9500」。
 
 打开 <http://localhost:5178> 即可。
 
@@ -73,25 +103,35 @@ SnowLuma Bridge V3
 ```bash
 pnpm dev:web          # 只启动前端（后端需已在运行）
 pnpm dev:api          # 只启动后端
-pnpm build            # 构建全部包
-pnpm build:web        # 只构建前端
+pnpm start            # 只启动后端（生产）
+pnpm build            # 构建前端
 pnpm test             # 运行单元测试（56 个）
 pnpm typecheck        # 类型检查
+pnpm test:console     # 用 jsdom 检查控制台运行时错误
 ```
 
 ### 环境变量
 
-`scripts/dev.mjs` 与 `vite.config.ts` 读取同一组变量，保证端口一致。
+`scripts/dev.mjs`、`vite.config.ts` 与后端读取同一组变量，保证端口一致。
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `WEB_PORT` | `5178` | 前端端口 |
-| `API_PORT` | `9510` | 后端端口 |
-| `BRIDGE_LEGACY_DIR` | `../snowluma-st-bridge` | v2 后端所在目录 |
+| `API_PORT` | `9510` | 后端控制台 / API 端口 |
+| `EXT_PORT` | `9500` | 酒馆扩展 WebSocket 端口 |
+| `ONEBOT_URL` | — | 覆盖 `config.json` 的 OneBot 地址 |
+| `ONEBOT_TOKEN` | — | 覆盖 `config.json` 的 OneBot token |
+| `ST_DATA_DIR` | 自动探测 | 酒馆数据目录 |
 | `BRIDGE_OPEN` | — | 设为 `1` 启动后自动开浏览器 |
 
 ```powershell
 $env:WEB_PORT = 5180; pnpm dev
+```
+
+端口冲突时可整体换一套：
+
+```powershell
+$env:WEB_PORT='5180'; $env:API_PORT='9520'; $env:EXT_PORT='9521'; pnpm dev
 ```
 
 ---
@@ -110,8 +150,15 @@ snowluma-st-bridge/
 │   │       ├── stores/       # Pinia：status / theme / toast
 │   │       ├── api/          # 后端 API 客户端
 │   │       └── style.css     # 设计 token（oklch）
-│   ├── server/               # 规划中：Fastify
-│   └── extension/            # 规划中：酒馆扩展
+│   ├── server/               # 桥接后端
+│   │   ├── snowluma-bridge.mjs    # OneBot 连接 + 扩展 WS + Web API
+│   │   ├── st-headless.mjs        # 酒馆无头驱动（playwright-core）
+│   │   ├── config.example.json    # 配置模板
+│   │   └── test-console-runtime.mjs
+│   └── extension/            # 酒馆前端扩展（安装到 third-party）
+│       ├── index.js
+│       ├── manifest.json
+│       └── style.css
 ├── packages/
 │   ├── core/                 # 纯逻辑，无 IO，56 个测试
 │   │   ├── segmentation.ts   # 回复分段算法
@@ -170,16 +217,16 @@ QQ 用户
 SnowLuma (:3001)
    │  WebSocket
    ▼
-桥接服务 (:9500 扩展 WS / :9510 控制台)
+apps/server 桥接后端 (:9500 扩展 WS / :9510 控制台 API)
    │                    ▲
    │  WebSocket         │  HTTP /api
    ▼                    │
-SillyTavern 扩展     V3 Web 控制台 (:5178)
-                        │
+apps/extension        apps/web 控制台 (:5178)
+（装在酒馆内）           │
                         └── Vite proxy → :9510
 ```
 
-**数据流**：QQ 消息 → SnowLuma → 桥接服务按 `sessionKey` 广播 → 酒馆扩展触发回复 → 扩展回传 `sessionKey` → 桥接服务分段 + 处理管道 → SnowLuma → QQ。
+**数据流**：QQ 消息 → SnowLuma → 桥接后端按 `sessionKey` 广播 → 酒馆扩展触发回复 → 扩展回传 `sessionKey` → 后端分段 + 处理管道 → SnowLuma → QQ。
 
 **会话隔离**：`sessionKey` 格式为 `private_<userId>` 或 `group_<groupId>_<userId>`，据此映射到酒馆的独立 chat 文件。
 
@@ -187,9 +234,9 @@ SillyTavern 扩展     V3 Web 控制台 (:5178)
 
 ## 开发说明
 
-### 关于后端
+### API 端点
 
-`apps/server` 目前是空目录。V3 前端通过 Vite proxy 读取 v2 后端（`snowluma-bridge.mjs`，位于 `../snowluma-st-bridge`）的 `/api` 接口：
+前端通过 Vite proxy 访问 `apps/server` 的接口：
 
 | 端点 | 用途 |
 |---|---|

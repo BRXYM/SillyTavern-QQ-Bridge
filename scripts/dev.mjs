@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 /**
- * 一条命令启动 SnowLuma Bridge V3（前后端）。
+ * 一条命令启动 SnowLuma Bridge（前后端）。
  *
- *   pnpm dev              # 后端(v2 桥接 :9510) + 前端(:5178)
+ *   pnpm dev              # 后端(:9510) + 前端(:5178)
  *   pnpm dev --web-only   # 只启动前端
  *   pnpm dev --api-only   # 只启动后端
  *
  * 可用环境变量覆盖：
  *   WEB_PORT            前端端口，默认 5178
  *   API_PORT            后端端口，默认 9510
- *   BRIDGE_LEGACY_DIR   v2 后端所在目录，默认 ../snowluma-st-bridge
  *   BRIDGE_OPEN         设为 1 时启动后自动打开浏览器
  */
 import { spawn } from 'node:child_process';
@@ -23,10 +22,9 @@ const ROOT = path.resolve(__dirname, '..');
 
 const WEB_PORT = Number(process.env.WEB_PORT ?? 5178);
 const API_PORT = Number(process.env.API_PORT ?? 9510);
-const LEGACY_DIR = process.env.BRIDGE_LEGACY_DIR
-    ? path.resolve(process.env.BRIDGE_LEGACY_DIR)
-    : path.resolve(ROOT, '..', 'snowluma-st-bridge');
-const LEGACY_ENTRY = path.join(LEGACY_DIR, 'snowluma-bridge.mjs');
+/** 后端与前端同属一个 monorepo，无需外部路径 */
+const SERVER_DIR = path.join(ROOT, 'apps', 'server');
+const SERVER_ENTRY = path.join(SERVER_DIR, 'snowluma-bridge.mjs');
 const WEB_DIR = path.join(ROOT, 'apps', 'web');
 const VITE_BIN = path.join(WEB_DIR, 'node_modules', 'vite', 'bin', 'vite.js');
 
@@ -161,16 +159,20 @@ async function startApi() {
         return null;
     }
 
-    if (!fs.existsSync(LEGACY_ENTRY)) {
-        line(sysTag, yellow(`未找到后端入口：${LEGACY_ENTRY}`));
-        line(sysTag, yellow('可通过 BRIDGE_LEGACY_DIR 指定 v2 后端所在目录'));
+    if (!fs.existsSync(SERVER_ENTRY)) {
+        line(sysTag, red(`未找到后端入口：${SERVER_ENTRY}`));
         return null;
     }
 
-    line(sysTag, `启动后端 ${dim(LEGACY_ENTRY)}`);
-    const child = run('api', process.execPath, [LEGACY_ENTRY], {
-        cwd: LEGACY_DIR,
+    line(sysTag, `启动后端 ${dim(SERVER_ENTRY)}`);
+    const child = run('api', process.execPath, [SERVER_ENTRY], {
+        cwd: SERVER_DIR,
         tag: apiTag,
+        env: {
+            // 让后端使用与 dev.mjs 一致的端口，避免 config.json 里的旧值造成冲突
+            API_PORT: String(API_PORT),
+            EXT_PORT: String(Number(process.env.EXT_PORT ?? 9500)),
+        },
     });
 
     const ok = await waitForPort(API_PORT, 20000, state);

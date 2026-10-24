@@ -1,0 +1,14 @@
+{
+    "name": "@bridge/extension",
+    "version": "3.0.0",
+    "private": true,
+    "description": "SillyTavern 前端扩展：接收桥接消息、调度生成、回传回复",
+    "files": [
+        "index.js",
+        "manifest.json",
+        "style.css"
+    ],
+    "scripts": {
+        "build": "node -e \"console.log('extension is plain JS, no build step')\""
+    }
+}

@@ -1,0 +1,21 @@
+{
+    "name": "@bridge/server",
+    "version": "3.0.0",
+    "private": true,
+    "type": "module",
+    "description": "桥接后端：OneBot v11 连接器 + 酒馆扩展 WS 服务 + Web API",
+    "main": "snowluma-bridge.mjs",
+    "scripts": {
+        "dev": "node snowluma-bridge.mjs",
+        "start": "node snowluma-bridge.mjs",
+        "headless": "node st-headless.mjs",
+        "test:console": "node test-console-runtime.mjs"
+    },
+    "dependencies": {
+        "ws": "^8.18.0"
+    },
+    "devDependencies": {
+        "jsdom": "^25.0.1",
+        "playwright-core": "^1.49.0"
+    }
+}
