@@ -27,9 +27,9 @@ w.fetch = async (url) => {
             json: async () => ({
                 onebotConnected: true,
                 stClients: 1,
-                selfId: '1417434860',
-                sessions: { private_2637143104: { in: 5, out: 5, last: Date.now() } },
-                sessionChoices: { private_2637143104: { character: '雪乃', world: '雪之镇设定' } },
+                selfId: '10086',
+                sessions: { private_10001: { in: 5, out: 5, last: Date.now() } },
+                sessionChoices: { private_10001: { character: '雪乃', world: '雪之镇设定' } },
                 catalogs: {
                     characters: ['雪乃', '鲸鱼娘', 'Seraphina'],
                     worlds: ['雪之镇设定', '鲸鱼娘世界书'],

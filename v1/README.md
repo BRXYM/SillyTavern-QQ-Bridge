@@ -32,4 +32,4 @@
   - OneBot HTTP :3000
 - SillyTavern：`node server.js`（:8000，Basic 认证 user/password）
 - workbuddy-connect 模型：http://127.0.0.1:10108/cn/v1（Bearer 密钥见 txt）
-- 测试 QQ：机器人 1417434860，测试用户 2637143104（本人想养喵）
+- 测试 QQ：机器人 10086，测试用户 10001（本人想养喵）
