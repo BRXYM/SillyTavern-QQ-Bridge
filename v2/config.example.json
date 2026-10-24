@@ -18,9 +18,9 @@
     "stDataDir": "D:\\WorkSpace\\SillyTavern\\data\\default-user",
     "segmentation": {
         "enabled": true,
-        "maxLen": 120,
-        "minLen": 8,
-        "maxSegments": 4,
+        "maxLen": 100,
+        "minLen": 6,
+        "maxSegments": 8,
         "hardChars": "。！？!?…",
         "softChars": "，,；;",
         "pairChars": [

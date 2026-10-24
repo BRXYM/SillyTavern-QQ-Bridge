@@ -378,14 +378,75 @@ function segmentText(text, opts = {}) {
     if (acc) merged.push(acc);
 
     // ---------- 步骤 7：限制条数 ----------
+    // 智能策略：纯文本片段优先合并，配对符片段（*动作*）保持独立。
+    // 这样即使 maxSegments 很小，也不会把动作描写和台词糊成一坨。
     let result = merged;
     if (result.length > maxSegments) {
-        const head = result.slice(0, maxSegments - 1);
-        const tail = result.slice(maxSegments - 1).join('');
-        result = [...head, tail];
+        // 保留所有配对/自定义分隔片段，只合并纯文本
+        const isSpecial = (t) => {
+            // 配对片段特征：以配对符开头结尾，或在 pairSegments 中
+            if (pairSegments.includes(t)) return true;
+            const p0 = (t[0] ?? '');
+            const p1 = (t[t.length - 1] ?? '');
+            return pairChars.some((pc) => {
+                const pair = pc.length >= 2 ? [pc[0], pc[1]] : [pc, pc];
+                return p0 === pair[0] && p1 === pair[1];
+            });
+        };
+
+        const special = [];
+        const plain = [];
+        for (const t of result) {
+            (isSpecial(t) ? special : plain).push(t);
+        }
+
+        // 可用给纯文本的槽位数
+        const slots = Math.max(1, maxSegments - special.length);
+
+        // 纯文本：保持一句一条（不填充式打包），仅在总条数超限时按顺序合并
+        const packed = plain.slice();
+
+        // 若纯文本打包结果超过可用槽位，把多出的并入末条
+        if (packed.length > slots) {
+            const head = packed.slice(0, slots - 1);
+            const tail = packed.slice(slots - 1).join('');
+            packed.length = 0;
+            packed.push(...head, tail);
+        }
+
+        // 若特殊片段本身超限，保留前 maxSegments-slots 个（至少 1 个），其余并入末条
+        let keepSpecial = special;
+        if (special.length > maxSegments - packed.length) {
+            const allow = Math.max(1, maxSegments - packed.length);
+            keepSpecial = special.slice(0, allow);
+            const dropped = special.slice(allow).join('');
+            if (dropped) {
+                if (packed.length) packed[packed.length - 1] += dropped;
+                else packed.push(dropped);
+            }
+        }
+
+        // 按原顺序还原：特殊片段位置保持，纯文本槽位依次填充
+        const out = [];
+        let qi = 0;
+        for (const t of result) {
+            if (isSpecial(t)) {
+                if (keepSpecial.includes(t)) out.push(t);
+            } else {
+                if (qi < packed.length) out.push(packed[qi++]);
+            }
+        }
+        // 追加没被放入的纯文本
+        while (qi < packed.length) out.push(packed[qi++]);
+        result = out.filter(Boolean);
     }
 
-    // ---------- 步骤 8：长度兜底 + 随机延迟 ----------
+    // ---------- 步骤 8：动作标记转换 + 长度兜底 + 随机延迟 ----------
+    // 把 *动作描写* 转成 （动作描写），更符合 QQ 聊天习惯
+    if (opts.convertActionMarkers !== false) {
+        result = result.map((t) => convertActionMarkers(t));
+    }
+
     result = result.map((t) => (t.length > cfg.maxMessageLength
         ? t.slice(0, cfg.maxMessageLength) + '…'
         : t));
@@ -395,6 +456,19 @@ function segmentText(text, opts = {}) {
         text: t,
         delayMs: i === 0 ? 0 : dMin + Math.floor(Math.random() * Math.max(1, dMax - dMin)),
     }));
+}
+
+/**
+ * 把 *动作描写* 转成 （动作描写），更符合 QQ 聊天习惯。
+ * 只转换成对出现的星号，且内容非空、不含未闭合星号。
+ * 也支持中文全角星号 ＊。
+ */
+function convertActionMarkers(text) {
+    let out = String(text ?? '');
+    // 匹配 *内容*（非贪婪，内容不含星号，长度 1..200）
+    out = out.replace(/\*([^*\n]{1,200}?)\*/g, '（$1）');
+    out = out.replace(/＊([^＊\n]{1,200}?)＊/g, '（$1）');
+    return out;
 }
 
 /** 发送一条消息（文本或消息段数组） */
@@ -1029,9 +1103,9 @@ function readSegConfig() {
 
   return {
     enabled: $('#segEnabled').checked,
-    maxLen: Number($('#segMaxLen').value) || 120,
-    minLen: 8,
-    maxSegments: Number($('#segMaxSeg').value) || 4,
+    maxLen: Number($('#segMaxLen').value) || 100,
+    minLen: 6,
+    maxSegments: Number($('#segMaxSeg').value) || 8,
     hardChars: $('#segHard').value || '。！？!?…',
     softChars: $('#segSoft').value || '，,；;',
     pairChars: pairs,
@@ -1482,3 +1556,4 @@ consoleServer.listen(cfg.consolePort ?? 9510, '127.0.0.1', () =>
 
 connectOnebot();
 log(`连接器 v2.1 已启动: SnowLuma=${cfg.onebotUrl} | 扩展端口=${cfg.stExtPort} | 控制台=${cfg.consolePort ?? 9510}`);
+
