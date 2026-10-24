@@ -21,6 +21,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.json');
+const SESSIONS_PATH = path.join(__dirname, 'sessions.json');
 
 // ================= 配置（支持热更新） =================
 const DEFAULT_CONFIG = {
@@ -31,7 +32,54 @@ const DEFAULT_CONFIG = {
     trigger: { atOnly: true, privateReply: true, allowedUsers: [], allowedGroups: [] },
     maxMessageLength: 2000,
     replyProcessors: [],
+    // 默认角色/世界书：酒馆当前未选择角色时自动使用
+    defaults: {
+        character: '',      // 角色名（留空=不自动选择）
+        world: '',          // 世界书名（留空=不自动激活）
+    },
 };
+
+// ================= 会话持久化（文件存储，无需数据库） =================
+// 结构：{ "private_123456": { character: "雪乃", world: "雪之世界书", updatedAt: "..." } }
+let sessions = {};
+
+function loadSessions() {
+    try {
+        sessions = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf8'));
+    } catch {
+        sessions = {};
+    }
+}
+
+let saveSessionsTimer = null;
+function saveSessions() {
+    // 防抖：500ms 内多次变更只写一次
+    if (saveSessionsTimer) clearTimeout(saveSessionsTimer);
+    saveSessionsTimer = setTimeout(() => {
+        saveSessionsTimer = null;
+        try {
+            fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 4), 'utf8');
+        } catch (e) {
+            log('⚠ 会话持久化失败:', e.message);
+        }
+    }, 500);
+}
+
+/** 记录某会话的角色/世界书选择（供后续消息复用） */
+function rememberSession(key, patch) {
+    if (!sessions[key]) sessions[key] = {};
+    Object.assign(sessions[key], patch, { updatedAt: new Date().toISOString() });
+    saveSessions();
+}
+
+function sessionDefaults(key) {
+    const s = sessions[key] ?? {};
+    return {
+        character: s.character || cfg.defaults?.character || '',
+        world: s.world || cfg.defaults?.world || '',
+    };
+}
+
 
 function loadConfig() {
     try {
@@ -41,6 +89,7 @@ function loadConfig() {
     }
 }
 let cfg = loadConfig();
+loadSessions();
 function saveConfig() {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 4), 'utf8');
     log('配置已保存到 config.json');
@@ -198,6 +247,7 @@ function handleMessage(event) {
     sessionStats.get(key).last = Date.now();
 
     log(`QQ消息 → 酒馆 [${key}]: [${senderName}] ${text}`);
+    const def = sessionDefaults(key);
     broadcastToST({
         type: 'qq_message',
         sessionKey: key,
@@ -206,12 +256,18 @@ function handleMessage(event) {
         message_type,
         group_id,
         user_id,
+        // 该会话应使用的角色/世界书（会话级优先，回落到全局默认）
+        defaultCharacter: def.character,
+        defaultWorld: def.world,
     });
 }
 
 // ================= 酒馆扩展（下游） =================
 /** @type {Set<WebSocket>} */
 const stClients = new Set();
+
+/** 从扩展上报的角色/世界书清单（控制台下拉用） */
+const catalogs = { characters: [], worlds: [], updatedAt: null };
 
 function broadcastToST(obj) {
     const data = JSON.stringify(obj);
@@ -263,6 +319,32 @@ wss.on('connection', (socket) => {
             sendQQ({ ...sessionRoutes.get(key), text: msg.text, sessionKey: key });
         } else if (msg.type === 'hello') {
             log(`酒馆扩展握手: ${msg.ext ?? 'unknown'} v${msg.version ?? '?'}`);
+            // 握手时把会话持久化数据和默认配置同步给扩展（扩展据此做默认选择）
+            try {
+                socket.send(JSON.stringify({
+                    type: 'session_state',
+                    sessions,
+                    defaults: cfg.defaults ?? {},
+                }));
+                // 主动索要角色/世界书清单（扩展可能还没加载完，随后会重试）
+                socket.send(JSON.stringify({ type: 'sync_request' }));
+            } catch { /* 忽略 */ }
+        } else if (msg.type === 'session_selected') {
+            // 扩展上报：某会话切换了角色/世界书 → 持久化
+            const { sessionKey, character, world } = msg;
+            if (sessionKey) {
+                rememberSession(sessionKey, {
+                    ...(character !== undefined ? { character } : {}),
+                    ...(world !== undefined ? { world } : {}),
+                });
+                log(`会话选择已持久化 [${sessionKey}]: 角色=${character ?? '-'} 世界书=${world ?? '-'}`);
+            }
+        } else if (msg.type === 'catalog') {
+            // 扩展上报角色/世界书清单，供控制台下拉选择
+            catalogs.characters = msg.characters ?? catalogs.characters;
+            catalogs.worlds = msg.worlds ?? catalogs.worlds;
+            catalogs.updatedAt = new Date().toISOString();
+            log(`收到清单: ${catalogs.characters.length} 个角色 / ${catalogs.worlds.length} 个世界书`);
         }
     });
     socket.on('close', () => {
@@ -365,6 +447,20 @@ button.small { padding:3px 10px; font-size:12px; }
         <button id="saveUpstream">保存并重连上游</button>
       </div>
       <div class="hint">上游连接参数修改后会自动断开重连 SnowLuma。</div>
+    </div>
+
+    <div class="card">
+      <h2>默认角色 / 世界书</h2>
+      <div class="hint" style="margin-bottom:8px">酒馆当前未选择角色时，自动使用这里的默认值。会话级选择（QQ 指令切换过）优先。</div>
+      <label>默认角色</label>
+      <select id="defaultCharacter"><option value="">（不自动选择）</option></select>
+      <label>默认世界书</label>
+      <select id="defaultWorld"><option value="">（不自动激活）</option></select>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button id="saveDefaults">保存默认</button>
+        <button id="refreshCatalog" class="small">刷新清单</button>
+      </div>
+      <div class="hint" id="catalogInfo"></div>
     </div>
 
     <div class="card">
@@ -496,6 +592,42 @@ $('#saveDownstream').onclick = async () => {
   toast('已保存（端口修改需重启连接器生效）');
 };
 
+// ===== 默认角色/世界书 =====
+function fillSelect(sel, items, currentValue) {
+  const el = $(sel);
+  // 优先保留用户当前选择，其次用传入的配置值
+  const keep = el.value || currentValue || '';
+  el.innerHTML = '<option value="">（不自动选择）</option>';
+  for (const item of items) {
+    const o = document.createElement('option');
+    o.value = item; o.textContent = item;
+    el.appendChild(o);
+  }
+  if (keep && items.includes(keep)) el.value = keep;
+}
+
+function applyCatalog(c) {
+  if (!c) return;
+  fillSelect('#defaultCharacter', c.characters ?? [], state.defaultCharacter);
+  fillSelect('#defaultWorld', c.worlds ?? [], state.defaultWorld);
+  $('#catalogInfo').textContent = '清单更新于 ' + (c.updatedAt ? new Date(c.updatedAt).toLocaleTimeString() : '--')
+    + ' · ' + (c.characters ?? []).length + ' 角色 / ' + (c.worlds ?? []).length + ' 世界书';
+}
+
+$('#refreshCatalog').onclick = async () => {
+  await api('/catalog/refresh');
+  const s = await api('/status');
+  applyCatalog(s.catalogs);
+  toast('清单已刷新');
+};
+
+$('#saveDefaults').onclick = async () => {
+  await api('/config', {
+    defaults: { character: $('#defaultCharacter').value, world: $('#defaultWorld').value },
+  });
+  toast('默认角色/世界书已保存');
+};
+
 async function refresh() {
   const s = await api('/status');
   $('#obStatus').textContent = '上游: ' + (s.onebotConnected ? '已连接' : '未连接');
@@ -523,6 +655,12 @@ async function refresh() {
     $('#allowedGroups').value = (s.config.trigger.allowedGroups ?? []).join(',');
     $('#stExtPort').value = s.config.stExtPort;
     renderRules(s.config.replyProcessors ?? []);
+    state.defaultCharacter = s.config.defaults?.character ?? '';
+    state.defaultWorld = s.config.defaults?.world ?? '';
+  }
+  // 每次刷新都同步清单（扩展上报后自动出现在下拉里，保留当前选中值）
+  if (s.catalogs && (s.catalogs.characters?.length || s.catalogs.worlds?.length)) {
+    applyCatalog(s.catalogs);
   }
 }
 refresh();
@@ -544,9 +682,46 @@ const consoleServer = http.createServer((req, res) => {
             stClients: stClients.size,
             selfId,
             sessions: Object.fromEntries([...sessionStats.entries()]),
+            sessionChoices: sessions,
+            catalogs,
             logs: logBuffer,
             config: cfg,
         }));
+        return;
+    }
+    if (req.method === 'GET' && req.url === '/api/catalog/refresh') {
+        // 控制台“刷新清单”：向扩展索要最新清单
+        broadcastToST({ type: 'sync_request' });
+        setTimeout(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, catalogs }));
+        }, 600);
+        return;
+    }
+    if (req.method === 'POST' && req.url === '/api/session-choice') {
+        // 手动为某会话设置角色/世界书
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+            try {
+                const { sessionKey, character, world, reset } = JSON.parse(body);
+                if (!sessionKey) throw new Error('sessionKey required');
+                if (reset) {
+                    delete sessions[sessionKey];
+                    saveSessions();
+                } else {
+                    rememberSession(sessionKey, {
+                        ...(character !== undefined ? { character } : {}),
+                        ...(world !== undefined ? { world } : {}),
+                    });
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, sessions }));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+        });
         return;
     }
     if (req.method === 'POST' && req.url === '/api/config') {

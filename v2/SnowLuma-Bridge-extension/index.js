@@ -37,6 +37,9 @@ const log = (...a) => console.log(`[${extensionName} v${version}]`, ...a);
 let ws = null;
 let reconnectTimer = null;
 let pingTimer = null;
+// 连接器下发的会话状态（sessionKey → {character, world}）与全局默认
+let remoteSessions = {};
+let remoteDefaults = {};
 
 /** @type {Map<string, Array<{sender:string, text:string, sessionKey:string}>>} */
 const pendingQueue = new Map();
@@ -47,6 +50,32 @@ function chatNameOf(sessionKey) {
     if (sessionKey.startsWith('group_')) return 'GROUP_' + sessionKey.slice('group_'.length);
     if (sessionKey.startsWith('private_')) return 'QQ_' + sessionKey.slice('private_'.length);
     return 'QQ_' + sessionKey;
+}
+
+/**
+ * 上报角色/世界书清单给连接器（供控制台下拉）
+ * 返回是否成功（角色列表可能因 ST 尚未加载而为空）
+ */
+function reportCatalog() {
+    try {
+        const ctx = getContext();
+        const chars = (ctx.characters ?? []).map((c) => c.name).filter(Boolean);
+        const worlds = (world_names ?? []).slice();
+        wsSend({ type: 'catalog', characters: chars, worlds });
+        log(`已上报清单: ${chars.length} 个角色 / ${worlds.length} 个世界书`);
+        return chars.length > 0 || worlds.length > 0;
+    } catch (e) {
+        log('上报清单失败:', e.message);
+        return false;
+    }
+}
+
+function wsSend(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+        return true;
+    }
+    return false;
 }
 
 function connect() {
@@ -64,6 +93,14 @@ function connect() {
         log('✓ 已连接连接器', url);
         ws.send(JSON.stringify({ type: 'hello', ext: extensionName, version }));
         updateUI(true);
+        // 上报角色/世界书清单给控制台下拉；若 ST 还没加载完，稍后重试
+        let tries = 0;
+        const tryReport = () => {
+            tries++;
+            if (reportCatalog() || tries >= 10) return;
+            setTimeout(tryReport, 2000);
+        };
+        setTimeout(tryReport, 500);
     };
 
     ws.onmessage = (event) => {
@@ -74,6 +111,14 @@ function connect() {
             Promise.resolve()
                 .then(() => onQQMessage(msg))
                 .catch((e) => log('onQQMessage 异常(已隔离):', e.message, e.stack));
+        } else if (msg.type === 'session_state') {
+            // 连接器下发：会话持久化状态 + 全局默认
+            remoteSessions = msg.sessions ?? {};
+            remoteDefaults = msg.defaults ?? {};
+            log(`收到会话状态: ${Object.keys(remoteSessions).length} 条记录，默认角色=${remoteDefaults.character || '(未设)'}`);
+        } else if (msg.type === 'sync_request') {
+            // 连接器主动索要角色/世界书清单
+            reportCatalog();
         }
     };
 
@@ -172,6 +217,8 @@ async function handleCommand(msg) {
 
             const ctx2 = getContext();
             const firstMes = ctx2.chat?.[0]?.mes ?? '(无开场白)';
+            // 上报选择给连接器持久化
+            sendToBridge({ type: 'session_selected', sessionKey: msg.sessionKey, character: charName });
             return `✅ 已切换到角色「${charName}」（聊天: ${ctx2.getCurrentChatId()}）\n\n—— 开场白 ——\n${firstMes}`;
         }
         return '用法: /character list | /character select <名称/编号>';
@@ -189,6 +236,8 @@ async function handleCommand(msg) {
             if (!hit) return `未找到世界书「${argRaw}」。用 /word list 查看列表`;
             // /world <名称> 激活全局世界书（state 默认 on）
             await context.executeSlashCommandsWithOptions(`/world ${JSON.stringify(hit.item)}`);
+            // 上报选择给连接器持久化
+            sendToBridge({ type: 'session_selected', sessionKey: msg.sessionKey, world: hit.item });
             return `✅ 世界书「${hit.item}」已激活（对当前对话生效）`;
         }
         return '用法: /word list | /word select <名称/编号>';
@@ -251,6 +300,9 @@ async function onQQMessage(msg) {
         sender: msg.sender ?? String(msg.user_id ?? 'unknown'),
         text,
         sessionKey: key,
+        // 传递默认配置给 ensureChat
+        defaultCharacter: msg.defaultCharacter,
+        defaultWorld: msg.defaultWorld,
     });
     log(`入队 [${key}]: [${msg.sender}] ${text}（队列深度 ${pendingQueue.get(key).length}）`);
     pumpQueue();
@@ -268,29 +320,68 @@ function pumpQueue() {
     });
 }
 
-async function ensureChat(key) {
+/**
+ * 确保当前打开的聊天是该 QQ 的专属聊天。
+ * 若酒馆当前没有选中任何角色，则按以下优先级自动选择：
+ *   1. 该会话持久化的角色（remoteSessions[sessionKey].character）
+ *   2. 连接器下发的全局默认角色（message.defaultCharacter / remoteDefaults.character）
+ */
+async function ensureChat(key, msg = {}) {
     const context = getContext();
-    const target = chatNameOf(key);
-    const current = context.getCurrentChatId();
+    let target = chatNameOf(key);
+    let current = context.getCurrentChatId();
 
+    // ===== 1. 无角色时自动选择默认角色 =====
+    const noCharacter = context.characterId === null || context.characterId === undefined || context.characterId === '';
+    if (noCharacter) {
+        const desired =
+            remoteSessions?.[key]?.character ||
+            msg.defaultCharacter ||
+            remoteDefaults?.character ||
+            '';
+        if (!desired) {
+            throw new Error('酒馆未选择角色，且未配置默认角色。请在桥接控制台设置默认角色，或先手动选一个角色。');
+        }
+        log(`[${key}] 酒馆无选中角色 → 自动选择默认角色「${desired}」`);
+        await context.executeSlashCommandsWithOptions(`/go ${JSON.stringify(desired)}`);
+        await new Promise((r) => setTimeout(r, 1200));
+        current = getContext().getCurrentChatId();
+        log(`[${key}] 已进入角色「${desired}」的聊天: ${current}`);
+    }
+
+    // ===== 2. 确保世界书激活（会话级优先） =====
+    const desiredWorld = remoteSessions?.[key]?.world || msg.defaultWorld || remoteDefaults?.world || '';
+    if (desiredWorld) {
+        const activeWorld = getContext().chatMetadata?.world;
+        if (activeWorld !== desiredWorld) {
+            log(`[${key}] 激活世界书「${desiredWorld}」`);
+            try {
+                await getContext().executeSlashCommandsWithOptions(`/world ${JSON.stringify(desiredWorld)}`);
+            } catch (e) {
+                log(`[${key}] 世界书激活失败(忽略):`, e.message);
+            }
+        }
+    }
+
+    // ===== 3. 切换到该 QQ 的专属聊天 =====
     if (current === target) return;
 
-    if (!context.characterId && context.characterId !== 0) {
+    if (!getContext().characterId && getContext().characterId !== 0) {
         throw new Error('未选择角色，无法打开会话聊天');
     }
 
     log(`[${key}] 切换到专属聊天 → ${target}`);
     switchingChat = true;
     try {
-        await context.openCharacterChat(target);
-        log(`[${key}] 已进入聊天: ${context.getCurrentChatId()}`);
+        await getContext().openCharacterChat(target);
+        log(`[${key}] 已进入聊天: ${getContext().getCurrentChatId()}`);
     } finally {
         switchingChat = false;
     }
 }
 
 async function processMessage(item) {
-    await ensureChat(item.sessionKey);
+    await ensureChat(item.sessionKey, item);
 
     const context = getContext();
     const rendered = extension_settings[extensionName].messageTemplate
