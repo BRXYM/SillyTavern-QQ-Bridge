@@ -20,7 +20,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 import { world_names } from '../../../world-info.js';
 
 const extensionName = 'SnowLuma-Bridge';
-const version = '3.2.0';
+const version = '3.3.0';
 const defaultSettings = {
     bridgeUrl: 'ws://127.0.0.1:9500',
     autoConnect: true,
@@ -381,6 +381,11 @@ async function ensureChat(key, msg = {}) {
  * 空聊天时注入角色开场白。
  * openCharacterChat 新建的聊天没有消息，模型不知道场景，先补 first_mes。
  */
+/**
+ * 空聊天时注入角色开场白。
+ * 直接操作 chat 数组 + 官方渲染 API，不经过 slash 命令解析器，
+ * 避免命令解析失败导致界面渲染中断（黑屏）。
+ */
 async function ensureGreeting(ctx, key) {
     try {
         const chatArr = ctx.chat ?? [];
@@ -393,11 +398,31 @@ async function ensureGreeting(ctx, key) {
             log(`[${key}] 角色无开场白，跳过`);
             return;
         }
-        log(`[${key}] 空聊天 → 注入角色开场白`);
-        await ctx.executeSlashCommandsWithOptions(`/sendas name="${char.name}" ${JSON.stringify(first)}`);
-        await new Promise((r) => setTimeout(r, 500));
+
+        log(`[${key}] 空聊天 → 注入角色开场白（直接写入 chat 数组）`);
+        const { addOneMessage, saveChatConditional } = ctx;
+        const message = {
+            name: char.name,
+            is_user: false,
+            is_system: false,
+            send_date: new Date().toLocaleString(),
+            mes: first,
+            extra: { api: 'bridge', model: 'bridge' },
+        };
+
+        if (typeof addOneMessage === 'function') {
+            addOneMessage(message);          // 官方 API：加入数组 + 渲染
+        } else {
+            chatArr.push(message);           // 兜底
+            if (typeof ctx.printMessages === 'function') ctx.printMessages();
+        }
+
+        if (typeof saveChatConditional === 'function') {
+            await saveChatConditional();
+        }
+        await new Promise((r) => setTimeout(r, 300));
     } catch (e) {
-        log(`[${key}] 注入开场白失败(忽略):`, e.message);
+        log(`[${key}] 注入开场白失败(忽略):`, e.message, e.stack);
     }
 }
 
@@ -435,8 +460,35 @@ async function processMessage(item) {
         .replace('{text}', item.text);
 
     log(`处理 [${item.sessionKey}] @ ${context.getCurrentChatId()}:`, rendered);
-    await context.executeSlashCommandsWithOptions(`/send ${rendered} | /trigger`);
-    log(`[${item.sessionKey}] 生成已触发，等待回复事件…`);
+
+    // 用内部 API 发送用户消息 + 触发生成，绕开 slash 命令解析器。
+    // 命令解析器遇到引号/方括号/反斜杠等字符会撕裂参数，导致界面渲染中断（黑屏）。
+    const message = {
+        name: context.name1 || 'You',
+        is_user: true,
+        is_system: false,
+        send_date: new Date().toLocaleString(),
+        mes: rendered,
+        extra: {},
+    };
+
+    try {
+        if (typeof context.addOneMessage === 'function') {
+            context.addOneMessage(message);
+        } else {
+            context.chat.push(message);
+            if (typeof context.printMessages === 'function') context.printMessages();
+        }
+        if (typeof context.saveChatConditional === 'function') {
+            await context.saveChatConditional();
+        }
+        log(`[${item.sessionKey}] 用户消息已写入聊天，开始生成`);
+        await context.generate();
+        log(`[${item.sessionKey}] 生成调用返回`);
+    } catch (e) {
+        log(`[${item.sessionKey}] 发送/生成失败:`, e.message, e.stack);
+        throw e;
+    }
 }
 
 function releaseSession() {
@@ -543,4 +595,5 @@ jQuery(async () => {
     if (extension_settings[extensionName].autoConnect) connect();
     log('扩展初始化完成');
 });
+
 

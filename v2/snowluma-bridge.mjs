@@ -714,7 +714,7 @@ function renderSessionChoices(s) {
       '        <div class="hint">默认: 角色 ' + (dflt.character || '(未设)') + ' / 世界书 ' + (dflt.world || '(未设)') + '</div>',
       '      </div>',
     ];
-    return rows.join('\n');
+    return rows.join('\\n');
   }).join('');
 
   box.querySelectorAll('.rule').forEach((div) => {
