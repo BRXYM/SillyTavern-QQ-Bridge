@@ -1,0 +1,25 @@
+{
+    "description": "Connect QQ (OneBot v11 / SnowLuma / NapCat / Lagrange) with SillyTavern. Multi-session isolation, reply segmentation, image replies, web console. 把 QQ 与酒馆（SillyTavern）双向桥接：多会话隔离、回复分段、图片表情、Web 控制台。",
+    "topics": [
+        "sillytavern",
+        "sillytavern-extension",
+        "sillytavern-bridge",
+        "qq",
+        "qq-bot",
+        "qqbot",
+        "onebot",
+        "onebot11",
+        "onebot-v11",
+        "snowluma",
+        "napcat",
+        "lagrange",
+        "chatbot",
+        "llm",
+        "roleplay",
+        "ai-roleplay",
+        "bridge",
+        "vue3",
+        "typescript",
+        "tailwindcss"
+    ]
+}

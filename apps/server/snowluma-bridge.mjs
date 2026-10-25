@@ -18,6 +18,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
+import {
+    probeSnowLuma,
+    listAccounts,
+    readOneBotConfig,
+    ensureOneBotEndpoint,
+    isPortOpen,
+    discoverSnowLumaDir,
+    UIN_REGEX,
+} from './snowluma-service.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -1728,7 +1737,7 @@ setInterval(refresh, 2000);
 </body>
 </html>`;
 
-const consoleServer = http.createServer((req, res) => {
+const consoleServer = http.createServer(async (req, res) => {
     // 允许酒馆页面（:8000）跨域调用诊断接口
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -1874,6 +1883,163 @@ const consoleServer = http.createServer((req, res) => {
         });
         return;
     }
+
+    // ================= SnowLuma 服务集成 =================
+    // GET /api/snowluma/discover   自动发现 SnowLuma 目录
+    if (req.method === 'GET' && req.url?.startsWith('/api/snowluma/discover')) {
+        try {
+            const u = new URL(req.url, 'http://127.0.0.1');
+            const known = u.searchParams.get('known') ?? cfg.snowlumaDir ?? '';
+            const result = await discoverSnowLumaDir({
+                knownDir: known,
+                hintDirs: [process.cwd(), path.resolve(__dirname, '..', '..')],
+            });
+
+            // 对每个候选补充版本与账号信息，便于用户选择
+            const enriched = result.candidates.slice(0, 8).map((c) => {
+                const probe = probeSnowLuma(c.dir);
+                const accounts = probe.ok ? listAccounts(probe.dataDir) : [];
+                return {
+                    ...c,
+                    ok: probe.ok,
+                    version: probe.version,
+                    mode: probe.mode,
+                    accounts: accounts.map((a) => a.uin),
+                };
+            });
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                found: result.found && enriched.length > 0,
+                dir: result.dir,
+                source: result.source,
+                candidates: enriched,
+                tried: result.tried,
+            }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ found: false, error: e.message, candidates: [] }));
+        }
+        return;
+    }
+
+    // GET /api/snowluma/probe?dir=...&port=...   探测目录，返回版本/配置目录/账号清单
+    if (req.method === 'GET' && req.url?.startsWith('/api/snowluma/probe')) {
+        const u = new URL(req.url, 'http://127.0.0.1');
+        const dir = u.searchParams.get('dir') ?? cfg.snowlumaDir ?? '';
+        // activePort：SnowLuma WebUI 端口，用于判定实际生效的配置目录
+        const activePort = Number(u.searchParams.get('port') ?? cfg.snowlumaWebuiPort ?? 0) || null;
+        const probe = probeSnowLuma(dir, activePort);
+        const accounts = probe.ok ? listAccounts(probe.dataDir) : [];
+        // OneBot 端口监听状态：优先用配置里的 onebotUrl 端口
+        let onebotPort = 3001;
+        try {
+            onebotPort = Number(new URL(cfg.onebotUrl).port || 3001);
+        } catch {
+            /* 用默认值 */
+        }
+        const running = await isPortOpen(onebotPort);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            ...probe,
+            accounts,
+            onebotPortListening: running,
+            onebotPort,
+        }));
+        return;
+    }
+
+    // POST /api/snowluma/apply   一键配置：确保 wsServer 与 Bridge 对齐
+    if (req.method === 'POST' && req.url === '/api/snowluma/apply') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+            void (async () => {
+                try {
+                    const input = JSON.parse(body || '{}');
+                    const dir = (input.dir ?? cfg.snowlumaDir ?? '').trim();
+                    const uin = String(input.uin ?? '').trim();
+                    const port = Number(input.port ?? 3001);
+                    const host = input.host ?? '127.0.0.1';
+                    const forceToken = !!input.forceToken;
+                    const webuiPort = Number(input.webuiPort ?? cfg.snowlumaWebuiPort ?? 0) || null;
+
+                    if (!dir) throw new Error('请先填写 SnowLuma 目录');
+                    if (!UIN_REGEX.test(uin)) throw new Error('请填写正确的 QQ 号（5-12 位数字）');
+
+                    const probe = probeSnowLuma(dir, webuiPort);
+                    if (!probe.ok) throw new Error(probe.error || 'SnowLuma 目录无效');
+
+                    const result = ensureOneBotEndpoint({
+                        configDir: probe.configDir,
+                        uin,
+                        port,
+                        host,
+                        forceToken,
+                    });
+
+                    // 同步 Bridge 侧的上游连接参数
+                    const endpoint = result.endpoint;
+                    const tokenChanged = cfg.onebotToken !== result.token;
+                    const urlChanged = cfg.onebotUrl !== endpoint;
+
+                    cfg = {
+                        ...cfg,
+                        snowlumaDir: dir,
+                        snowlumaWebuiPort: webuiPort ?? cfg.snowlumaWebuiPort,
+                        onebotUrl: endpoint,
+                        onebotToken: result.token,
+                    };
+                    saveConfig();
+
+                    if (urlChanged || tokenChanged) {
+                        log('上游连接参数已由「自动配置」更新，重连 SnowLuma…');
+                        try { obSocket?.close(); } catch { /* 重连逻辑接管 */ }
+                    }
+
+                    log(`✓ SnowLuma 配置已写入：${result.path}（${result.changed ? '已更新' : '无变化'}）`);
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ok: true,
+                        changed: result.changed,
+                        created: result.created,
+                        path: result.path,
+                        token: result.token,
+                        endpoint,
+                        configDir: probe.configDir,
+                        dataDir: probe.dataDir,
+                        mode: probe.mode,
+                        version: probe.version,
+                        needRestart: result.changed,
+                    }));
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: e.message }));
+                }
+            })();
+        });
+        return;
+    }
+
+    // GET /api/snowluma/config?uin=...   读取指定账号的 OneBot 配置
+    if (req.method === 'GET' && req.url?.startsWith('/api/snowluma/config')) {
+        try {
+            const u = new URL(req.url, 'http://127.0.0.1');
+            const uin = u.searchParams.get('uin') ?? '';
+            const dir = u.searchParams.get('dir') ?? cfg.snowlumaDir ?? '';
+            const probe = probeSnowLuma(dir);
+            if (!probe.ok) throw new Error(probe.error || 'SnowLuma 目录无效');
+            const r = readOneBotConfig(probe.configDir, uin);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...r, configDir: probe.configDir }));
+        } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+        return;
+    }
+
     res.writeHead(404); res.end('not found');
 });
 consoleServer.listen(cfg.consolePort ?? 9510, '127.0.0.1', () =>

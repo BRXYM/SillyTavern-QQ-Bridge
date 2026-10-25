@@ -82,4 +82,91 @@ export const api = {
             method: 'POST',
             body: JSON.stringify({ text, rules }),
         }),
+
+    // ---- SnowLuma 服务集成 ----
+    discoverSnowLuma: (known?: string) =>
+        request<SnowLumaDiscoverResult>(
+            '/snowluma/discover' + (known ? '?known=' + encodeURIComponent(known) : ''),
+        ),
+
+    probeSnowLuma: (dir: string, webuiPort?: number) =>
+        request<SnowLumaProbe>(
+            '/snowluma/probe?dir=' + encodeURIComponent(dir) +
+                (webuiPort ? '&port=' + webuiPort : ''),
+        ),
+
+    applySnowLuma: (payload: {
+        dir: string;
+        uin: string;
+        port?: number;
+        webuiPort?: number;
+        host?: string;
+        forceToken?: boolean;
+    }) =>
+        request<SnowLumaApplyResult>('/snowluma/apply', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        }),
+
+    readSnowLumaConfig: (uin: string, dir?: string) =>
+        request<{ ok: boolean; exists: boolean; path: string; config: unknown }>(
+            '/snowluma/config?uin=' + encodeURIComponent(uin) +
+                (dir ? '&dir=' + encodeURIComponent(dir) : ''),
+        ),
 };
+
+/** 自动发现结果 */
+export interface SnowLumaDiscoverResult {
+    found: boolean;
+    dir: string;
+    source: string;
+    candidates: Array<{
+        dir: string;
+        source: string;
+        ok: boolean;
+        version: string;
+        mode: string;
+        accounts: string[];
+    }>;
+    tried: string[];
+    error?: string;
+}
+
+/** SnowLuma 目录探测结果 */
+export interface SnowLumaProbe {
+    ok: boolean;
+    dir: string;
+    configDir: string;
+    dataDir: string;
+    mode: 'release' | 'source' | 'flat' | '';
+    reason: string;
+    version: string;
+    hasConfig: boolean;
+    error: string;
+    accounts: Array<{ uin: string; hasIdentityDb: boolean; updatedAt: string | null }>;
+    onebotPortListening: boolean;
+    onebotPort: number;
+    alternatives: Array<{
+        mode: string;
+        configDir: string;
+        dataDir: string;
+        onebotFiles: number;
+        accounts: number;
+    }>;
+}
+
+/** 一键配置结果 */
+export interface SnowLumaApplyResult {
+    ok: boolean;
+    changed: boolean;
+    created: boolean;
+    path: string;
+    token: string;
+    endpoint: string;
+    configDir: string;
+    dataDir: string;
+    mode: string;
+    version: string;
+    needRestart: boolean;
+    error?: string;
+}
