@@ -80,7 +80,7 @@ SillyTavern QQ Bridge
 [dev] 模式：前后端一体
 [dev] 启动后端 .../apps/server/snowluma-bridge.mjs
 [api] 酒馆扩展 WS 服务已启动: ws://127.0.0.1:9500
-[api] Web 控制台已启动: http://127.0.0.1:9510
+[api] API 服务已启动: http://127.0.0.1:9510/api/status
 [dev] 后端就绪 → http://127.0.0.1:9510
 [web] VITE v7.3.7  ready in 790 ms
   ➜  控制台   http://localhost:5178
@@ -111,7 +111,6 @@ pnpm start            # 只启动后端（生产）
 pnpm build            # 构建前端
 pnpm test             # 运行单元测试（56 个）
 pnpm typecheck        # 类型检查
-pnpm test:console     # 用 jsdom 检查控制台运行时错误
 ```
 
 ### 环境变量
@@ -121,7 +120,7 @@ pnpm test:console     # 用 jsdom 检查控制台运行时错误
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `WEB_PORT` | `5178` | 前端端口 |
-| `API_PORT` | `9510` | 后端控制台 / API 端口 |
+| `API_PORT` | `9510` | 后端 API 端口（仅 `/api/*`，无网页） |
 | `EXT_PORT` | `9500` | 酒馆扩展 WebSocket 端口 |
 | `ONEBOT_URL` | — | 覆盖 `config.json` 的 OneBot 地址 |
 | `ONEBOT_TOKEN` | — | 覆盖 `config.json` 的 OneBot token |
