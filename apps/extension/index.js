@@ -404,6 +404,62 @@ function releaseBusy() {
     setTimeout(pump, 300);
 }
 
+/**
+ * 自动激活世界书。
+ *
+ * 优先级：会话级 > 消息携带的默认 > 全局默认
+ *
+ * 只在当前聊天「尚未绑定世界书」时激活，理由：
+ *   - 用户在酒馆里手动切换过世界书时，不应被默认值覆盖
+ *   - 已绑定说明该会话已有明确选择，保持现状更符合预期
+ *
+ * 激活方式走 ST 官方斜杠命令 /world，保证 world_info 写入 chatMetadata
+ * 并触发世界书重新扫描，而不是仅改内存变量。
+ */
+async function ensureWorldBook(ctx, item) {
+    const key = item.sessionKey;
+
+    // 当前聊天已绑定的世界书
+    const bound = ctx.chatMetadata?.world_info;
+    if (bound) {
+        log(`[${key}] 世界书已绑定「${bound}」，跳过自动激活`);
+        return;
+    }
+
+    const desired =
+        remoteSessions?.[key]?.world ||
+        item.defaultWorld ||
+        remoteDefaults?.world ||
+        '';
+    if (!desired) {
+        log(`[${key}] 未配置默认世界书，跳过`);
+        return;
+    }
+
+    // 校验世界书确实存在，避免 ST 报错打断生成流程
+    const worlds = getWorldNames();
+    if (worlds.length > 0 && !worlds.includes(desired)) {
+        log(`[${key}] 默认世界书「${desired}」不在列表中，跳过。现有: ${worlds.join(', ')}`);
+        return;
+    }
+
+    try {
+        log(`[${key}] 自动激活世界书「${desired}」`);
+        await ctx.executeSlashCommandsWithOptions(`/world ${JSON.stringify(desired)}`);
+        await new Promise((r) => setTimeout(r, 400));
+        const after = getContext();
+        const nowBound = after.chatMetadata?.world_info;
+        if (nowBound === desired) {
+            log(`[${key}] 世界书已激活: ${nowBound}`);
+        } else {
+            log(`[${key}] 世界书激活后校验失败（当前: ${nowBound || '未绑定'}）`);
+        }
+    } catch (e) {
+        // 世界书激活失败不应阻断消息处理
+        log(`[${key}] 世界书激活失败（已忽略）: ${e.message}`);
+    }
+}
+
 async function processMessage(item) {
     let ctx = getContext();
     log(`[${item.sessionKey}] 开始处理`);
@@ -452,6 +508,11 @@ async function processMessage(item) {
         ctx = getContext();
         log(`[${item.sessionKey}] 当前聊天: ${ctx.getCurrentChatId()}`);
     }
+
+    // ===== 自动激活世界书 =====
+    // 优先级：会话级 > 消息携带的默认 > 全局默认
+    // 只有当前聊天尚未绑定世界书时才自动激活，避免覆盖用户在酒馆里的手动选择。
+    await ensureWorldBook(ctx, item);
 
     const rendered = extension_settings[extensionName].messageTemplate
         .replace('{sender}', item.sender)

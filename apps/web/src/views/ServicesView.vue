@@ -31,7 +31,7 @@ const discovering = ref(false);
 const discoverResult = ref<SnowLumaDiscoverResult | null>(null);
 
 /** 自动检测 SnowLuma 目录 */
-async function doDiscover() {
+async function doDiscover(opts: { silent?: boolean } = {}) {
     discovering.value = true;
     discoverResult.value = null;
     try {
@@ -39,10 +39,12 @@ async function doDiscover() {
         discoverResult.value = r;
 
         if (!r.found || r.candidates.length === 0) {
-            toast.warning(
-                '未自动找到 SnowLuma',
-                '请手动填写目录。可设置环境变量 SNOWLUMA_DIR 让检测更准',
-            );
+            if (!opts.silent) {
+                toast.warning(
+                    '未自动找到 SnowLuma',
+                    '请手动填写目录。可设置环境变量 SNOWLUMA_DIR 让检测更准',
+                );
+            }
             return;
         }
 
@@ -57,14 +59,16 @@ async function doDiscover() {
             if (best.accounts.length > 0 && !snowUin.value) {
                 snowUin.value = best.accounts[0]!;
             }
-            toast.success(
-                `已定位 SnowLuma`,
-                `${best.dir} · ${best.source}`,
-            );
-            void doProbe();
+            // 进入页面时的自动检测不弹通知
+            if (!opts.silent) {
+                toast.success(`已定位 SnowLuma`, `${best.dir} · ${best.source}`);
+            }
+            void doProbe({ silent: opts.silent });
         }
     } catch (e) {
-        toast.error('自动检测失败', e instanceof Error ? e.message : String(e));
+        if (!opts.silent) {
+            toast.error('自动检测失败', e instanceof Error ? e.message : String(e));
+        }
     } finally {
         discovering.value = false;
     }
@@ -84,9 +88,9 @@ const snowState = computed<'running' | 'stopped' | 'unknown'>(() => {
     return snowRunning.value ? 'running' : 'stopped';
 });
 
-async function doProbe(opts: { keepResult?: boolean } = {}) {
+async function doProbe(opts: { keepResult?: boolean; silent?: boolean } = {}) {
     if (!snowDir.value.trim()) {
-        toast.warning('请先填写 SnowLuma 目录');
+        if (!opts.silent) toast.warning('请先填写 SnowLuma 目录');
         return;
     }
     probing.value = true;
@@ -96,19 +100,22 @@ async function doProbe(opts: { keepResult?: boolean } = {}) {
         const r = await api.probeSnowLuma(snowDir.value.trim(), snowWebuiPort.value);
         probe.value = r;
         if (!r.ok) {
-            toast.error('目录探测失败', r.error);
+            if (!opts.silent) toast.error('目录探测失败', r.error);
             return;
         }
         // 自动选中第一个账号
         if (!snowUin.value && r.accounts.length > 0) {
             snowUin.value = r.accounts[0]!.uin;
         }
-        toast.success(
-            `已识别 SnowLuma ${r.version || '(未知版本)'}`,
-            `${r.mode === 'source' ? '源码模式' : r.mode === 'release' ? '发行包模式' : '自定义布局'} · ${r.accounts.length} 个账号`,
-        );
+        // 自动探测（进入页面时）不弹通知，避免每次进入都打扰
+        if (!opts.silent) {
+            toast.success(
+                `已识别 SnowLuma ${r.version || '(未知版本)'}`,
+                `${r.mode === 'source' ? '源码模式' : r.mode === 'release' ? '发行包模式' : '自定义布局'} · ${r.accounts.length} 个账号`,
+            );
+        }
     } catch (e) {
-        toast.error('探测失败', e instanceof Error ? e.message : String(e));
+        if (!opts.silent) toast.error('探测失败', e instanceof Error ? e.message : String(e));
     } finally {
         probing.value = false;
     }
@@ -137,8 +144,8 @@ async function doApply(forceToken = false) {
         } else {
             toast.success('配置已就绪', `无需改动 · ${r.endpoint}`);
         }
-        // 刷新探测状态（保留结果面板）
-        void doProbe({ keepResult: true });
+        // 刷新探测状态（保留结果面板，静默避免叠加通知）
+        void doProbe({ keepResult: true, silent: true });
     } catch (e) {
         toast.error('自动配置失败', e instanceof Error ? e.message : String(e));
     } finally {
@@ -202,14 +209,16 @@ const stNextStep = computed(() => {
     return '';
 });
 
-async function stDoDiscover() {
+async function stDoDiscover(opts: { silent?: boolean } = {}) {
     stDiscovering.value = true;
     stDiscover.value = null;
     try {
         const r = await api.discoverSillyTavern(stDir.value.trim() || undefined);
         stDiscover.value = r;
         if (!r.found || r.candidates.length === 0) {
-            toast.warning('未自动找到酒馆', '请手动填写目录，或设置环境变量 SILLYTAVERN_DIR');
+            if (!opts.silent) {
+                toast.warning('未自动找到酒馆', '请手动填写目录，或设置环境变量 SILLYTAVERN_DIR');
+            }
             return;
         }
         const best =
@@ -218,32 +227,39 @@ async function stDoDiscover() {
             r.candidates[0];
         if (best) {
             stDir.value = best.dir;
-            toast.success('已定位酒馆', `${best.dir} · ${best.source}`);
-            void stDoProbe();
+            if (!opts.silent) {
+                toast.success('已定位酒馆', `${best.dir} · ${best.source}`);
+            }
+            void stDoProbe({ silent: opts.silent });
         }
     } catch (e) {
-        toast.error('自动检测失败', e instanceof Error ? e.message : String(e));
+        if (!opts.silent) {
+            toast.error('自动检测失败', e instanceof Error ? e.message : String(e));
+        }
     } finally {
         stDiscovering.value = false;
     }
 }
 
-async function stDoProbe() {
+async function stDoProbe(opts: { silent?: boolean } = {}) {
     if (!stDir.value.trim()) {
-        toast.warning('请先填写酒馆目录');
+        if (!opts.silent) toast.warning('请先填写酒馆目录');
         return;
     }
     stProbing.value = true;
     try {
         const r = await api.probeSillyTavern(stDir.value.trim(), stPort.value);
         stProbe.value = r;
-        if (!r.ok) {
-            toast.error('酒馆目录无效', r.error);
-        } else if (r.extConnected) {
-            toast.success('扩展已连接', `端口 ${r.extPort}`);
+        // 进入页面时的自动探测保持静默，仅手动点击才提示
+        if (!opts.silent) {
+            if (!r.ok) {
+                toast.error('酒馆目录无效', r.error);
+            } else if (r.extConnected) {
+                toast.success('扩展已连接', `端口 ${r.extPort}`);
+            }
         }
     } catch (e) {
-        toast.error('探测失败', e instanceof Error ? e.message : String(e));
+        if (!opts.silent) toast.error('探测失败', e instanceof Error ? e.message : String(e));
     } finally {
         stProbing.value = false;
     }
@@ -331,10 +347,11 @@ onMounted(async () => {
         snowDir.value = saved;
         const p = cfg?.['snowlumaWebuiPort'];
         if (typeof p === 'number' && p > 0) snowWebuiPort.value = p;
-        void doProbe();
+        // 进入页面自动探测：静默，不弹通知
+        void doProbe({ silent: true });
     } else {
-        // 首次使用：自动尝试定位 SnowLuma
-        void doDiscover();
+        // 首次使用：自动尝试定位 SnowLuma（静默）
+        void doDiscover({ silent: true });
     }
     const url = cfg?.['onebotUrl'];
     if (typeof url === 'string') {
@@ -348,10 +365,11 @@ onMounted(async () => {
     if (typeof stPortSaved === 'number' && stPortSaved > 0) stPort.value = stPortSaved;
     if (typeof stSaved === 'string' && stSaved) {
         stDir.value = stSaved;
-        void stDoProbe();
+        // 进入页面自动探测：静默
+        void stDoProbe({ silent: true });
     } else {
-        // 首次使用：自动尝试定位酒馆
-        void stDoDiscover();
+        // 首次使用：自动尝试定位酒馆（静默）
+        void stDoDiscover({ silent: true });
     }
 });
 </script>
