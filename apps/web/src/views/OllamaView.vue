@@ -68,6 +68,18 @@ let pollTimer: number | null = null;
 
 const online = computed(() => status.value?.online ?? false);
 
+/**
+ * 后端是否在跑旧代码。
+ *
+ * 判定依据：新版 /api/ollama/status 一定会返回 diskModelCount，
+ * 老版没有这个字段。之前排查"模型看不到"卡了很久，
+ * 就是因为运行中的进程是改动前的旧代码，页面却毫无提示。
+ */
+const staleBackend = computed(() => {
+    const s = status.value;
+    if (!s) return false;
+    return s.diskModelCount === undefined;
+});
 const modelOptions = computed(() =>
     models.value.map((m) => ({
         value: m.name,
@@ -412,6 +424,25 @@ const capabilityLabel: Record<string, string> = {
     <div class="flex flex-col gap-5">
         <!-- ============ 服务状态 ============ -->
         <UiCard>
+            <!-- 后端代码过期：最常见的"改了没生效" -->
+            <div v-if="staleBackend" class="border-b border-border/60 bg-destructive/10 px-5 py-3">
+                <div class="flex items-start gap-2">
+                    <AlertTriangle class="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                    <div class="min-w-0 text-[11px] leading-relaxed text-muted-foreground">
+                        <p class="font-medium text-foreground">后端在运行旧代码</p>
+                        <p class="mt-0.5">
+                            当前接口返回的字段与前端不匹配，说明 Node 后端进程还是改动前启动的那个。
+                            刷新页面不会让后端重新加载代码，必须重启进程。
+                        </p>
+                        <p class="mt-1 font-medium text-foreground">解决办法</p>
+                        <p class="mt-0.5">
+                            在项目根目录双击 <code class="font-mono">restart.cmd</code>，
+                            或在终端执行 <code class="font-mono">pnpm dev</code>（先停掉旧的）。
+                            如果提示端口无法释放，用管理员身份运行该脚本。
+                        </p>
+                    </div>
+                </div>
+            </div>
             <div class="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
                 <div class="flex items-center gap-3">
                     <div class="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">

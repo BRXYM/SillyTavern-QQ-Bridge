@@ -41,6 +41,25 @@ import { FaceService } from './faces-service.mjs';
 import { OllamaClient, OllamaDaemon, countModelsIn } from './ollama-service.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * 后端代码版本标记。
+ *
+ * 用途：改了代码但进程没重启时，前端能一眼看出来。
+ * 之前就因为这个踩过坑 —— 修好的逻辑没生效，还以为是修复本身有问题。
+ * 每次改后端逻辑时顺手更新这个值。
+ */
+const CODE_VERSION = '2026-10-26.3';
+
+/** 后端入口文件的最后修改时间（秒级），用来判断进程是否落后于代码 */
+const CODE_MTIME = (() => {
+    try {
+        const self = fileURLToPath(import.meta.url);
+        return Math.floor(fs.statSync(self).mtimeMs / 1000);
+    } catch {
+        return 0;
+    }
+})();
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const SESSIONS_PATH = path.join(__dirname, 'sessions.json');
 
@@ -1215,6 +1234,10 @@ const consoleServer = http.createServer(async (req, res) => {
                 heapUsedMb: Math.round((mem.heapUsed / 1024 / 1024) * 10) / 10,
                 heapTotalMb: Math.round((mem.heapTotal / 1024 / 1024) * 10) / 10,
                 externalMb: Math.round((mem.external / 1024 / 1024) * 10) / 10,
+                /** 后端源码版本：改动代码后如果这个值没变，说明进程还是旧的 */
+                codeVersion: CODE_VERSION,
+                /** 后端入口文件最后修改时间（用于判断是否落后于代码） */
+                codeMtime: CODE_MTIME,
             },
         }));
         return;

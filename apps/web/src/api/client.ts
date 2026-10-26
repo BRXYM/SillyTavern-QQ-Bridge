@@ -63,6 +63,10 @@ export interface ProcessInfo {
     heapUsedMb: number;
     heapTotalMb: number;
     externalMb: number;
+    /** 后端源码版本：改动代码后如果这个值没变，说明进程还是旧的 */
+    codeVersion?: string;
+    /** 后端入口文件最后修改时间（秒级） */
+    codeMtime?: number;
 }
 
 export interface SessionChoiceDto {
