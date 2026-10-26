@@ -289,6 +289,8 @@ export interface SillyTavernProbe {
     extDir: string;
     installed: boolean;
     installedVersion: string;
+    /** 酒馆主程序版本 */
+    version: string;
     files: string[];
     error: string;
     port: number;

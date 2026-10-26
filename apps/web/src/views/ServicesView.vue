@@ -614,6 +614,9 @@ onMounted(async () => {
                     >
                         {{ stProbe?.extConnected ? '已连接' : stProbe?.running ? '运行中·未连接' : '未运行' }}
                     </UiBadge>
+                    <UiBadge v-if="stProbe?.version" tone="outline" class="font-mono text-micro">
+                        v{{ stProbe.version }}
+                    </UiBadge>
                     <UiBadge v-if="stProbe?.installedVersion" tone="outline" class="font-mono text-micro">
                         扩展 v{{ stProbe.installedVersion }}
                     </UiBadge>
@@ -691,6 +694,9 @@ onMounted(async () => {
                                 <p class="font-medium">
                                     酒馆{{ stProbe.running ? '运行中' : '未运行' }} ·
                                     扩展{{ stProbe.installed ? `已安装 v${stProbe.installedVersion || '?'}` : '未安装' }}
+                                </p>
+                                <p v-if="stProbe.version" class="mt-1 text-muted-foreground">
+                                    酒馆版本：<span class="font-mono">v{{ stProbe.version }}</span>
                                 </p>
                                 <p class="mt-1 break-all text-muted-foreground">
                                     扩展目录：<span class="font-mono">{{ stProbe.extDir }}</span>

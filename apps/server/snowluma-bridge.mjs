@@ -1096,7 +1096,13 @@ const consoleServer = http.createServer(async (req, res) => {
                     (patch.onebotUrl !== undefined && patch.onebotUrl !== cfg.onebotUrl) ||
                     (patch.onebotToken !== undefined && patch.onebotToken !== cfg.onebotToken);
 
-                cfg = { ...cfg, ...patch, trigger: { ...cfg.trigger, ...(patch.trigger ?? {}) } };
+                cfg = {
+                    ...cfg,
+                    ...patch,
+                    // trigger / defaults 是嵌套对象，需深度合并避免整块被覆盖丢字段
+                    trigger: { ...cfg.trigger, ...(patch.trigger ?? {}) },
+                    defaults: { ...(cfg.defaults ?? {}), ...(patch.defaults ?? {}) },
+                };
 
                 // replyProcessors 单独处理：全量替换
                 if (patch.replyProcessors !== undefined) cfg.replyProcessors = patch.replyProcessors;
@@ -1106,8 +1112,18 @@ const consoleServer = http.createServer(async (req, res) => {
                     log('上游连接参数已变更，重连 SnowLuma…');
                     try { obSocket?.close(); } catch { /* 重连逻辑接管 */ }
                 }
+                // defaults / 会话状态变更后主动同步给已连接的酒馆扩展
+                if (patch.defaults !== undefined) {
+                    log(`默认角色/世界书已更新：${cfg.defaults?.character || '(未设)'} / ${cfg.defaults?.world || '(未设)'}`);
+                    broadcastToST({
+                        type: 'session_state',
+                        sessions,
+                        defaults: cfg.defaults ?? {},
+                        imageReplies: cfg.imageReplies ?? {},
+                    });
+                }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: true }));
+                res.end(JSON.stringify({ ok: true, defaults: cfg.defaults ?? {} }));
             } catch (e) {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: false, error: e.message }));

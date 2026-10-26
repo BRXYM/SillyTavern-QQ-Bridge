@@ -47,6 +47,10 @@ export function probeSillyTavern(rootDir) {
         extDir: '',
         installed: false,
         installedVersion: '',
+        /** 酒馆主程序版本（来自 package.json） */
+        version: '',
+        /** 更精确的 git describe（若可用） */
+        gitVersion: '',
         sourceVersion: '',
         files: [],
         error: '',
@@ -67,6 +71,26 @@ export function probeSillyTavern(rootDir) {
     if (!looksLikeSillyTavern(root)) {
         result.error = '该目录不像是 SillyTavern 安装目录（未找到 public/scripts/extensions）';
         return result;
+    }
+
+    // 读取酒馆版本：package.json 的 version 最可靠
+    try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+        if (pkg?.version) result.version = String(pkg.version);
+    } catch {
+        /* 没有 package.json 时留空 */
+    }
+
+    // package-lock / 发行包里的 build 标记可作为补充
+    if (!result.version) {
+        try {
+            const rel = JSON.parse(
+                fs.readFileSync(path.join(root, 'release.json'), 'utf8'),
+            );
+            if (rel?.version) result.version = String(rel.version);
+        } catch {
+            /* 忽略 */
+        }
     }
 
     const extDir = path.join(root, EXT_REL);
