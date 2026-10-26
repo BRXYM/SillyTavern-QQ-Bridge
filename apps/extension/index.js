@@ -16,7 +16,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 let worldNamesCache = null;
 
 const extensionName = 'SnowLuma-Bridge';
-const version = '4.5.0';
+const version = '4.6.0';
 const defaultSettings = {
     bridgeUrl: 'ws://127.0.0.1:9500',
     autoConnect: true,
@@ -31,6 +31,8 @@ let reconnectTimer = null;
 let pingTimer = null;
 let remoteSessions = {};
 let remoteDefaults = {};
+/** 表情库标签清单：{ tags: [{tag, count}], total } */
+let remoteFaceTags = { tags: [], total: 0 };
 
 const log = (...a) => {
     const text = a
@@ -140,6 +142,75 @@ function removeImageInstruction() {
     }
 }
 
+// ================= 表情库提示注入 =================
+/**
+ * 把表情库的标签清单注入提示词，让 AI 知道能发哪些表情。
+ *
+ * 关键设计：只注入「标签」，不注入 URL
+ *   - 11 个表情全 URL 约 1300 token，标签清单约 100 token
+ *   - AI 输出 [表情:标签] 后由 Bridge 查库换成真实图片
+ *
+ * 注入位置与图片提示一致（depth 4），切换会话时由 session_state 覆盖。
+ */
+const FACE_PROMPT_KEY = 'snowluma_face_hint';
+
+function injectFaceInstruction() {
+    const cfg = window.__snowlumaImageCfg;
+    const manifest = remoteFaceTags;
+
+    // 图片功能被关闭，或表情库为空时清除
+    if (!cfg || cfg.enabled === false || cfg.instruction === false) {
+        removeFaceInstruction();
+        return;
+    }
+    if (!manifest || !Array.isArray(manifest.tags) || manifest.tags.length === 0) {
+        removeFaceInstruction();
+        return;
+    }
+
+    const ctx = getContext();
+    if (typeof ctx?.setExtensionPrompt !== 'function') {
+        log('当前酒馆版本不支持 setExtensionPrompt，跳过表情提示注入');
+        return;
+    }
+
+    // 按数量降序，最多列 30 个标签，控制提示词长度
+    const list = manifest.tags
+        .slice(0, 30)
+        .map((t) => t.tag)
+        .join(' / ');
+
+    const instruction = [
+        '【表情包回复】',
+        `你可以使用表情包表达情绪。当前可用标签：${list}`,
+        '用法：在回复末尾插入 [表情:标签]，标签从上表中选择。',
+        '示例：[表情:开心]、[表情:猫]',
+        '',
+        '使用规则：',
+        '1. 一条消息最多使用一个表情；',
+        '2. 只在情绪明确、氛围轻松时使用，严肃话题、答疑、排查问题时不要用；',
+        '3. 不要每条消息都发表情，适当使用才自然；',
+        '4. 表情标记不会显示给用户，会替换成真实图片。',
+    ].join('\n');
+
+    try {
+        ctx.setExtensionPrompt(FACE_PROMPT_KEY, instruction, 1, 4, false);
+        log(`已注入表情提示（${manifest.tags.length} 个标签，库内 ${manifest.total} 个表情）`);
+    } catch (e) {
+        log('表情提示注入失败:', e.message);
+    }
+}
+
+function removeFaceInstruction() {
+    const ctx = getContext();
+    if (typeof ctx?.setExtensionPrompt !== 'function') return;
+    try {
+        ctx.setExtensionPrompt(FACE_PROMPT_KEY, '', 1, 4, false);
+    } catch {
+        /* ignore */
+    }
+}
+
 /**
  * 诊断日志：POST 到连接器 /api/ext-log。
  * 用 text/plain + no-cors 避免 CORS 预检（服务器仍能收到内容）。
@@ -210,15 +281,20 @@ function connect() {
                 remoteDefaults = msg.defaults ?? {};
                 if (msg.imageReplies) {
                     window.__snowlumaImageCfg = msg.imageReplies;
-                    // 提示注入依赖酒馆上下文就绪，稍作延迟
-                    setTimeout(() => {
-                        try {
-                            injectImageInstruction();
-                        } catch (e) {
-                            log('图片提示注入异常(已隔离):', e.message);
-                        }
-                    }, 500);
                 }
+                // 表情库标签清单（只含标签与数量，不含 URL）
+                if (msg.faceTags) {
+                    remoteFaceTags = msg.faceTags;
+                }
+                // 提示注入依赖酒馆上下文就绪，稍作延迟
+                setTimeout(() => {
+                    try {
+                        injectImageInstruction();
+                        injectFaceInstruction();
+                    } catch (e) {
+                        log('提示注入异常(已隔离):', e.message);
+                    }
+                }, 500);
             } else if (msg.type === 'sync_request') {
                 reportCatalog();
             }

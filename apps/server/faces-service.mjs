@@ -35,6 +35,8 @@ export class FaceService {
         this.callOnebot = opts.callOnebot;
         this.log = opts.log ?? (() => {});
         this.labeler = new OllamaLabeler(opts.ollama ?? {});
+        /** 表情库发生变化时的回调（用于刷新提示词清单） */
+        this.onChanged = opts.onChanged ?? null;
 
         /** 打标任务状态 */
         this.job = {
@@ -64,6 +66,16 @@ export class FaceService {
 
     #queue = [];
     #worker = null;
+
+    /** 通知外部：标签清单需要刷新 */
+    #notifyChanged(reason) {
+        if (!this.onChanged) return;
+        try {
+            this.onChanged(reason);
+        } catch (e) {
+            this.log(`表情库：变更通知失败 - ${e.message}`);
+        }
+    }
 
     // ---------------------------------------------------------------- 同步
 
@@ -130,6 +142,7 @@ export class FaceService {
 
             this.syncState.lastResult = { ...result, downloaded };
             this.syncState.lastAt = new Date().toISOString();
+            this.#notifyChanged('sync');
             return { ok: true, ...result, downloaded };
         } catch (e) {
             this.syncState.lastError = e.message;
@@ -297,6 +310,9 @@ export class FaceService {
                 this.log(
                     `表情库：打标结束，成功 ${this.job.done}，失败 ${this.job.failed}`,
                 );
+
+                // 标签变化了，通知外部刷新提示词清单
+                if (this.job.done > 0) this.#notifyChanged('label');
             }
         })();
 
@@ -334,7 +350,9 @@ export class FaceService {
     }
 
     setUserTags(md5, tags) {
-        return this.store.setUserTags(md5, tags);
+        const ok = this.store.setUserTags(md5, tags);
+        if (ok) this.#notifyChanged('user-tags');
+        return ok;
     }
 
     /** 按标签取一张（供 [表情:x] 解析） */

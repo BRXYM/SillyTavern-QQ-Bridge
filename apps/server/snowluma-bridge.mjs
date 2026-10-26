@@ -655,6 +655,29 @@ async function sendQQ(msg) {
 }
 
 /**
+ * 表情库的提示词用清单。
+ *
+ * 只下发「标签 + 每个标签的表情数量」，不下发 URL：
+ *   - 11 个表情全 URL 约 1300 token，标签清单约 100 token
+ *   - AI 输出 [表情:标签] 后由 Bridge 查库换成真实 URL
+ *
+ * 数量过多时按使用频次截断，避免提示词膨胀。
+ */
+function faceTagManifest(limit = 40) {
+    try {
+        if (!faces) return { tags: [], total: 0 };
+        const stats = faces.tagStats();
+        const total = faces.stats().total;
+        return {
+            tags: stats.slice(0, limit).map((t) => ({ tag: t.tag, count: t.total })),
+            total,
+        };
+    } catch {
+        return { tags: [], total: 0 };
+    }
+}
+
+/**
  * 表情图片的对外地址。
  *
  * 本地缓存的图片是相对路径（/faces/cache/xxx.jpg），
@@ -941,6 +964,8 @@ wss.on('connection', (socket) => {
                     sessions,
                     defaults: cfg.defaults ?? {},
                     imageReplies: cfg.imageReplies ?? {},
+                    // 表情库标签清单（供提示词注入，只有标签和数量，不含 URL）
+                    faceTags: faceTagManifest(),
                 }));
                 // 主动索要角色/世界书清单（扩展可能还没加载完，随后会重试）
                 socket.send(JSON.stringify({ type: 'sync_request' }));
@@ -985,6 +1010,21 @@ faces = new FaceService({
     dataDir: FACES_DATA_DIR,
     callOnebot,
     log,
+    // 表情库变化（同步/打标/改标签）后，主动刷新酒馆扩展的提示词清单
+    onChanged: (reason) => {
+        try {
+            broadcastToST({
+                type: 'session_state',
+                sessions,
+                defaults: cfg.defaults ?? {},
+                imageReplies: cfg.imageReplies ?? {},
+                faceTags: faceTagManifest(),
+            });
+            log(`表情库已更新（${reason}），提示词清单已推送给酒馆`);
+        } catch {
+            /* 扩展未连接时忽略 */
+        }
+    },
     ollama: {
         baseUrl: cfg.ollamaBaseUrl ?? 'http://127.0.0.1:11434',
         visionModel: cfg.ollamaVisionModel ?? 'qwen2.5vl:3b',
@@ -1209,6 +1249,7 @@ const consoleServer = http.createServer(async (req, res) => {
                         sessions,
                         defaults: cfg.defaults ?? {},
                         imageReplies: cfg.imageReplies ?? {},
+                        faceTags: faceTagManifest(),
                     });
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
