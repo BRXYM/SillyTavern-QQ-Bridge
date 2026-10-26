@@ -113,6 +113,8 @@ export class FaceService {
 
     #queue = [];
     #worker = null;
+    /** 图片下载去重：同一张图并发只下一次 */
+    #downloadLocks = new Map();
 
     /** 通知外部：标签清单需要刷新 */
     #notifyChanged(reason) {
@@ -235,6 +237,24 @@ export class FaceService {
             }
         }
         return n;
+    }
+
+    /**
+     * 把单张表情下载到本地缓存（供预览接口回源使用）。
+     * @returns {Promise<boolean>}
+     */
+    async downloadToCache(face) {
+        // 同一张图并发请求时只下载一次
+        const key = face.md5;
+        if (this.#downloadLocks.has(key)) return this.#downloadLocks.get(key);
+        const task = this.#downloadOne(face)
+            .then((r) => !!r?.ok)
+            .catch((e) => {
+                throw e;
+            })
+            .finally(() => this.#downloadLocks.delete(key));
+        this.#downloadLocks.set(key, task);
+        return task;
     }
 
     async #downloadOne(face) {
@@ -429,6 +449,85 @@ export class FaceService {
     /** 按标签取一张（供 [表情:x] 解析） */
     pickByTag(tag) {
         return this.store.pickByTag(tag);
+    }
+
+    /**
+     * 把表情图片另存到指定目录。
+     *
+     * 用途：用户想把表情导出到本地文件系统时使用。
+     * 文件名用「标签_序号.扩展名」，便于在资源管理器里直接认出来；
+     * 没有标签就退回 md5 前 8 位。
+     */
+    async saveToDir(md5s, dir) {
+        const fsMod = fs;
+        try {
+            fsMod.mkdirSync(dir, { recursive: true });
+        } catch (e) {
+            return { ok: false, error: `无法创建目录：${e.message}` };
+        }
+
+        const saved = [];
+        const failed = [];
+        let seq = 0;
+
+        for (const md5 of md5s) {
+            const face = this.store.get(md5);
+            if (!face) {
+                failed.push({ md5, error: '表情不存在' });
+                continue;
+            }
+
+            // 确保有本地缓存
+            let src = face.localFile;
+            if (!src || !fsMod.existsSync(src)) {
+                try {
+                    await this.downloadToCache(face);
+                } catch (e) {
+                    failed.push({ md5, error: `下载失败：${e.message}` });
+                    continue;
+                }
+                src = this.store.get(md5)?.localFile;
+            }
+            if (!src || !fsMod.existsSync(src)) {
+                failed.push({ md5, error: '缓存缺失' });
+                continue;
+            }
+
+            const ext = path.extname(src) || '.jpg';
+            const tags = [...(face.aiTags ?? []), ...(face.userTags ?? [])];
+            const base = tags.length > 0
+                ? `${tags.slice(0, 3).join('_')}_${String(++seq).padStart(3, '0')}`
+                : md5.slice(0, 8);
+
+            // 去掉文件名非法字符
+            const safe = base.replace(/[\\/:*?"<>|]/g, '').slice(0, 60) || md5.slice(0, 8);
+            let target = path.join(dir, `${safe}${ext}`);
+            // 重名时加序号
+            let n = 1;
+            while (fsMod.existsSync(target)) {
+                target = path.join(dir, `${safe}_${n}${ext}`);
+                n += 1;
+            }
+
+            try {
+                fsMod.copyFileSync(src, target);
+                saved.push({ md5, file: target });
+            } catch (e) {
+                failed.push({ md5, error: e.message });
+            }
+        }
+
+        if (saved.length > 0) {
+            this.log(`表情库：已导出 ${saved.length} 个表情到 ${dir}`);
+        }
+        return {
+            ok: saved.length > 0,
+            dir,
+            saved: saved.length,
+            failed: failed.length,
+            files: saved,
+            errors: failed,
+        };
     }
 
     /** Ollama 与环境自检 */

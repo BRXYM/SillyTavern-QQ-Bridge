@@ -25,6 +25,13 @@ export default defineConfig({
                 target: `http://127.0.0.1:${API_PORT}`,
                 changeOrigin: true,
             },
+            // 表情库图片缓存：后端以 /faces/cache/<file> 提供静态图片。
+            // 不代理的话，Vite 会把它当成前端路由，返回 index.html，
+            // 浏览器就渲染不出图（表现为预览空白/碎图）。
+            '/faces': {
+                target: `http://127.0.0.1:${API_PORT}`,
+                changeOrigin: true,
+            },
         },
     },
     build: {

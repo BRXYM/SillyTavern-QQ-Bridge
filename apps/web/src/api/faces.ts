@@ -154,4 +154,18 @@ export const facesApi = {
 
     resolve: (tag: string) =>
         req<{ ok: boolean; face: FaceItem }>(`/faces/resolve?tag=${encodeURIComponent(tag)}`),
+
+    /** 把表情图片保存到本地运行目录 */
+    save: (payload: { md5?: string; md5s?: string[]; dir?: string }) =>
+        req<{
+            ok: boolean;
+            dir: string;
+            saved: number;
+            failed: number;
+            files: Array<{ md5: string; file: string }>;
+            errors: Array<{ md5: string; error: string }>;
+        }>('/faces/save', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        }),
 };

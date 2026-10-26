@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import {
     Image as ImageIcon, RefreshCw, Wand2, X, Save, Plus, Sparkles, User,
     CheckCircle2, AlertTriangle, Cpu, StopCircle, Info, Search, Tag, Settings2,
+    Download, ImageOff, FolderOpen,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -199,6 +200,135 @@ async function saveTags() {
     }
 }
 
+// ---------------- 保存到本地 ----------------
+const savingAll = ref(false);
+
+/** 单个表情保存到本地运行目录 */
+async function saveOne(item: FaceItem) {
+  try {
+    const r = await facesApi.save({ md5: item.md5 });
+    if (r.ok) {
+      toast.success('已保存', r.files[0]?.file ?? r.dir);
+    } else {
+      toast.warning('保存失败', r.errors[0]?.error ?? '未知原因');
+    }
+  } catch (e) {
+    toast.error('保存失败', e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** 当前筛选结果全部保存 */
+async function saveAll() {
+  savingAll.value = true;
+  try {
+    // 只保存当前页中已缓存的，避免一次拉太多
+    const md5s = items.value.map((x) => x.md5);
+    if (md5s.length === 0) {
+      toast.warning('没有可保存的表情');
+      return;
+    }
+    const r = await facesApi.save({ md5s });
+    if (r.ok) {
+      toast.success(
+        `已保存 ${r.saved} 个表情`,
+        `${r.dir}${r.failed ? `（${r.failed} 个失败）` : ''}`,
+      );
+    } else {
+      toast.warning('保存失败', r.errors[0]?.error ?? '未知原因');
+    }
+  } catch (e) {
+    toast.error('保存失败', e instanceof Error ? e.message : String(e));
+  } finally {
+    savingAll.value = false;
+  }
+}
+
+/** 展开的描述（默认只显示一行，避免卡片过高） */
+const expanded = ref<Set<string>>(new Set());
+
+function toggleExpand(md5: string) {
+  const next = new Set(expanded.value);
+  if (next.has(md5)) next.delete(md5);
+  else next.add(md5);
+  expanded.value = next;
+}
+
+// ---------------- 大图预览 ----------------
+const preview = ref<FaceItem | null>(null);
+
+function openPreview(item: FaceItem) {
+  if (isBroken(item.md5)) return;
+  preview.value = item;
+}
+
+function closePreview() {
+  preview.value = null;
+}
+
+/** 键盘 Esc 关闭大图 */
+function onKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return;
+  if (preview.value) closePreview();
+  else if (editing.value) closeEdit();
+}
+
+// ---------------- 预览失败处理 ----------------
+/** 记录加载失败的图片，避免反复请求坏图 */
+const brokenImages = ref<Set<string>>(new Set());
+
+/** 图片原始尺寸：小图不强行放大，避免糊成一团 */
+const imageSizes = ref<Record<string, { w: number; h: number }>>({});
+
+/** 小于这个尺寸的图按原尺寸显示（1:1 像素，不插值） */
+const SMALL_IMG = 96;
+
+function onImgLoad(md5: string, e: Event) {
+  const el = e.target as HTMLImageElement;
+  if (!el?.naturalWidth) return;
+  if (!imageSizes.value[md5]) {
+    imageSizes.value = { ...imageSizes.value, [md5]: { w: el.naturalWidth, h: el.naturalHeight } };
+  }
+}
+
+/**
+ * 小图适度放大，但不无限拉伸。
+ *
+ * QQ 表情 CDN 只提供原始小图（常见 46~64px），没有高清版。
+ * 铺满格子会糊成一片，原样显示又太小；折中做法是限制最大放大倍数，
+ * 小图最多放大 2 倍，既保证能看清，又不至于全是插值噪点。
+ */
+function imgStyle(item: FaceItem): Record<string, string> {
+  const sz = imageSizes.value[item.md5];
+  if (!sz) return {};
+  const max = Math.max(sz.w, sz.h);
+  if (max >= SMALL_IMG) return {};
+  const scale = Math.min(2, SMALL_IMG / Math.max(1, max));
+  return {
+    width: `${Math.round(sz.w * scale)}px`,
+    height: `${Math.round(sz.h * scale)}px`,
+  };
+}
+
+function onImgError(md5: string) {
+  brokenImages.value = new Set(brokenImages.value).add(md5);
+}
+
+function isBroken(md5: string) {
+  return brokenImages.value.has(md5);
+}
+
+/** 重试加载：清掉失败标记并强制刷新（加时间戳绕开浏览器缓存） */
+function retryImage(md5: string) {
+  const next = new Set(brokenImages.value);
+  next.delete(md5);
+  brokenImages.value = next;
+  // 给 img 一个不同的 src 以触发重新加载
+  const item = items.value.find((x) => x.md5 === md5);
+  if (item) {
+    item.imageUrl = `${item.imageUrl.split('?')[0]}?t=${Date.now()}`;
+  }
+}
+
 // ---------------- 筛选 ----------------
 function pickTag(t: string) {
     activeTag.value = activeTag.value === t ? '' : t;
@@ -231,10 +361,12 @@ onMounted(async () => {
     await refreshAll();
     const p = await facesApi.progress().catch(() => null);
     if (p?.running) startPolling();
+    window.addEventListener('keydown', onKeydown);
 });
 
 onUnmounted(() => {
     if (pollTimer !== null) window.clearInterval(pollTimer);
+    window.removeEventListener('keydown', onKeydown);
 });
 </script>
 
@@ -354,12 +486,20 @@ onUnmounted(() => {
                     <Sparkles class="size-4" />
                     重新识别全部
                 </UiButton>
+                <UiButton
+                    variant="ghost"
+                    size="sm"
+                    :disabled="savingAll || stats.total === 0"
+                    @click="saveAll"
+                >
+                    <FolderOpen class="size-4" />
+                    {{ savingAll ? '保存中…' : '保存本页到本地' }}
+                </UiButton>
                 <div class="flex-1" />
                 <span v-if="progress?.sync.lastAt" class="text-[11px] text-muted-foreground">
                     上次同步 {{ new Date(progress.sync.lastAt).toLocaleString('zh-CN') }}
                 </span>
-            </div>
-        </UiCard>
+            </div>        </UiCard>
 
         <!-- ============ 筛选 ============ -->
         <UiCard v-if="stats.total > 0">
@@ -417,42 +557,75 @@ onUnmounted(() => {
                 <p class="text-xs text-muted-foreground/70">试试清除筛选条件</p>
             </div>
 
-            <div v-else class="grid grid-cols-2 gap-3 px-5 py-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+            <div v-else class="grid grid-cols-2 gap-3 px-5 py-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
                 <div
                     v-for="item in items"
                     :key="item.md5"
                     class="group flex flex-col overflow-hidden rounded-lg border border-border/60 bg-card transition-shadow hover:shadow-md"
                 >
                     <!-- 图片 -->
-                    <div class="relative flex aspect-square items-center justify-center bg-muted/30 p-2">
+                    <div class="relative flex aspect-square items-center justify-center bg-muted/30 p-1.5">
                         <img
+                            v-if="!isBroken(item.md5)"
                             :src="item.imageUrl"
                             :alt="item.caption || item.md5"
-                            class="max-h-full max-w-full object-contain"
+                            class="max-h-full max-w-full cursor-zoom-in object-contain"
+                            :style="imgStyle(item)"
                             loading="lazy"
+                            @error="onImgError(item.md5)"
+                            @load="onImgLoad(item.md5, $event)"
+                            @click="openPreview(item)"
                         />
+                        <!-- 预览失败占位 -->
+                        <div v-else class="flex flex-col items-center gap-1 px-1 text-center">
+                            <ImageOff class="size-5 text-muted-foreground/40" />
+                            <span class="text-[9px] leading-tight text-muted-foreground/70">
+                                预览失败
+                            </span>
+                            <button
+                                class="rounded bg-accent/60 px-1.5 py-0.5 text-[9px] text-foreground transition-colors hover:bg-accent"
+                                @click="retryImage(item.md5)"
+                            >
+                                重试
+                            </button>
+                            <button
+                                class="text-[9px] text-primary hover:underline"
+                                @click="saveOne(item)"
+                            >
+                                保存
+                            </button>
+                        </div>
                         <!-- 状态角标 -->
-                        <div class="absolute right-1.5 top-1.5 flex gap-1">
+                        <div class="absolute right-1 top-1 flex gap-1">
                             <span
                                 v-if="item.labeledAt"
-                                class="rounded bg-success/90 px-1.5 py-0.5 text-[9px] font-medium text-white"
+                                class="rounded bg-success/90 px-1 py-0.5 text-[8px] font-medium text-white"
                             >
                                 AI
                             </span>
                             <span
                                 v-if="item.userTags.length"
-                                class="rounded bg-info/90 px-1.5 py-0.5 text-[9px] font-medium text-white"
+                                class="rounded bg-info/90 px-1 py-0.5 text-[8px] font-medium text-white"
                             >
-                                自定义
+                                自定
                             </span>
                         </div>
-                        <div v-if="item.labelError" class="absolute bottom-1.5 left-1.5">
-                            <AlertTriangle class="size-3.5 text-destructive" />
+                        <div v-if="item.labelError" class="absolute bottom-1 left-1">
+                            <AlertTriangle class="size-3 text-destructive" />
                         </div>
+                        <!-- 悬停：保存 -->
+                        <button
+                            v-if="!isBroken(item.md5)"
+                            class="absolute bottom-1 right-1 rounded bg-black/55 p-1 text-white opacity-0 transition-opacity hover:bg-black/75 group-hover:opacity-100"
+                            title="保存到本地"
+                            @click="saveOne(item)"
+                        >
+                            <Download class="size-3" />
+                        </button>
                     </div>
 
                     <!-- 标签 -->
-                    <div class="flex flex-1 flex-col gap-1.5 p-2">
+                    <div class="flex flex-1 flex-col gap-1 p-2">
                         <div class="flex flex-wrap gap-1">
                             <span
                                 v-for="t in item.aiTags"
@@ -475,20 +648,30 @@ onUnmounted(() => {
                                 未打标
                             </span>
                         </div>
+                        <!-- 描述：默认只显示一行，hover 展开 -->
                         <p
                             v-if="item.caption"
-                            class="line-clamp-2 text-[10px] leading-snug text-muted-foreground/80"
+                            class="text-[10px] leading-snug text-muted-foreground/80"
+                            :class="expanded.has(item.md5) ? '' : 'line-clamp-1'"
                             :title="item.caption"
+                            @click="toggleExpand(item.md5)"
                         >
                             {{ item.caption }}
                         </p>
-                        <div class="mt-auto flex justify-end">
+                        <div class="mt-auto flex items-center justify-between gap-1">
                             <button
-                                class="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                                v-if="item.caption"
+                                class="text-[9px] text-muted-foreground/70 transition-colors hover:text-foreground"
+                                @click="toggleExpand(item.md5)"
+                            >
+                                {{ expanded.has(item.md5) ? '收起' : '展开' }}
+                            </button>
+                            <button
+                                class="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                                 @click="openEdit(item)"
                             >
                                 <Tag class="size-3" />
-                                编辑标签
+                                编辑
                             </button>
                         </div>
                     </div>
@@ -519,6 +702,78 @@ onUnmounted(() => {
             </div>
         </UiCard>
 
+        <!-- ============ 大图预览 ============ -->
+        <div
+            v-if="preview"
+            class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+            @click.self="closePreview"
+        >
+            <div class="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-card shadow-2xl">
+                <div class="flex items-center justify-between border-b border-border/60 px-4 py-2.5">
+                    <div class="flex min-w-0 items-center gap-2">
+                        <span class="truncate font-mono text-[11px] text-muted-foreground">
+                            {{ preview.md5 }}
+                        </span>
+                        <UiBadge v-if="imageSizes[preview.md5]" tone="outline" class="text-micro">
+                            {{ imageSizes[preview.md5]!.w }} × {{ imageSizes[preview.md5]!.h }}
+                        </UiBadge>
+                    </div>
+                    <button
+                        class="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                        @click="closePreview"
+                    >
+                        <X class="size-4" />
+                    </button>
+                </div>
+
+                <!-- 棋盘格背景，便于看清透明区域 -->
+                <div
+                    class="flex min-h-0 flex-1 items-center justify-center overflow-auto p-6"
+                    style="background-image: linear-gradient(45deg, #e5e7eb 25%, transparent 25%), linear-gradient(-45deg, #e5e7eb 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #e5e7eb 75%), linear-gradient(-45deg, transparent 75%, #e5e7eb 75%); background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0px;"
+                >
+                    <img
+                        :src="preview.imageUrl"
+                        :alt="preview.caption"
+                        class="max-h-[60vh] object-contain"
+                        style="image-rendering: auto"
+                    />
+                </div>
+
+                <div class="border-t border-border/60 px-4 py-3">
+                    <div class="flex flex-wrap gap-1.5">
+                        <span
+                            v-for="t in preview.aiTags"
+                            :key="`p-ai-${t}`"
+                            class="rounded bg-accent/60 px-2 py-1 text-[11px]"
+                        >
+                            {{ t }}
+                        </span>
+                        <span
+                            v-for="t in preview.userTags"
+                            :key="`p-u-${t}`"
+                            class="rounded bg-info/15 px-2 py-1 text-[11px] text-info"
+                        >
+                            {{ t }}
+                        </span>
+                    </div>
+                    <p v-if="preview.caption" class="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                        {{ preview.caption }}
+                    </p>
+                </div>
+
+                <div class="flex items-center justify-end gap-2 border-t border-border/60 px-4 py-2.5">
+                    <UiButton variant="outline" size="sm" @click="openEdit(preview); closePreview()">
+                        <Tag class="size-3.5" />
+                        编辑标签
+                    </UiButton>
+                    <UiButton size="sm" @click="saveOne(preview)">
+                        <Download class="size-3.5" />
+                        保存到本地
+                    </UiButton>
+                </div>
+            </div>
+        </div>
+
         <!-- ============ 编辑弹窗 ============ -->
         <div
             v-if="editing"
@@ -539,12 +794,27 @@ onUnmounted(() => {
 
                 <div class="min-h-0 flex-1 overflow-y-auto">
                     <!-- 图片预览 -->
-                    <div class="flex justify-center bg-muted/20 px-5 py-4">
+                    <div class="relative flex justify-center bg-muted/20 px-5 py-4">
                         <img
+                            v-if="!isBroken(editing.md5)"
                             :src="editing.imageUrl"
                             :alt="editing.caption"
                             class="max-h-48 rounded-lg object-contain"
+                            @error="onImgError(editing.md5)"
                         />
+                        <div v-else class="flex flex-col items-center gap-2 py-6">
+                            <ImageOff class="size-8 text-muted-foreground/40" />
+                            <p class="text-xs text-muted-foreground">图片预览失败</p>
+                            <div class="flex gap-2">
+                                <UiButton variant="outline" size="sm" @click="retryImage(editing.md5)">
+                                    重试
+                                </UiButton>
+                                <UiButton size="sm" @click="saveOne(editing)">
+                                    <Download class="size-3.5" />
+                                    保存到本地
+                                </UiButton>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- AI 标签（只读） -->

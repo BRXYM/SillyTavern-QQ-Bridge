@@ -1670,31 +1670,72 @@ const consoleServer = http.createServer(async (req, res) => {
 
     // ================= 表情库 =================
     // GET /faces/cache/<file>   本地缓存的图片（静态资源）
+    // GET /faces/cache/<file>?download=1   另存为文件（浏览器下载）
     if (req.method === 'GET' && req.url?.startsWith('/faces/cache/')) {
-        const name = decodeURIComponent(req.url.slice('/faces/cache/'.length).split('?')[0]);
+        const rawName = req.url.slice('/faces/cache/'.length);
+        const name = decodeURIComponent(rawName.split('?')[0]);
         // 防目录穿越：只允许纯文件名
         if (!name || name.includes('..') || name.includes('/') || name.includes('\\')) {
             res.writeHead(400);
             res.end('bad request');
             return;
         }
+
+        const wantDownload = /[?&]download=1/.test(rawName);
         const file = path.join(faces.store.cacheDir, name);
+
+        // 缓存丢了就按文件名里的 md5 回源下载一次，避免预览空白
         if (!fs.existsSync(file)) {
-            res.writeHead(404);
-            res.end('not found');
+            const md5 = path.basename(name, path.extname(name));
+            const face = faces.store.get(md5);
+            if (face?.url) {
+                try {
+                    const ok = await faces.downloadToCache(face);
+                    if (!ok) throw new Error('下载失败');
+                } catch (e) {
+                    log(`表情库：预览回源失败 ${md5.slice(0, 8)} - ${e.message}`);
+                    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+                    res.end('图片缓存缺失且回源失败');
+                    return;
+                }
+            } else {
+                res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+                res.end('图片不存在');
+                return;
+            }
+        }
+
+        // 回源后可能换了扩展名，重新定位实际文件
+        let realFile = file;
+        if (!fs.existsSync(realFile)) {
+            const md5 = path.basename(name, path.extname(name));
+            const face = faces.store.get(md5);
+            if (face?.localFile && fs.existsSync(face.localFile)) realFile = face.localFile;
+        }
+        if (!fs.existsSync(realFile)) {
+            res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('图片不存在');
             return;
         }
-        const ext = path.extname(file).toLowerCase();
+
+        const ext = path.extname(realFile).toLowerCase();
         const type =
             ext === '.png' ? 'image/png'
                 : ext === '.gif' ? 'image/gif'
                     : ext === '.webp' ? 'image/webp'
                         : 'image/jpeg';
-        res.writeHead(200, {
+        const headers = {
             'Content-Type': type,
-            'Cache-Control': 'public, max-age=86400',
-        });
-        fs.createReadStream(file).pipe(res);
+            // 缓存时间短一些：万一之前缓存了错误响应，能尽快自愈
+            'Cache-Control': 'public, max-age=600',
+            'Content-Length': String(fs.statSync(realFile).size),
+        };
+        if (wantDownload) {
+            const md5 = path.basename(realFile, ext);
+            headers['Content-Disposition'] = `attachment; filename="${md5}${ext}"`;
+        }
+        res.writeHead(200, headers);
+        fs.createReadStream(realFile).pipe(res);
         return;
     }
 
@@ -1795,6 +1836,46 @@ const consoleServer = http.createServer(async (req, res) => {
                 res.end(JSON.stringify({ ok }));
             } catch (e) {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // POST /api/faces/save   把表情保存到本地运行目录
+    // body: { md5 } 或 { md5s: [...] }，可选 dir 覆盖目标目录
+    if (req.method === 'POST' && req.url === '/api/faces/save') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', async () => {
+            try {
+                const input = JSON.parse(body || '{}');
+                const md5s = Array.isArray(input.md5s)
+                    ? input.md5s.map((x) => String(x))
+                    : input.md5
+                      ? [String(input.md5)]
+                      : [];
+                if (md5s.length === 0) throw new Error('请提供 md5 或 md5s');
+
+                // 默认存到项目运行目录下的 exports/faces/<日期>/
+                const dir = input.dir
+                    ? path.resolve(String(input.dir))
+                    : path.resolve(
+                          FACES_DATA_DIR,
+                          '..',
+                          '..',
+                          'exports',
+                          'faces',
+                          new Date().toISOString().slice(0, 10),
+                      );
+
+                const r = await faces.saveToDir(md5s, dir);
+                res.writeHead(r.ok ? 200 : 400, {
+                    'Content-Type': 'application/json; charset=utf-8',
+                });
+                res.end(JSON.stringify(r));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
                 res.end(JSON.stringify({ ok: false, error: e.message }));
             }
         });
