@@ -9,6 +9,62 @@ export interface SessionStat {
     last: number;
 }
 
+/** 上游（SnowLuma / OneBot）连接详情 */
+export interface UpstreamStatus {
+    connected: boolean;
+    endpoint: string;
+    selfId: string;
+    nickname: string;
+    connectedForSec: number;
+    connectedAt: number | null;
+    disconnectedAt: number | null;
+    reconnectCount: number;
+    eventsIn: number;
+    actionsOut: number;
+    actionErrors: number;
+    lastEventAt: number | null;
+    lastError: string;
+    lastErrorAt: number | null;
+}
+
+/** 下游（酒馆扩展）连接详情 */
+export interface ExtensionClient {
+    id: number;
+    ext: string;
+    version: string;
+    connectedAt: number | null;
+    connectedForSec: number;
+    lastPingAt: number | null;
+}
+
+export interface ExtensionStatus {
+    port: number;
+    clientCount: number;
+    clients: ExtensionClient[];
+}
+
+export interface RuntimeMetrics {
+    sessionCount: number;
+    totalIn: number;
+    totalOut: number;
+    lastActiveAt: number | null;
+    characterCount: number;
+    worldCount: number;
+}
+
+export interface ProcessInfo {
+    pid: number;
+    nodeVersion: string;
+    platform: string;
+    arch: string;
+    uptimeSec: number;
+    startedAt: number;
+    rssMb: number;
+    heapUsedMb: number;
+    heapTotalMb: number;
+    externalMb: number;
+}
+
 export interface SessionChoiceDto {
     character?: string;
     world?: string;
@@ -31,6 +87,12 @@ export interface StatusDto {
     sessionChoices: Record<string, SessionChoiceDto>;
     catalogs: CatalogDto;
     config: Record<string, unknown>;
+    // 新增详细状态（后端可能先于前端升级，故设为可选）
+    generatedAt?: number;
+    upstream?: UpstreamStatus;
+    extension?: ExtensionStatus;
+    metrics?: RuntimeMetrics;
+    process?: ProcessInfo;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

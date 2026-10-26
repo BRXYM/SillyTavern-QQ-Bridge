@@ -271,14 +271,17 @@ function connectOnebot() {
 function callOnebot(action, params) {
     return new Promise((resolve, reject) => {
         if (!obSocket || obSocket.readyState !== WebSocket.OPEN) {
+            upstreamStats.actionErrors += 1;
             return reject(new Error('OneBot WS 未连接'));
         }
         const echo = `bridge_${++echoSeq}`;
         wsPending.set(echo, { resolve, reject });
+        upstreamStats.actionsOut += 1;
         obSocket.send(JSON.stringify({ action, params, echo }));
         setTimeout(() => {
             if (wsPending.has(echo)) {
                 wsPending.delete(echo);
+                upstreamStats.actionErrors += 1;
                 reject(new Error(`OneBot 动作超时: ${action}`));
             }
         }, 15000);
@@ -803,12 +806,14 @@ wss.on('listening', () => log(`酒馆扩展 WS 服务已启动: ws://127.0.0.1:$
 wss.on('connection', (socket) => {
     stClients.add(socket);
     socket.isAlive = true;
+    socket.meta = { connectedAt: Date.now(), ext: '', version: '', lastPingAt: 0 };
     socket.on('pong', () => { socket.isAlive = true; });
     log(`酒馆扩展已接入（当前 ${stClients.size} 个连接）`);
     socket.on('message', (raw) => {
         let msg;
         try { msg = JSON.parse(raw.toString()); } catch { return; }
         if (msg.type === 'ping') {           // 扩展心跳：原样回 pong（复用 message 通道）
+            socket.meta.lastPingAt = Date.now();
             try { socket.send(JSON.stringify({ type: 'pong' })); } catch { /* 忽略 */ }
             return;
         }
@@ -853,6 +858,8 @@ wss.on('connection', (socket) => {
             }
             sendQQ({ ...sessionRoutes.get(key), text: msg.text, sessionKey: key });
         } else if (msg.type === 'hello') {
+            socket.meta.ext = msg.ext ?? 'unknown';
+            socket.meta.version = msg.version ?? '';
             log(`酒馆扩展握手: ${msg.ext ?? 'unknown'} v${msg.version ?? '?'}`);
             // 握手时把会话持久化数据和默认配置同步给扩展（扩展据此做默认选择）
             try {
@@ -925,8 +932,55 @@ const consoleServer = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && req.url === '/api/status') {
         refreshCatalogsFromDisk();          // 每次查询都刷新（文件系统扫描，开销可忽略）
+
+        const now = Date.now();
+        const mem = process.memoryUsage();
+        const uptimeSec = Math.floor(process.uptime());
+
+        // 上游（SnowLuma / OneBot）
+        const upstream = {
+            connected: obSocket?.readyState === WebSocket.OPEN,
+            endpoint: cfg.onebotUrl,
+            selfId,
+            nickname: upstreamStats.nickname,
+            /** 当前连接已保持的秒数（未连接则为 0） */
+            connectedForSec: upstreamStats.connected && upstreamStats.connectedAt
+                ? Math.floor((now - upstreamStats.connectedAt) / 1000)
+                : 0,
+            connectedAt: upstreamStats.connectedAt || null,
+            disconnectedAt: upstreamStats.disconnectedAt || null,
+            reconnectCount: upstreamStats.reconnectCount,
+            eventsIn: upstreamStats.eventsIn,
+            actionsOut: upstreamStats.actionsOut,
+            actionErrors: upstreamStats.actionErrors,
+            lastEventAt: upstreamStats.lastEventAt || null,
+            lastError: upstreamStats.lastError,
+            lastErrorAt: upstreamStats.lastErrorAt || null,
+        };
+
+        // 下游（酒馆扩展）
+        const extensionClients = [...stClients]
+            .filter((c) => c.readyState === WebSocket.OPEN)
+            .map((c, i) => ({
+                id: i + 1,
+                ext: c.meta?.ext ?? '',
+                version: c.meta?.version ?? '',
+                connectedAt: c.meta?.connectedAt ?? null,
+                connectedForSec: c.meta?.connectedAt
+                    ? Math.floor((now - c.meta.connectedAt) / 1000)
+                    : 0,
+                lastPingAt: c.meta?.lastPingAt || null,
+            }));
+
+        // 会话统计聚合
+        const statList = [...sessionStats.values()];
+        const totalIn = statList.reduce((n, s) => n + (s.in ?? 0), 0);
+        const totalOut = statList.reduce((n, s) => n + (s.out ?? 0), 0);
+        const lastActiveAt = statList.reduce((m, s) => Math.max(m, s.last ?? 0), 0);
+
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
+            // --- 兼容旧字段（前端已在用）---
             onebotConnected: obSocket?.readyState === WebSocket.OPEN,
             stClients: stClients.size,
             selfId,
@@ -935,6 +989,35 @@ const consoleServer = http.createServer(async (req, res) => {
             catalogs,
             logs: logBuffer,
             config: cfg,
+
+            // --- 新增：详细运行时状态 ---
+            generatedAt: now,
+            upstream,
+            extension: {
+                port: cfg.stExtPort,
+                clientCount: extensionClients.length,
+                clients: extensionClients,
+            },
+            metrics: {
+                sessionCount: sessionStats.size,
+                totalIn,
+                totalOut,
+                lastActiveAt: lastActiveAt || null,
+                characterCount: catalogs.characters.length,
+                worldCount: catalogs.worlds.length,
+            },
+            process: {
+                pid: process.pid,
+                nodeVersion: process.version,
+                platform: process.platform,
+                arch: process.arch,
+                uptimeSec,
+                startedAt: now - uptimeSec * 1000,
+                rssMb: Math.round((mem.rss / 1024 / 1024) * 10) / 10,
+                heapUsedMb: Math.round((mem.heapUsed / 1024 / 1024) * 10) / 10,
+                heapTotalMb: Math.round((mem.heapTotal / 1024 / 1024) * 10) / 10,
+                externalMb: Math.round((mem.external / 1024 / 1024) * 10) / 10,
+            },
         }));
         return;
     }

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import {
     Activity, Users, MessageSquare, Wifi, Radio, Boxes, ArrowUpRight, Zap, Bell,
+    Server, Cpu, HardDrive, Clock, CheckCircle2, XCircle, AlertTriangle, RefreshCw,
+    Gauge, Hash, ArrowDownToLine, ArrowUpFromLine, Sparkles,
 } from 'lucide-vue-next';
 import { useStatusStore } from '@/stores/status';
 import { useToastStore } from '@/stores/toast';
@@ -13,40 +15,139 @@ import { formatTime } from '@/lib/utils';
 const store = useStatusStore();
 const toast = useToastStore();
 
+/** 本地时钟，用于让「已连接时长」每秒走动 */
+const now = ref(Date.now());
+let ticker: number | null = null;
+
 onMounted(() => {
     store.startPolling();
+    ticker = window.setInterval(() => { now.value = Date.now(); }, 1000);
 });
 onUnmounted(() => {
     store.stopPolling();
+    if (ticker) window.clearInterval(ticker);
 });
 
-const sessions = computed(() => Object.entries(store.status?.sessions ?? {}));
-const sessionCount = computed(() => sessions.value.length);
-const totalIn = computed(() => sessions.value.reduce((n, [, s]) => n + s.in, 0));
-const totalOut = computed(() => sessions.value.reduce((n, [, s]) => n + s.out, 0));
+// ---------------- 基础数据 ----------------
+const status = computed(() => store.status);
+const sessions = computed(() => Object.entries(status.value?.sessions ?? {}));
+const sessionCount = computed(() => status.value?.metrics?.sessionCount ?? sessions.value.length);
+const totalIn = computed(() =>
+    status.value?.metrics?.totalIn ?? sessions.value.reduce((n, [, s]) => n + s.in, 0),
+);
+const totalOut = computed(() =>
+    status.value?.metrics?.totalOut ?? sessions.value.reduce((n, [, s]) => n + s.out, 0),
+);
+const charCount = computed(() => status.value?.catalogs.characters.length ?? 0);
+const worldCount = computed(() => status.value?.catalogs.worlds.length ?? 0);
 
-const charCount = computed(() => store.status?.catalogs.characters.length ?? 0);
-const worldCount = computed(() => store.status?.catalogs.worlds.length ?? 0);
+const upstream = computed(() => status.value?.upstream);
+const extension = computed(() => status.value?.extension);
+const proc = computed(() => status.value?.process);
 
+const upOnline = computed(() => upstream.value?.connected ?? store.onebotConnected);
+const extOnline = computed(() => (extension.value?.clientCount ?? status.value?.stClients ?? 0) > 0);
+
+// ---------------- 时长格式化 ----------------
+function humanDuration(sec: number): string {
+    if (!Number.isFinite(sec) || sec <= 0) return '—';
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (d > 0) return `${d}天 ${h}时`;
+    if (h > 0) return `${h}时 ${m}分`;
+    if (m > 0) return `${m}分 ${s}秒`;
+    return `${s}秒`;
+}
+
+/** 上游已连接时长：用本地时钟推算，避免依赖轮询间隔 */
+const upstreamUptime = computed(() => {
+    const at = upstream.value?.connectedAt;
+    if (!upOnline.value || !at) return '—';
+    return humanDuration((now.value - at) / 1000);
+});
+
+const procUptime = computed(() => {
+    const started = proc.value?.startedAt;
+    if (!started) return '—';
+    return humanDuration((now.value - started) / 1000);
+});
+
+function ago(ts: number | null | undefined): string {
+    if (!ts) return '—';
+    const diff = Math.floor((now.value - ts) / 1000);
+    if (diff < 5) return '刚刚';
+    if (diff < 60) return `${diff} 秒前`;
+    if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+    return `${Math.floor(diff / 86400)} 天前`;
+}
+
+// ---------------- 健康度 ----------------
 const health = computed(() => {
     let score = 0;
-    if (store.onebotConnected) score += 45;
-    if ((store.status?.stClients ?? 0) > 0) score += 35;
+    if (upOnline.value) score += 40;
+    if (extOnline.value) score += 30;
     if (sessionCount.value > 0) score += 20;
+    if (store.reachable) score += 10;
     return score;
 });
 const healthLabel = computed(() =>
-    health.value >= 95 ? '运行良好' : health.value >= 60 ? '部分就绪' : '未就绪',
+    health.value >= 95 ? '运行良好'
+        : health.value >= 70 ? '基本就绪'
+            : health.value >= 40 ? '部分就绪'
+                : '未就绪',
+);
+const healthTone = computed(() =>
+    health.value >= 95 ? 'text-success'
+        : health.value >= 70 ? 'text-primary'
+            : health.value >= 40 ? 'text-warning'
+                : 'text-destructive',
 );
 
-const R = 26;
+const R = 30;
 const CIRC = 2 * Math.PI * R;
 const dashArray = computed(() => `${(health.value / 100) * CIRC} ${CIRC}`);
+
+// ---------------- 链路检查 ----------------
+interface CheckItem {
+    label: string;
+    ok: boolean;
+    detail: string;
+}
+const checks = computed<CheckItem[]>(() => [
+    {
+        label: 'SnowLuma 上游',
+        ok: upOnline.value,
+        detail: upOnline.value
+            ? `${upstream.value?.endpoint ?? '—'} · ${upstreamUptime.value}`
+            : upstream.value?.lastError || '未连接',
+    },
+    {
+        label: '酒馆扩展',
+        ok: extOnline.value,
+        detail: extOnline.value
+            ? `${extension.value?.clientCount} 个连接 · :${extension.value?.port ?? '—'}`
+            : '未接入',
+    },
+    {
+        label: 'Bridge 后端',
+        ok: store.reachable,
+        detail: store.reachable ? 'API 正常响应' : store.error || '无法访问',
+    },
+    {
+        label: '活跃会话',
+        ok: sessionCount.value > 0,
+        detail: sessionCount.value > 0
+            ? `${sessionCount.value} 个会话在运行`
+            : 'QQ 发消息后自动出现',
+    },
+]);
 
 const recent = computed(() =>
     [...sessions.value].sort((a, b) => b[1].last - a[1].last).slice(0, 6),
 );
-
 const chipTone = (k: string) => (k.startsWith('group_') ? 'warning' : 'info');
 
 function demoToast() {
@@ -64,54 +165,17 @@ async function retry() {
 
 <template>
     <div class="flex flex-col gap-5">
-        <!-- Hero 渐变条 + 健康环 -->
-        <div class="grid gap-4 lg:grid-cols-[1fr_240px]">
-            <div class="ui-gradient ui-lift relative overflow-hidden rounded-2xl px-5 py-4 text-white">
-                <div class="relative z-10 flex h-full flex-col justify-center gap-3">
-                    <div class="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/65">
-                        <Zap class="size-3" />
-                        Bridge Runtime
-                    </div>
-
-                    <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                        <h2 class="text-[20px] font-bold leading-tight tracking-tight">{{ healthLabel }}</h2>
-                        <span class="text-[12px] text-white/75">
-                            {{ sessionCount }} 会话 · 收 {{ totalIn }} / 发 {{ totalOut }}
-                        </span>
-                    </div>
-
-                    <div class="flex flex-wrap gap-1.5">
-                        <div class="flex items-center gap-1.5 rounded-full bg-white/15 px-2 py-[3px]">
-                            <Radio class="size-3" />
-                            <span class="text-[10.5px] font-medium">
-                                SnowLuma {{ store.onebotConnected ? '在线' : '离线' }}
-                            </span>
-                        </div>
-                        <div class="flex items-center gap-1.5 rounded-full bg-white/15 px-2 py-[3px]">
-                            <Boxes class="size-3" />
-                            <span class="text-[10.5px] font-medium">
-                                酒馆 {{ store.status?.stClients ?? 0 }}
-                            </span>
-                        </div>
-                        <div v-if="store.status?.selfId" class="flex items-center gap-1.5 rounded-full bg-white/15 px-2 py-[3px]">
-                            <span class="text-[10.5px] font-medium tabular-nums">{{ store.status.selfId }}</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="pointer-events-none absolute -right-12 -top-14 size-48 rounded-full bg-white/10 blur-2xl" />
-                <div class="pointer-events-none absolute -bottom-16 right-20 size-36 rounded-full bg-white/[0.08] blur-2xl" />
-            </div>
-
-            <UiCard class="flex items-center gap-3 px-4 py-4">
-                <div class="relative grid shrink-0 place-items-center">
-                    <svg width="68" height="68" viewBox="0 0 68 68" class="-rotate-90">
-                        <circle cx="34" cy="34" :r="R" fill="none" stroke="currentColor" stroke-width="7" class="text-muted/80" />
-                        <circle
-                            cx="34" cy="34" :r="R" fill="none" stroke="url(#hg)" stroke-width="7"
+        <!-- ============ 顶部：健康度 + 实时链路 ============ -->
+        <div class="grid gap-4 lg:grid-cols-[260px_1fr]">
+            <!-- 健康环 -->
+            <UiCard class="flex flex-col items-center justify-center gap-2 px-4 py-5">
+                <div class="relative grid place-items-center">
+                    <svg width="88" height="88" viewBox="0 0 88 88" class="-rotate-90">
+                        <circle cx="44" cy="44" :r="R" fill="none" stroke="currentColor"
+                            stroke-width="8" class="text-muted/70" />
+                        <circle cx="44" cy="44" :r="R" fill="none" stroke="url(#hg)" stroke-width="8"
                             stroke-linecap="round" :stroke-dasharray="dashArray"
-                            class="transition-[stroke-dasharray] duration-500 ease-out"
-                        />
+                            class="transition-[stroke-dasharray] duration-500 ease-out" />
                         <defs>
                             <linearGradient id="hg" x1="0" y1="0" x2="1" y2="1">
                                 <stop offset="0%" stop-color="oklch(58% 0.19 288)" />
@@ -120,25 +184,172 @@ async function retry() {
                         </defs>
                     </svg>
                     <div class="absolute flex flex-col items-center">
-                        <span class="text-[17px] font-bold leading-none tabular-nums">{{ health }}</span>
+                        <span class="text-[22px] font-bold leading-none tabular-nums">{{ health }}</span>
+                        <span class="mt-0.5 text-[10px] text-muted-foreground">健康度</span>
+                    </div>
+                </div>
+                <p class="text-[13px] font-semibold tracking-tight" :class="healthTone">
+                    {{ healthLabel }}
+                </p>
+                <p class="text-center text-[11px] leading-relaxed text-muted-foreground">
+                    {{ checks.filter((c) => c.ok).length }} / {{ checks.length }} 项检查通过
+                </p>
+            </UiCard>
+
+            <!-- 链路检查清单 -->
+            <UiCard>
+                <div class="flex items-center justify-between border-b border-border/60 px-5 py-3">
+                    <div class="flex items-center gap-2">
+                        <Gauge class="size-4 text-primary" />
+                        <h2 class="text-[13px] font-semibold tracking-tight">运行链路</h2>
+                    </div>
+                    <div class="flex items-center gap-2 text-[11px] text-muted-foreground">
+                        <RefreshCw class="size-3" :class="store.loading ? 'animate-spin' : ''" />
+                        {{ status?.generatedAt ? ago(status.generatedAt) : '等待数据' }}
+                    </div>
+                </div>
+                <div class="divide-y divide-border/40">
+                    <div v-for="c in checks" :key="c.label"
+                        class="flex items-center gap-3 px-5 py-2.5">
+                        <component
+                            :is="c.ok ? CheckCircle2 : XCircle"
+                            class="size-4 shrink-0"
+                            :class="c.ok ? 'text-success' : 'text-destructive'"
+                        />
+                        <span class="w-28 shrink-0 text-[12px] font-medium">{{ c.label }}</span>
+                        <span class="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+                            {{ c.detail }}
+                        </span>
+                        <UiBadge :tone="c.ok ? 'success' : 'destructive'" class="shrink-0 text-micro">
+                            {{ c.ok ? '正常' : '异常' }}
+                        </UiBadge>
+                    </div>
+                </div>
+            </UiCard>
+        </div>
+
+        <!-- ============ 连接详情：SnowLuma / 酒馆 / 机器人 ============ -->
+        <div class="grid gap-4 lg:grid-cols-2">
+            <!-- SnowLuma 上游 -->
+            <UiCard>
+                <div class="flex items-center justify-between border-b border-border/60 px-5 py-3">
+                    <div class="flex items-center gap-2">
+                        <Radio class="size-4 text-primary" />
+                        <div>
+                            <h2 class="text-[13px] font-semibold tracking-tight">SnowLuma 上游</h2>
+                            <p class="text-[11px] text-muted-foreground">OneBot v11 连接</p>
+                        </div>
+                    </div>
+                    <UiBadge :tone="upOnline ? 'success' : 'destructive'" dot :pulse="upOnline">
+                        {{ upOnline ? '已连接' : '未连接' }}
+                    </UiBadge>
+                </div>
+                <div class="grid gap-x-4 gap-y-2.5 px-5 py-3.5 sm:grid-cols-2">
+                    <div>
+                        <p class="ui-section-label">连接地址</p>
+                        <p class="mt-0.5 truncate font-mono text-[12px]">{{ upstream?.endpoint ?? '—' }}</p>
+                    </div>
+                    <div>
+                        <p class="ui-section-label">已连接时长</p>
+                        <p class="mt-0.5 font-mono text-[12px]" :class="upOnline ? 'text-success' : 'text-muted-foreground'">
+                            {{ upstreamUptime }}
+                        </p>
+                    </div>
+                    <div>
+                        <p class="ui-section-label">机器人 QQ</p>
+                        <p class="mt-0.5 font-mono text-[12px]">{{ upstream?.selfId || store.status?.selfId || '—' }}</p>
+                    </div>
+                    <div>
+                        <p class="ui-section-label">昵称</p>
+                        <p class="mt-0.5 truncate text-[12px]">{{ upstream?.nickname || '—' }}</p>
+                    </div>
+                    <div>
+                        <p class="ui-section-label">收到事件</p>
+                        <p class="mt-0.5 font-mono text-[12px] tabular-nums">{{ upstream?.eventsIn ?? 0 }}</p>
+                    </div>
+                    <div>
+                        <p class="ui-section-label">发出动作</p>
+                        <p class="mt-0.5 font-mono text-[12px] tabular-nums">
+                            {{ upstream?.actionsOut ?? 0 }}
+                            <span v-if="(upstream?.actionErrors ?? 0) > 0" class="ml-1 text-destructive">
+                                ({{ upstream?.actionErrors }} 失败)
+                            </span>
+                        </p>
+                    </div>
+                    <div>
+                        <p class="ui-section-label">最近事件</p>
+                        <p class="mt-0.5 text-[12px] text-muted-foreground">{{ ago(upstream?.lastEventAt) }}</p>
+                    </div>
+                    <div>
+                        <p class="ui-section-label">重连次数</p>
+                        <p class="mt-0.5 font-mono text-[12px] tabular-nums">
+                            {{ upstream?.reconnectCount ?? 0 }}
+                        </p>
+                    </div>
+                </div>
+                <div v-if="upstream?.lastError && !upOnline"
+                    class="flex items-start gap-2 border-t border-destructive/25 bg-destructive/5 px-5 py-2.5">
+                    <AlertTriangle class="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                    <p class="min-w-0 flex-1 break-words text-[11px] text-destructive">
+                        {{ upstream.lastError }}
+                        <span class="ml-1 text-muted-foreground">{{ ago(upstream.lastErrorAt) }}</span>
+                    </p>
+                </div>
+            </UiCard>
+
+            <!-- 酒馆扩展 -->
+            <UiCard>
+                <div class="flex items-center justify-between border-b border-border/60 px-5 py-3">
+                    <div class="flex items-center gap-2">
+                        <Boxes class="size-4 text-aurora" />
+                        <div>
+                            <h2 class="text-[13px] font-semibold tracking-tight">酒馆扩展</h2>
+                            <p class="text-[11px] text-muted-foreground">SillyTavern 前端连接</p>
+                        </div>
+                    </div>
+                    <UiBadge :tone="extOnline ? 'success' : 'secondary'" dot :pulse="extOnline">
+                        {{ extension?.clientCount ?? 0 }} 个连接
+                    </UiBadge>
+                </div>
+
+                <div class="grid gap-x-4 gap-y-2.5 px-5 py-3.5 sm:grid-cols-2">
+                    <div>
+                        <p class="ui-section-label">扩展端口</p>
+                        <p class="mt-0.5 font-mono text-[12px]">:{{ extension?.port ?? '—' }}</p>
+                    </div>
+                    <div>
+                        <p class="ui-section-label">连接数</p>
+                        <p class="mt-0.5 font-mono text-[12px] tabular-nums">
+                            {{ extension?.clientCount ?? 0 }}
+                        </p>
                     </div>
                 </div>
 
-                <div class="min-w-0 flex-1">
-                    <p class="ui-section-label">健康度</p>
-                    <p class="mt-1 text-[12px] leading-snug text-muted-foreground">
-                        上游 {{ store.onebotConnected ? '✓' : '✗' }}
-                        <span class="mx-0.5 opacity-40">·</span>
-                        扩展 {{ (store.status?.stClients ?? 0) > 0 ? '✓' : '✗' }}
-                        <span class="mx-0.5 opacity-40">·</span>
-                        会话 {{ sessionCount > 0 ? '✓' : '✗' }}
+                <div v-if="(extension?.clients?.length ?? 0) > 0"
+                    class="border-t border-border/40 px-5 py-3">
+                    <div v-for="c in (extension?.clients ?? [])" :key="c.id"
+                        class="flex items-center gap-2 py-1">
+                        <span class="size-1.5 shrink-0 rounded-full bg-success animate-pulse" />
+                        <span class="min-w-0 flex-1 truncate font-mono text-[11px]">
+                            {{ c.ext || 'extension' }}
+                            <span v-if="c.version" class="text-muted-foreground">v{{ c.version }}</span>
+                        </span>
+                        <span class="shrink-0 text-[11px] text-muted-foreground">
+                            {{ humanDuration(c.connectedForSec) }}
+                        </span>
+                    </div>
+                </div>
+                <div v-else class="border-t border-border/40 px-5 py-6 text-center">
+                    <p class="text-[12px] text-muted-foreground">尚未接入</p>
+                    <p class="mt-1 text-[11px] text-muted-foreground/70">
+                        在酒馆中启用 SnowLuma Bridge 扩展后自动连接
                     </p>
                 </div>
             </UiCard>
         </div>
 
-        <!-- 三列指标 -->
-        <div class="grid gap-4 sm:grid-cols-3">
+        <!-- ============ 指标卡 ============ -->
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <UiCard class="ui-lift p-4">
                 <div class="flex items-start justify-between">
                     <div>
@@ -156,8 +367,12 @@ async function retry() {
                 <div class="flex items-start justify-between">
                     <div>
                         <p class="ui-section-label">消息吞吐</p>
-                        <p class="mt-1.5 text-[22px] font-bold leading-none tabular-nums">
-                            {{ totalIn }}<span class="mx-1 text-[13px] font-normal text-muted-foreground">/</span>{{ totalOut }}
+                        <p class="mt-1.5 flex items-baseline gap-1 text-[22px] font-bold leading-none tabular-nums">
+                            <ArrowDownToLine class="size-3.5 self-center text-info" />
+                            {{ totalIn }}
+                            <span class="mx-0.5 text-[13px] font-normal text-muted-foreground">/</span>
+                            <ArrowUpFromLine class="size-3.5 self-center text-success" />
+                            {{ totalOut }}
                         </p>
                         <p class="mt-1 text-[11px] text-muted-foreground">接收 / 发送</p>
                     </div>
@@ -181,9 +396,60 @@ async function retry() {
                     </div>
                 </div>
             </UiCard>
+
+            <UiCard class="ui-lift p-4">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <p class="ui-section-label">内存占用</p>
+                        <p class="mt-1.5 text-[22px] font-bold leading-none tabular-nums">
+                            {{ proc?.rssMb ?? '—' }}<span class="ml-0.5 text-[13px] font-normal text-muted-foreground">MB</span>
+                        </p>
+                        <p class="mt-1 text-[11px] text-muted-foreground">
+                            堆 {{ proc?.heapUsedMb ?? '—' }} / {{ proc?.heapTotalMb ?? '—' }} MB
+                        </p>
+                    </div>
+                    <div class="flex size-9 items-center justify-center rounded-xl bg-warning/15 text-warning">
+                        <HardDrive class="size-4" />
+                    </div>
+                </div>
+            </UiCard>
         </div>
 
-        <!-- 最近活跃 -->
+        <!-- ============ 进程信息 ============ -->
+        <UiCard>
+            <div class="flex items-center justify-between border-b border-border/60 px-5 py-3">
+                <div class="flex items-center gap-2">
+                    <Cpu class="size-4 text-muted-foreground" />
+                    <h2 class="text-[13px] font-semibold tracking-tight">Bridge 进程</h2>
+                </div>
+                <span class="font-mono text-[11px] text-muted-foreground">PID {{ proc?.pid ?? '—' }}</span>
+            </div>
+            <div class="grid gap-x-4 gap-y-2.5 px-5 py-3.5 sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                    <p class="ui-section-label">运行时长</p>
+                    <p class="mt-0.5 flex items-center gap-1 font-mono text-[12px]">
+                        <Clock class="size-3 text-muted-foreground" />
+                        {{ procUptime }}
+                    </p>
+                </div>
+                <div>
+                    <p class="ui-section-label">Node 版本</p>
+                    <p class="mt-0.5 font-mono text-[12px]">{{ proc?.nodeVersion ?? '—' }}</p>
+                </div>
+                <div>
+                    <p class="ui-section-label">平台</p>
+                    <p class="mt-0.5 font-mono text-[12px]">
+                        {{ proc ? `${proc.platform} / ${proc.arch}` : '—' }}
+                    </p>
+                </div>
+                <div>
+                    <p class="ui-section-label">外部内存</p>
+                    <p class="mt-0.5 font-mono text-[12px] tabular-nums">{{ proc?.externalMb ?? '—' }} MB</p>
+                </div>
+            </div>
+        </UiCard>
+
+        <!-- ============ 最近活跃 ============ -->
         <UiCard>
             <div class="flex items-center justify-between border-b border-border/60 px-5 py-3.5">
                 <div>
