@@ -175,6 +175,39 @@ export const api = {
             '/snowluma/config?uin=' + encodeURIComponent(uin) +
                 (dir ? '&dir=' + encodeURIComponent(dir) : ''),
         ),
+
+    // ---- SillyTavern 服务集成 ----
+    discoverSillyTavern: (known?: string) =>
+        request<SillyTavernDiscoverResult>(
+            '/sillytavern/discover' + (known ? '?known=' + encodeURIComponent(known) : ''),
+        ),
+
+    probeSillyTavern: (dir: string, port?: number) =>
+        request<SillyTavernProbe>(
+            '/sillytavern/probe?dir=' + encodeURIComponent(dir) +
+                (port ? '&port=' + port : ''),
+        ),
+
+    installSillyTavernExtension: (payload: { dir: string; force?: boolean }) =>
+        request<{
+            ok: boolean;
+            action: 'installed' | 'updated' | 'unchanged';
+            target: string;
+            version: string;
+            files: string[];
+            needRefresh: boolean;
+            sourceDir: string;
+            error?: string;
+        }>('/sillytavern/install', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        }),
+
+    uninstallSillyTavernExtension: (dir: string) =>
+        request<{ ok: boolean; action: string; needRefresh: boolean; error?: string }>(
+            '/sillytavern/uninstall',
+            { method: 'POST', body: JSON.stringify({ dir }) },
+        ),
 };
 
 /** 自动发现结果 */
@@ -231,4 +264,36 @@ export interface SnowLumaApplyResult {
     version: string;
     needRestart: boolean;
     error?: string;
+}
+
+/** 酒馆自动发现结果 */
+export interface SillyTavernDiscoverResult {
+    found: boolean;
+    dir: string;
+    source: string;
+    candidates: Array<{
+        dir: string;
+        source: string;
+        ok: boolean;
+        installed: boolean;
+        installedVersion: string;
+    }>;
+    tried: string[];
+    error?: string;
+}
+
+/** 酒馆探测结果 */
+export interface SillyTavernProbe {
+    ok: boolean;
+    dir: string;
+    extDir: string;
+    installed: boolean;
+    installedVersion: string;
+    files: string[];
+    error: string;
+    port: number;
+    endpoint: string;
+    running: boolean;
+    extConnected: boolean;
+    extPort: number;
 }

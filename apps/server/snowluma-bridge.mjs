@@ -30,6 +30,13 @@ import {
     discoverSnowLumaDir,
     UIN_REGEX,
 } from './snowluma-service.mjs';
+import {
+    probeSillyTavern,
+    installExtension,
+    uninstallExtension,
+    discoverSillyTavernDir,
+    isPortOpen as isStPortOpen,
+} from './sillytavern-service.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -44,6 +51,11 @@ const DEFAULT_CONFIG = {
     trigger: { atOnly: true, privateReply: true, allowedUsers: [], allowedGroups: [] },
     maxMessageLength: 2000,
     replyProcessors: [],
+    // 服务集成：目录由服务管理页填写后持久化
+    snowlumaDir: '',
+    snowlumaWebuiPort: 5099,
+    sillyTavernDir: '',
+    sillyTavernPort: 8000,
     // 默认角色/世界书：酒馆当前未选择角色时自动使用
     defaults: {
         character: '',      // 角色名（留空=不自动选择）
@@ -1283,6 +1295,132 @@ const consoleServer = http.createServer(async (req, res) => {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: false, error: e.message }));
         }
+        return;
+    }
+
+    // ================= SillyTavern 服务集成 =================
+    // GET /api/sillytavern/discover   自动发现酒馆目录
+    if (req.method === 'GET' && req.url?.startsWith('/api/sillytavern/discover')) {
+        try {
+            const u = new URL(req.url, 'http://127.0.0.1');
+            const known = u.searchParams.get('known') ?? cfg.sillyTavernDir ?? '';
+            const result = await discoverSillyTavernDir({
+                knownDir: known,
+                hintDirs: [process.cwd(), path.resolve(__dirname, '..', '..')],
+            });
+            const enriched = result.candidates.slice(0, 8).map((c) => {
+                const p = probeSillyTavern(c.dir);
+                return {
+                    ...c,
+                    ok: p.ok,
+                    installed: p.installed,
+                    installedVersion: p.installedVersion,
+                };
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                found: result.found && enriched.length > 0,
+                dir: result.dir,
+                source: result.source,
+                candidates: enriched,
+                tried: result.tried,
+            }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ found: false, error: e.message, candidates: [] }));
+        }
+        return;
+    }
+
+    // GET /api/sillytavern/probe?dir=...&port=...   探测目录与安装状态
+    if (req.method === 'GET' && req.url?.startsWith('/api/sillytavern/probe')) {
+        try {
+            const u = new URL(req.url, 'http://127.0.0.1');
+            const dir = u.searchParams.get('dir') ?? cfg.sillyTavernDir ?? '';
+            const port = Number(u.searchParams.get('port') ?? cfg.sillyTavernPort ?? 8000);
+            const probe = probeSillyTavern(dir);
+            const running = await isStPortOpen(port);
+            // 扩展连接状态（来自 Bridge 侧的 WS 客户端数）
+            const extConnected = [...stClients].some((c) => c.readyState === WebSocket.OPEN);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                ...probe,
+                port,
+                running,
+                extConnected,
+                extPort: cfg.stExtPort,
+                endpoint: `http://127.0.0.1:${port}`,
+            }));
+        } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+        return;
+    }
+
+    // POST /api/sillytavern/install   安装/更新扩展
+    if (req.method === 'POST' && req.url === '/api/sillytavern/install') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+            try {
+                const input = JSON.parse(body || '{}');
+                const dir = (input.dir ?? cfg.sillyTavernDir ?? '').trim();
+                const force = !!input.force;
+                if (!dir) throw new Error('请先填写酒馆目录');
+
+                // 扩展源码位于本仓库 apps/extension
+                const sourceDir = path.resolve(__dirname, '..', 'extension');
+
+                const r = installExtension({ stDir: dir, sourceDir, force });
+                if (!r.ok) throw new Error(r.error);
+
+                cfg = { ...cfg, sillyTavernDir: dir };
+                saveConfig();
+
+                log(
+                    r.action === 'unchanged'
+                        ? `酒馆扩展已是最新（v${r.version}）`
+                        : `酒馆扩展已${r.action === 'updated' ? '更新' : '安装'}（v${r.version}）→ ${r.target}`,
+                );
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    ok: true,
+                    action: r.action,
+                    target: r.target,
+                    version: r.version,
+                    files: r.files,
+                    needRefresh: r.needRefresh,
+                    sourceDir,
+                }));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // POST /api/sillytavern/uninstall   卸载扩展
+    if (req.method === 'POST' && req.url === '/api/sillytavern/uninstall') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+            try {
+                const input = JSON.parse(body || '{}');
+                const dir = (input.dir ?? cfg.sillyTavernDir ?? '').trim();
+                if (!dir) throw new Error('请先填写酒馆目录');
+                const r = uninstallExtension(dir);
+                if (!r.ok) throw new Error(r.error);
+                log('酒馆扩展已卸载');
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(r));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+        });
         return;
     }
 
