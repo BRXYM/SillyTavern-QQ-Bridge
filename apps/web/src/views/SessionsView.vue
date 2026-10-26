@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { Users, Star, Save, RotateCcw, Info } from 'lucide-vue-next';
+import { Users, Star, Save, RotateCcw, Info, SlidersHorizontal, ShieldCheck } from 'lucide-vue-next';
 import { useStatusStore } from '@/stores/status';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
 import UiButton from '@/components/ui/UiButton.vue';
+import UiInput from '@/components/ui/UiInput.vue';
+import UiSwitch from '@/components/ui/UiSwitch.vue';
 import { api } from '@/api/client';
 import { useToastStore } from '@/stores/toast';
 
@@ -83,9 +85,88 @@ function resetDefaults() {
     toast.info('已还原为当前保存值');
 }
 
+// ---------------- 触发规则 / 消息限制（原系统设置页迁入） ----------------
+const atOnly = ref(false);
+const privateReply = ref(true);
+const allowedUsers = ref('');
+const allowedGroups = ref('');
+const maxMessageLength = ref(2000);
+const savingRules = ref(false);
+const rulesSnapshot = ref('');
+
+/** 规则表单序列化，用于脏状态判断 */
+function rulesSignature(): string {
+    return [
+        atOnly.value,
+        privateReply.value,
+        allowedUsers.value,
+        allowedGroups.value,
+        maxMessageLength.value,
+    ].join('\u0000');
+}
+
+const rulesDirty = computed(() => rulesSignature() !== rulesSnapshot.value);
+
+function syncRulesFromStore() {
+    const c = store.status?.config as Record<string, unknown> | undefined;
+    if (!c) return;
+
+    const tr = (c['trigger'] ?? {}) as {
+        atOnly?: boolean;
+        privateReply?: boolean;
+        allowedUsers?: number[];
+        allowedGroups?: number[];
+    };
+    atOnly.value = tr.atOnly ?? false;
+    privateReply.value = tr.privateReply ?? true;
+    allowedUsers.value = (tr.allowedUsers ?? []).join(',');
+    allowedGroups.value = (tr.allowedGroups ?? []).join(',');
+
+    // 后端使用扁平字段 maxMessageLength
+    if (typeof c['maxMessageLength'] === 'number') {
+        maxMessageLength.value = c['maxMessageLength'] as number;
+    }
+
+    rulesSnapshot.value = rulesSignature();
+}
+
+function parseList(s: string): number[] {
+    return s.split(',').map((x) => x.trim()).filter(Boolean).map(Number).filter(Number.isFinite);
+}
+
+async function saveRules() {
+    savingRules.value = true;
+    try {
+        await api.updateConfig({
+            trigger: {
+                atOnly: atOnly.value,
+                privateReply: privateReply.value,
+                allowedUsers: parseList(allowedUsers.value),
+                allowedGroups: parseList(allowedGroups.value),
+            },
+            maxMessageLength: maxMessageLength.value,
+        });
+        await store.refresh();
+        syncRulesFromStore();
+        toast.success('规则已保存', '触发条件与消息限制已更新');
+    } catch (e) {
+        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        savingRules.value = false;
+    }
+}
+
+function resetRules() {
+    syncRulesFromStore();
+    toast.info('已还原为当前保存值');
+}
+
 /** 首次加载 / 刷新后同步表单 */
 onMounted(() => {
-    void store.refresh().then(() => syncDefaultsFromStore());
+    void store.refresh().then(() => {
+        syncDefaultsFromStore();
+        syncRulesFromStore();
+    });
 });
 
 // ---------------- 会话级 ----------------
@@ -185,6 +266,78 @@ function effective(key: string, field: 'character' | 'world'): { value: string; 
                     <Info class="mt-0.5 size-3.5 shrink-0" />
                     清单来自酒馆扩展上报与本地扫描。若列表不全，可到「系统设置」点「刷新清单」
                 </p>
+            </div>
+        </UiCard>
+
+        <!-- ============ 触发规则 / 消息限制 ============ -->
+        <UiCard>
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
+                <div class="flex items-center gap-3">
+                    <div class="flex size-10 items-center justify-center rounded-xl bg-aurora/15 text-aurora">
+                        <SlidersHorizontal class="size-5" />
+                    </div>
+                    <div>
+                        <h2 class="text-sm font-semibold tracking-tight">触发规则</h2>
+                        <p class="text-xs text-muted-foreground">控制哪些 QQ 消息会被转发到酒馆</p>
+                    </div>
+                </div>
+                <UiBadge v-if="rulesDirty" tone="warning" class="text-micro">未保存</UiBadge>
+            </div>
+
+            <div class="divide-y divide-border/40">
+                <div class="flex items-center justify-between px-5 py-3.5">
+                    <div class="min-w-0">
+                        <p class="text-sm">群聊仅在 @ 机器人时响应</p>
+                        <p class="text-xs text-muted-foreground">关闭后群里所有消息都会触发</p>
+                    </div>
+                    <UiSwitch v-model="atOnly" class="shrink-0" />
+                </div>
+                <div class="flex items-center justify-between px-5 py-3.5">
+                    <div class="min-w-0">
+                        <p class="text-sm">私聊自动回复</p>
+                        <p class="text-xs text-muted-foreground">关闭后私聊消息不处理</p>
+                    </div>
+                    <UiSwitch v-model="privateReply" class="shrink-0" />
+                </div>
+            </div>
+
+            <div class="grid gap-4 border-t border-border/40 px-5 py-4 sm:grid-cols-2">
+                <div>
+                    <label class="text-xs font-medium text-muted-foreground">用户白名单（逗号分隔 QQ 号）</label>
+                    <UiInput v-model="allowedUsers" class="mt-1.5" mono placeholder="留空 = 不限制" />
+                </div>
+                <div>
+                    <label class="text-xs font-medium text-muted-foreground">群白名单（逗号分隔群号）</label>
+                    <UiInput v-model="allowedGroups" class="mt-1.5" mono placeholder="留空 = 不限制" />
+                </div>
+            </div>
+
+            <!-- 消息限制 -->
+            <div class="border-t border-border/40 px-5 py-4">
+                <div class="mb-3 flex items-center gap-2">
+                    <ShieldCheck class="size-3.5 text-muted-foreground" />
+                    <p class="text-xs font-medium text-muted-foreground">消息限制</p>
+                </div>
+                <div class="grid gap-4 sm:grid-cols-2">
+                    <div>
+                        <label class="text-xs font-medium text-muted-foreground">单条消息长度上限</label>
+                        <UiInput v-model.number="maxMessageLength" type="number" class="mt-1.5" />
+                        <p class="mt-1 text-[11px] text-muted-foreground/70">
+                            超出会截断并追加省略号；分段规则见「回复分段」
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 border-t border-border/60 px-5 py-3">
+                <UiButton size="sm" :disabled="savingRules || !rulesDirty" @click="saveRules">
+                    <Save class="size-4" />
+                    {{ savingRules ? '保存中…' : '保存规则' }}
+                </UiButton>
+                <UiButton variant="outline" size="sm" :disabled="!rulesDirty" @click="resetRules">
+                    <RotateCcw class="size-4" />
+                    还原
+                </UiButton>
             </div>
         </UiCard>
 

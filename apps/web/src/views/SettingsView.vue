@@ -1,218 +1,181 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
-import { Save, RefreshCw, Wifi, SlidersHorizontal } from 'lucide-vue-next';
+import { onMounted, computed } from 'vue';
+import { Info, Cable, Database, Palette, Boxes } from 'lucide-vue-next';
 import { useStatusStore } from '@/stores/status';
 import UiCard from '@/components/ui/UiCard.vue';
-import UiButton from '@/components/ui/UiButton.vue';
-import UiInput from '@/components/ui/UiInput.vue';
-import UiSwitch from '@/components/ui/UiSwitch.vue';
-import UiSelect from '@/components/ui/UiSelect.vue';
-import { api } from '@/api/client';
-import { useToastStore } from '@/stores/toast';
+import UiBadge from '@/components/ui/UiBadge.vue';
 
 const store = useStatusStore();
-const toast = useToastStore();
 
-const onebotUrl = ref('ws://127.0.0.1:3001');
-const onebotToken = ref('');
-const maxMessageLength = ref(2000);
-const atOnly = ref(false);
-const privateReply = ref(true);
-const allowedUsers = ref('');
-const allowedGroups = ref('');
-const defaultCharacter = ref('');
-const defaultWorld = ref('');
-const stDataDir = ref('');
+onMounted(() => void store.refresh());
 
-const saved = ref(false);
+const frontendOrigin = computed(() => window.location.origin);
+const frontendRouteMode = computed(() => (window.location.hash ? 'hash' : 'history'));
 
-onMounted(async () => {
-    await store.refresh();
-    const c = store.status?.config as Record<string, unknown> | undefined;
-    if (!c) return;
-
-    const ob = (c['onebot'] ?? {}) as { url?: string; token?: string };
-    onebotUrl.value = ob.url ?? 'ws://127.0.0.1:3001';
-    onebotToken.value = ob.token ?? '';
-
-    const lim = (c['limits'] ?? {}) as { maxMessageLength?: number };
-    maxMessageLength.value = lim.maxMessageLength ?? 2000;
-
-    const tr = (c['trigger'] ?? {}) as {
-        atOnly?: boolean;
-        privateReply?: boolean;
-        allowedUsers?: number[];
-        allowedGroups?: number[];
-    };
-    atOnly.value = tr.atOnly ?? false;
-    privateReply.value = tr.privateReply ?? true;
-    allowedUsers.value = (tr.allowedUsers ?? []).join(',');
-    allowedGroups.value = (tr.allowedGroups ?? []).join(',');
-
-    const df = (c['defaults'] ?? {}) as { character?: string; world?: string };
-    defaultCharacter.value = df.character ?? '';
-    defaultWorld.value = df.world ?? '';
-
-    stDataDir.value = (c['stDataDir'] as string) ?? '';
-});
-
-function parseList(s: string): number[] {
-    return s.split(',').map((x) => x.trim()).filter(Boolean).map(Number).filter(Number.isFinite);
-}
-
-async function save() {
-    await api.updateConfig({
-        onebot: { url: onebotUrl.value.trim(), token: onebotToken.value.trim() },
-        limits: { maxMessageLength: maxMessageLength.value },
-        trigger: {
-            atOnly: atOnly.value,
-            privateReply: privateReply.value,
-            allowedUsers: parseList(allowedUsers.value),
-            allowedGroups: parseList(allowedGroups.value),
-        },
-        defaults: { character: defaultCharacter.value, world: defaultWorld.value },
-        stDataDir: stDataDir.value.trim(),
-    });
-    saved.value = true;
-    setTimeout(() => (saved.value = false), 2000);
-    toast.success('设置已保存', '连接与触发规则已更新');
-    await store.refresh();
-}
-
-async function refreshCatalog() {
-    try {
-        await api.refreshCatalog();
-        await store.refresh();
-        toast.info('清单已刷新', `${store.status?.catalogs.characters.length ?? 0} 个角色 / ${store.status?.catalogs.worlds.length ?? 0} 本世界书`);
-    } catch (e) {
-        toast.error('刷新失败', e instanceof Error ? e.message : String(e));
-    }
-}
-
-function charOptions() {
-    return [
-        { value: '', label: '（不自动选择）' },
-        ...(store.status?.catalogs.characters ?? []).map((c) => ({ value: c, label: c })),
-    ];
-}
-function worldOptions() {
-    return [
-        { value: '', label: '（不自动激活）' },
-        ...(store.status?.catalogs.worlds ?? []).map((w) => ({ value: w, label: w })),
-    ];
+function fmt(v: unknown, fallback = '—'): string {
+    if (v === undefined || v === null || v === '') return fallback;
+    return String(v);
 }
 </script>
 
 <template>
     <div class="flex flex-col gap-5">
-        <!-- 上游连接 -->
-        <UiCard>
-            <div class="flex items-center gap-3 border-b border-border/60 px-5 py-4">
-                <div class="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
-                    <Wifi class="size-5" />
-                </div>
-                <div>
-                    <h2 class="text-sm font-semibold tracking-tight">OneBot 连接</h2>
-                    <p class="text-xs text-muted-foreground">连接 SnowLuma 的 WebSocket 服务端</p>
-                </div>
-            </div>
-
-            <div class="grid gap-4 px-5 py-4 sm:grid-cols-2">
-                <div>
-                    <label class="text-xs font-medium text-muted-foreground">WebSocket 地址</label>
-                    <UiInput v-model="onebotUrl" class="mt-1" mono />
-                </div>
-                <div>
-                    <label class="text-xs font-medium text-muted-foreground">Access Token</label>
-                    <UiInput v-model="onebotToken" type="password" class="mt-1" mono />
-                </div>
-                <div>
-                    <label class="text-xs font-medium text-muted-foreground">单条消息长度上限</label>
-                    <UiInput v-model.number="maxMessageLength" type="number" class="mt-1" />
+        <!-- 说明 -->
+        <UiCard class="border-info/30 bg-info/5">
+            <div class="flex items-start gap-3 px-5 py-4">
+                <Info class="mt-0.5 size-4 shrink-0 text-info" />
+                <div class="min-w-0">
+                    <p class="text-sm font-medium">系统配置</p>
+                    <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        本页展示当前前后端的运行环境信息，后续将在此增加更多系统级配置项。
+                        业务配置已按功能拆分到对应页面：
+                    </p>
+                    <ul class="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
+                        <li>• <strong class="text-foreground">OneBot 连接</strong> → 服务管理 → SnowLuma</li>
+                        <li>• <strong class="text-foreground">默认角色 / 世界书</strong> → 会话</li>
+                        <li>• <strong class="text-foreground">触发规则 / 消息限制</strong> → 会话</li>
+                        <li>• <strong class="text-foreground">回复分段 / 图片表情</strong> → 对应页面</li>
+                    </ul>
                 </div>
             </div>
         </UiCard>
 
-        <!-- 触发规则 -->
+        <!-- 前端 -->
         <UiCard>
             <div class="flex items-center gap-3 border-b border-border/60 px-5 py-4">
                 <div class="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
-                    <SlidersHorizontal class="size-5" />
+                    <Palette class="size-5" />
                 </div>
                 <div>
-                    <h2 class="text-sm font-semibold tracking-tight">触发规则</h2>
-                    <p class="text-xs text-muted-foreground">控制哪些消息会被转发到酒馆</p>
+                    <h2 class="text-sm font-semibold tracking-tight">前端</h2>
+                    <p class="text-xs text-muted-foreground">Vue 管理界面运行信息</p>
                 </div>
             </div>
-
-            <div class="divide-y divide-border/40">
-                <div class="flex items-center justify-between px-5 py-3.5">
-                    <div>
-                        <p class="text-sm">群聊仅在 @ 机器人时响应</p>
-                        <p class="text-xs text-muted-foreground">关闭后群里所有消息都会触发</p>
-                    </div>
-                    <UiSwitch v-model="atOnly" />
-                </div>
-                <div class="flex items-center justify-between px-5 py-3.5">
-                    <div>
-                        <p class="text-sm">私聊自动回复</p>
-                        <p class="text-xs text-muted-foreground">关闭后私聊消息不处理</p>
-                    </div>
-                    <UiSwitch v-model="privateReply" />
-                </div>
-            </div>
-
-            <div class="grid gap-4 border-t border-border/40 px-5 py-4 sm:grid-cols-2">
+            <div class="grid gap-x-4 gap-y-3 px-5 py-4 sm:grid-cols-2">
                 <div>
-                    <label class="text-xs font-medium text-muted-foreground">用户白名单（逗号分隔 QQ 号）</label>
-                    <UiInput v-model="allowedUsers" class="mt-1" mono placeholder="留空 = 不限制" />
+                    <p class="ui-section-label">地址</p>
+                    <p class="mt-0.5 font-mono text-[12px]">{{ frontendOrigin }}</p>
                 </div>
                 <div>
-                    <label class="text-xs font-medium text-muted-foreground">群白名单（逗号分隔群号）</label>
-                    <UiInput v-model="allowedGroups" class="mt-1" mono placeholder="留空 = 不限制" />
-                </div>
-            </div>
-        </UiCard>
-
-        <!-- 默认角色 / 世界书 -->
-        <UiCard>
-            <div class="flex items-center justify-between border-b border-border/60 px-5 py-4">
-                <div>
-                    <h2 class="text-sm font-semibold tracking-tight">默认角色 / 世界书</h2>
-                    <p class="text-xs text-muted-foreground">酒馆未选择角色时自动使用</p>
-                </div>
-                <UiButton variant="ghost" size="sm" @click="refreshCatalog">
-                    <RefreshCw class="size-4" />
-                    刷新清单
-                </UiButton>
-            </div>
-
-            <div class="grid gap-4 px-5 py-4 sm:grid-cols-2">
-                <div>
-                    <label class="text-xs font-medium text-muted-foreground">默认角色</label>
-                    <UiSelect v-model="defaultCharacter" :options="charOptions()" class="mt-1" />
+                    <p class="ui-section-label">路由模式</p>
+                    <p class="mt-0.5 font-mono text-[12px]">{{ frontendRouteMode }}</p>
                 </div>
                 <div>
-                    <label class="text-xs font-medium text-muted-foreground">默认世界书</label>
-                    <UiSelect v-model="defaultWorld" :options="worldOptions()" class="mt-1" />
+                    <p class="ui-section-label">后端连通性</p>
+                    <UiBadge :tone="store.reachable ? 'success' : 'destructive'" dot class="mt-0.5">
+                        {{ store.reachable ? '正常' : '异常' }}
+                    </UiBadge>
                 </div>
-                <div class="sm:col-span-2">
-                    <label class="text-xs font-medium text-muted-foreground">酒馆数据目录</label>
-                    <UiInput v-model="stDataDir" class="mt-1" mono />
-                    <p class="mt-1 text-xs text-muted-foreground">
-                        用于扫描角色卡与世界书清单
+                <div>
+                    <p class="ui-section-label">轮询状态</p>
+                    <p class="mt-0.5 text-[12px] text-muted-foreground">
+                        {{ store.loading ? '刷新中…' : '空闲' }}
                     </p>
                 </div>
             </div>
         </UiCard>
 
-        <!-- 保存 -->
-        <div class="flex items-center gap-3">
-            <UiButton @click="save">
-                <Save class="size-4" />
-                保存全部设置
-            </UiButton>
-            <span v-if="saved" class="text-xs text-success">已保存</span>
-        </div>
+        <!-- 后端 -->
+        <UiCard>
+            <div class="flex items-center gap-3 border-b border-border/60 px-5 py-4">
+                <div class="flex size-10 items-center justify-center rounded-xl bg-aurora/15 text-aurora">
+                    <Cable class="size-5" />
+                </div>
+                <div>
+                    <h2 class="text-sm font-semibold tracking-tight">后端</h2>
+                    <p class="text-xs text-muted-foreground">桥接服务运行信息</p>
+                </div>
+            </div>
+            <div class="grid gap-x-4 gap-y-3 px-5 py-4 sm:grid-cols-2">
+                <div>
+                    <p class="ui-section-label">Node 版本</p>
+                    <p class="mt-0.5 font-mono text-[12px]">{{ fmt(store.status?.process?.nodeVersion) }}</p>
+                </div>
+                <div>
+                    <p class="ui-section-label">平台</p>
+                    <p class="mt-0.5 font-mono text-[12px]">
+                        {{ store.status?.process ? `${store.status.process.platform} / ${store.status.process.arch}` : '—' }}
+                    </p>
+                </div>
+                <div>
+                    <p class="ui-section-label">进程 PID</p>
+                    <p class="mt-0.5 font-mono text-[12px]">{{ fmt(store.status?.process?.pid) }}</p>
+                </div>
+                <div>
+                    <p class="ui-section-label">内存占用</p>
+                    <p class="mt-0.5 font-mono text-[12px]">
+                        {{ store.status?.process ? `${store.status.process.rssMb} MB` : '—' }}
+                    </p>
+                </div>
+                <div>
+                    <p class="ui-section-label">控制台 / API 端口</p>
+                    <p class="mt-0.5 font-mono text-[12px]">{{ fmt(store.status?.config['consolePort']) }}</p>
+                </div>
+                <div>
+                    <p class="ui-section-label">扩展 WS 端口</p>
+                    <p class="mt-0.5 font-mono text-[12px]">{{ fmt(store.status?.config['stExtPort']) }}</p>
+                </div>
+            </div>
+        </UiCard>
+
+        <!-- 资源 -->
+        <UiCard>
+            <div class="flex items-center gap-3 border-b border-border/60 px-5 py-4">
+                <div class="flex size-10 items-center justify-center rounded-xl bg-info/10 text-info">
+                    <Database class="size-5" />
+                </div>
+                <div>
+                    <h2 class="text-sm font-semibold tracking-tight">数据资源</h2>
+                    <p class="text-xs text-muted-foreground">已加载的角色与世界书清单</p>
+                </div>
+            </div>
+            <div class="grid gap-x-4 gap-y-3 px-5 py-4 sm:grid-cols-2">
+                <div>
+                    <p class="ui-section-label">角色</p>
+                    <p class="mt-0.5 font-mono text-[12px] tabular-nums">
+                        {{ store.status?.catalogs.characters.length ?? 0 }} 个
+                    </p>
+                </div>
+                <div>
+                    <p class="ui-section-label">世界书</p>
+                    <p class="mt-0.5 font-mono text-[12px] tabular-nums">
+                        {{ store.status?.catalogs.worlds.length ?? 0 }} 本
+                    </p>
+                </div>
+                <div>
+                    <p class="ui-section-label">清单更新时间</p>
+                    <p class="mt-0.5 text-[12px] text-muted-foreground">
+                        {{ fmt(store.status?.catalogs.updatedAt, '尚未上报') }}
+                    </p>
+                </div>
+                <div>
+                    <p class="ui-section-label">酒馆数据目录</p>
+                    <p class="mt-0.5 truncate font-mono text-[11px] text-muted-foreground" :title="String(store.status?.config['stDataDir'] ?? '')">
+                        {{ fmt(store.status?.config['stDataDir'], '未配置（自动探测）') }}
+                    </p>
+                </div>
+            </div>
+        </UiCard>
+
+        <!-- 待补充 -->
+        <UiCard>
+            <div class="flex items-center gap-3 border-b border-border/60 px-5 py-4">
+                <div class="flex size-10 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+                    <Boxes class="size-5" />
+                </div>
+                <div>
+                    <h2 class="text-sm font-semibold tracking-tight">后续将在此加入</h2>
+                    <p class="text-xs text-muted-foreground">系统级配置项</p>
+                </div>
+            </div>
+            <div class="px-5 py-4">
+                <ul class="flex flex-col gap-1.5 text-xs text-muted-foreground">
+                    <li>• 日志级别与保留策略</li>
+                    <li>• 数据备份与恢复</li>
+                    <li>• 端口与监听地址</li>
+                    <li>• 更新检查</li>
+                </ul>
+            </div>
+        </UiCard>
     </div>
 </template>

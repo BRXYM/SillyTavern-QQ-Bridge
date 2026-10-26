@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import {
     Server, Play, Square, RotateCw, Download, ExternalLink, FolderOpen, RefreshCw,
-    Wand2, CheckCircle2, AlertTriangle, Info, Copy, Trash2,
+    Wand2, CheckCircle2, AlertTriangle, Info, Copy, Trash2, Save, Eye, EyeOff,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -87,6 +87,77 @@ const snowState = computed<'running' | 'stopped' | 'unknown'>(() => {
     if (!probe.value) return 'unknown';
     return snowRunning.value ? 'running' : 'stopped';
 });
+
+// ---------------- OneBot 连接（原系统设置页迁入） ----------------
+const onebotUrl = ref('ws://127.0.0.1:3001');
+const onebotToken = ref('');
+const showToken = ref(false);
+const savingOnebot = ref(false);
+const loadingOnebot = ref(false);
+/** 已保存值的快照，用于判断脏状态 */
+const onebotSnapshot = ref('');
+
+const upstreamConnected = computed(() => store.onebotConnected);
+
+const onebotDirty = computed(
+    () => `${onebotUrl.value}\u0000${onebotToken.value}` !== onebotSnapshot.value,
+);
+
+function syncOnebotFromStore() {
+    const c = store.status?.config as Record<string, unknown> | undefined;
+    if (!c) return;
+    onebotUrl.value = (c['onebotUrl'] as string) ?? 'ws://127.0.0.1:3001';
+    onebotToken.value = (c['onebotToken'] as string) ?? '';
+    onebotSnapshot.value = `${onebotUrl.value}\u0000${onebotToken.value}`;
+}
+
+async function saveOnebot() {
+    savingOnebot.value = true;
+    try {
+        await api.updateConfig({
+            onebotUrl: onebotUrl.value.trim(),
+            onebotToken: onebotToken.value.trim(),
+        });
+        await store.refresh();
+        syncOnebotFromStore();
+        toast.success('连接配置已保存', '上游连接参数变更后会自动重连');
+    } catch (e) {
+        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        savingOnebot.value = false;
+    }
+}
+
+/** 从 SnowLuma 的 onebot_<uin>.json 读取地址与 Token 并填入表单 */
+async function loadOnebotFromSnowLuma() {
+    const uin = snowUin.value.trim();
+    if (!uin) {
+        toast.warning('请先填写 QQ 号', '需要 QQ 号才能定位对应账号的配置');
+        return;
+    }
+    loadingOnebot.value = true;
+    try {
+        const r = await api.readSnowLumaConfig(uin, snowDir.value.trim());
+        const cfg = r.config as
+            | { networks?: { wsServers?: Array<{ host?: string; port?: number; path?: string; accessToken?: string }> } }
+            | null;
+        const ws = cfg?.networks?.wsServers?.[0];
+        if (!ws) {
+            toast.warning('未找到 wsServer 配置', '该账号尚未配置 OneBot 服务端，可先点「自动配置连接」');
+            return;
+        }
+        const host = ws.host || '127.0.0.1';
+        const port = ws.port ?? 3001;
+        const p = ws.path && ws.path !== '/' ? ws.path : '';
+        onebotUrl.value = `ws://${host}:${port}${p}`;
+        if (ws.accessToken) onebotToken.value = ws.accessToken;
+        toast.success('已读取 SnowLuma 配置', `${onebotUrl.value} · ${ws.accessToken ? '含 Token' : '无 Token'}`);
+    } catch (e) {
+        toast.error('读取失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        loadingOnebot.value = false;
+    }
+}
 
 async function doProbe(opts: { keepResult?: boolean; silent?: boolean } = {}) {
     if (!snowDir.value.trim()) {
@@ -342,6 +413,10 @@ function useStCandidate(dir: string) {
 onMounted(async () => {
     await store.refresh();
     const cfg = store.status?.config as Record<string, unknown> | undefined;
+
+    // OneBot 连接表单
+    syncOnebotFromStore();
+
     const saved = cfg?.['snowlumaDir'];
     if (typeof saved === 'string' && saved) {
         snowDir.value = saved;
@@ -600,6 +675,75 @@ onMounted(async () => {
                     <ExternalLink class="size-4" />
                     打开 SnowLuma 界面
                 </UiButton>
+            </div>
+
+            <!-- OneBot 连接（原系统设置页迁入） -->
+            <div class="border-t border-border/40 px-5 py-4">
+                <div class="mb-3 flex items-center justify-between">
+                    <div>
+                        <h3 class="text-[13px] font-semibold tracking-tight">OneBot 连接</h3>
+                        <p class="text-xs text-muted-foreground">
+                            Bridge 主动连接 SnowLuma 的 WebSocket 服务端
+                        </p>
+                    </div>
+                    <UiBadge
+                        :tone="upstreamConnected ? 'success' : 'secondary'"
+                        dot
+                        :pulse="upstreamConnected"
+                        class="shrink-0"
+                    >
+                        {{ upstreamConnected ? '已连接' : '未连接' }}
+                    </UiBadge>
+                </div>
+
+                <div class="grid gap-4 sm:grid-cols-2">
+                    <div>
+                        <label class="text-xs font-medium text-muted-foreground">WebSocket 地址</label>
+                        <UiInput v-model="onebotUrl" class="mt-1.5" mono placeholder="ws://127.0.0.1:3001" />
+                    </div>
+                    <div>
+                        <label class="text-xs font-medium text-muted-foreground">Access Token</label>
+                        <div class="mt-1.5 flex items-center gap-2">
+                            <UiInput
+                                v-model="onebotToken"
+                                :type="showToken ? 'text' : 'password'"
+                                class="flex-1"
+                                mono
+                                placeholder="留空 = 不鉴权"
+                            />
+                            <UiButton
+                                variant="ghost"
+                                size="icon"
+                                :title="showToken ? '隐藏 Token' : '显示 Token'"
+                                @click="showToken = !showToken"
+                            >
+                                <Eye v-if="!showToken" class="size-4" />
+                                <EyeOff v-else class="size-4" />
+                            </UiButton>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                    <UiButton size="sm" :disabled="savingOnebot || !onebotDirty" @click="saveOnebot">
+                        <Save class="size-4" />
+                        {{ savingOnebot ? '保存中…' : '保存连接配置' }}
+                    </UiButton>
+                    <UiButton
+                        variant="outline"
+                        size="sm"
+                        :disabled="loadingOnebot || !snowDir"
+                        @click="loadOnebotFromSnowLuma"
+                    >
+                        <Download class="size-4" />
+                        {{ loadingOnebot ? '读取中…' : '从 SnowLuma 读取' }}
+                    </UiButton>
+                    <span v-if="onebotDirty" class="text-[11px] text-warning">有未保存的修改</span>
+                    <div class="flex-1" />
+                    <span class="hidden text-[11px] text-muted-foreground sm:block">
+                        端口须与上方 OneBot 端口一致
+                    </span>
+                </div>
             </div>
 
             <div class="border-t border-border/40 px-5 py-3">
