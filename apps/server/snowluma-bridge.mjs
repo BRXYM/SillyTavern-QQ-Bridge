@@ -38,7 +38,7 @@ import {
     isPortOpen as isStPortOpen,
 } from './sillytavern-service.mjs';
 import { FaceService } from './faces-service.mjs';
-import { OllamaClient, OllamaDaemon } from './ollama-service.mjs';
+import { OllamaClient, OllamaDaemon, countModelsIn } from './ollama-service.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -1068,8 +1068,25 @@ function applyOllamaConfig() {
 }
 applyOllamaConfig();
 
-/** 拉取任务的进度（同一时刻只允许一个） */
-const ollamaPullJob = {
+/**
+ * 找一个空闲的本地端口。
+ * 用于「原 Ollama 进程无权停止」时，换个端口起一个能正确读到模型的实例。
+ */
+async function findFreePort(from = 11500, to = 11600) {
+    const net = await import('node:net');
+    for (let port = from; port <= to; port += 1) {
+        const free = await new Promise((resolve) => {
+            const srv = net.createServer();
+            srv.once('error', () => resolve(false));
+            srv.once('listening', () => srv.close(() => resolve(true)));
+            srv.listen(port, '127.0.0.1');
+        });
+        if (free) return port;
+    }
+    return 0;
+}
+
+/** 拉取任务的进度（同一时刻只允许一个） */const ollamaPullJob = {
     running: false,
     model: '',
     status: '',
@@ -1799,7 +1816,15 @@ const consoleServer = http.createServer(async (req, res) => {
             const v = await ollamaClient.version();
             const daemon = ollamaDaemon.status();
             let running = [];
-            if (v.ok) running = await ollamaClient.running();
+            let models = [];
+            if (v.ok) {
+                running = await ollamaClient.running();
+                models = await ollamaClient.list().catch(() => []);
+            }
+            // 磁盘上有模型、服务却看不到 → 几乎一定是模型目录没传对。
+            // 这是最容易被误判成「未安装」的情况，必须明确告诉用户。
+            const diskModelCount = countModelsIn(daemon.modelsDir);
+            const envMismatch = v.ok && models.length === 0 && diskModelCount > 0;
             json(200, {
                 ok: true,
                 online: v.ok,
@@ -1810,6 +1835,12 @@ const consoleServer = http.createServer(async (req, res) => {
                 textModel: cfg.ollamaTextModel ?? '',
                 daemon,
                 running,
+                /** 服务上报的模型数量 */
+                modelCount: models.length,
+                /** 磁盘上实际存在的模型数量 */
+                diskModelCount,
+                /** 服务看不到磁盘上的模型（模型目录未生效） */
+                envMismatch,
                 pull: { ...ollamaPullJob },
             });
             return;
@@ -1846,6 +1877,92 @@ const consoleServer = http.createServer(async (req, res) => {
                 json(200, { ok: true, ...r, daemon: ollamaDaemon.status() });
             } catch (e) {
                 json(400, { ok: false, error: e.message, daemon: ollamaDaemon.status() });
+            }
+            return;
+        }
+
+        // -------- POST /api/ollama/repair   修正模型目录问题 --------
+        if (req.method === 'POST' && p === '/api/ollama/repair') {
+            try {
+                const st = ollamaDaemon.status();
+                // 把探测到的模型目录写进配置，保证以后启动一定带上
+                if (st.modelsDir && !cfg.ollamaModelsDir) {
+                    cfg.ollamaModelsDir = st.modelsDir;
+                    saveConfig();
+                    applyOllamaConfig();
+                    log(`Ollama：已把模型目录写入配置 ${cfg.ollamaModelsDir}`);
+                }
+
+                // 方案 A：能停掉现有进程 → 原地重启
+                const stopped = await ollamaDaemon.stop(ollamaClient);
+                if (stopped.ok) {
+                    const deadline = Date.now() + 15000;
+                    while (Date.now() < deadline) {
+                        const v = await ollamaClient.version();
+                        if (!v.ok) break;
+                        await new Promise((r) => setTimeout(r, 400));
+                    }
+                    const started = await ollamaDaemon.start(ollamaClient);
+                    const models = await ollamaClient.list().catch(() => []);
+                    log(`Ollama：修复完成，现在可见 ${models.length} 个模型`);
+                    json(200, {
+                        ok: true,
+                        mode: 'restart',
+                        version: started.version,
+                        modelCount: models.length,
+                        modelsDir: ollamaDaemon.status().modelsDir,
+                    });
+                    return;
+                }
+
+                // 方案 B：停不掉（权限/其他账户）→ 换个端口起一个带正确目录的实例
+                const altPort = await findFreePort(11500, 11600);
+                if (!altPort) {
+                    json(409, {
+                        ok: false,
+                        needManual: true,
+                        error: stopped.error,
+                        hint: '请到任务管理器结束 ollama.exe，然后点「启动服务」',
+                    });
+                    return;
+                }
+
+                const altUrl = `http://127.0.0.1:${altPort}`;
+                log(`Ollama：原进程无法停止，改在 ${altPort} 启动带正确模型目录的实例`);
+                ollamaClient.baseUrl = altUrl;
+                ollamaDaemon.baseUrl = altUrl;
+
+                const started = await ollamaDaemon.start(ollamaClient);
+                const models = await ollamaClient.list().catch(() => []);
+                if (models.length === 0) {
+                    // 新实例也看不到模型，说明配置本身有问题，别悄悄改地址
+                    ollamaClient.baseUrl = cfg.ollamaBaseUrl ?? 'http://127.0.0.1:11434';
+                    ollamaDaemon.baseUrl = ollamaClient.baseUrl;
+                    await ollamaDaemon.stop(ollamaClient).catch(() => {});
+                    json(400, {
+                        ok: false,
+                        error: '新实例仍然看不到模型，请检查「模型目录」填写是否正确',
+                        modelsDir: cfg.ollamaModelsDir,
+                    });
+                    return;
+                }
+
+                // 成功：把新地址固化下来，前端与打标器都用它
+                cfg.ollamaBaseUrl = altUrl;
+                saveConfig();
+                applyOllamaConfig();
+                log(`Ollama：修复完成，新地址 ${altUrl}，可见 ${models.length} 个模型`);
+                json(200, {
+                    ok: true,
+                    mode: 'alt-port',
+                    version: started.version,
+                    baseUrl: altUrl,
+                    modelCount: models.length,
+                    modelsDir: ollamaDaemon.status().modelsDir,
+                    note: `原进程（PID 无法停止）仍在 ${st.exePath ? '旧端口' : '运行'}，已忽略`,
+                });
+            } catch (e) {
+                json(400, { ok: false, error: e.message });
             }
             return;
         }

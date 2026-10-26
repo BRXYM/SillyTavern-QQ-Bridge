@@ -66,6 +66,12 @@ export interface OllamaStatus {
     textModel: string;
     daemon: OllamaDaemonStatus;
     running: OllamaRunningModel[];
+    /** 服务上报的模型数量 */
+    modelCount?: number;
+    /** 磁盘上实际存在的模型数量 */
+    diskModelCount?: number;
+    /** 服务看不到磁盘上的模型（模型目录未生效） */
+    envMismatch?: boolean;
     pull: OllamaPullJob;
 }
 
@@ -125,6 +131,17 @@ export const ollamaApi = {
             '/ollama/start',
             { method: 'POST', body: '{}' },
         ),
+
+    repair: () =>
+        req<{
+            ok: boolean;
+            version?: string;
+            modelCount?: number;
+            modelsDir?: string;
+            needManual?: boolean;
+            error?: string;
+            hint?: string;
+        }>('/ollama/repair', { method: 'POST', body: '{}' }),
 
     stop: () =>
         req<{ ok: boolean; error?: string; daemon: OllamaDaemonStatus }>('/ollama/stop', {

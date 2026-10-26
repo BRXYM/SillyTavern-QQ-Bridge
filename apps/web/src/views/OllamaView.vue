@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import {
     Cpu, Play, Square, RefreshCw, Download, Trash2, CheckCircle2, AlertTriangle,
     Info, Loader2, Zap, Image as ImageIcon, MessageSquare, Save, HardDrive,
-    ArrowUpCircle, Tag, X,
+    ArrowUpCircle, Tag, X, Wrench,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -163,8 +163,27 @@ async function stopService() {
     }
 }
 
-async function saveServiceConfig() {
-    savingConfig.value = true;
+// ---------------- 一键修复模型目录 ----------------
+const repairing = ref(false);
+
+async function repairService() {
+    repairing.value = true;
+    try {
+        const r = await ollamaApi.repair();
+        if (r.ok) {
+            toast.success('修复完成', `现在可见 ${r.modelCount ?? 0} 个模型`);
+        } else {
+            toast.warning('需要手动处理', r.hint ?? r.error ?? '未知原因');
+        }
+        await loadAll({ silent: true });
+    } catch (e) {
+        toast.error('修复失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        repairing.value = false;
+    }
+}
+
+async function saveServiceConfig() {    savingConfig.value = true;
     try {
         await api.updateConfig({
             ollamaBaseUrl: baseUrl.value.trim(),
@@ -468,6 +487,38 @@ const capabilityLabel: Record<string, string> = {
                             如果已安装 Ollama，点「启动服务」由 Bridge 拉起；
                             未找到可执行文件时请在下方填写完整路径。
                         </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 关键告警：磁盘有模型但服务看不到 -->
+            <div
+                v-if="status?.envMismatch"
+                class="border-b border-border/40 bg-destructive/10 px-5 py-3"
+            >
+                <div class="flex items-start gap-2">
+                    <AlertTriangle class="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                    <div class="min-w-0 text-[11px] leading-relaxed text-muted-foreground">
+                        <p class="font-medium text-foreground">
+                            Ollama 正在运行，但看不到本地已下载的
+                            {{ status.diskModelCount }} 个模型
+                        </p>
+                        <p class="mt-0.5">
+                            模型在磁盘上是存在的（{{ status.daemon.modelsDir || '已探测到模型目录' }}），
+                            只是当前这个 Ollama 进程启动时没有拿到这个目录，
+                            所以它读的是默认位置（<code class="font-mono">%USERPROFILE%\.ollama\models</code>）。
+                        </p>
+                        <p class="mt-1 font-medium text-foreground">解决办法：重启这个 Ollama 进程</p>
+                        <p class="mt-0.5">
+                            如果它是 Bridge 启动的，点「停止服务」再「启动服务」即可修复；
+                            如果点停止提示无权限，说明它是开机自启或用别的账户跑的，
+                            请到任务管理器里结束 <code class="font-mono">ollama.exe</code> 后，再点「启动服务」。
+                        </p>
+                        <UiButton size="sm" class="mt-2" :disabled="repairing" @click="repairService">
+                            <Loader2 v-if="repairing" class="size-3.5 animate-spin" />
+                            <Wrench v-else class="size-3.5" />
+                            {{ repairing ? '修复中…' : '一键修复' }}
+                        </UiButton>
                     </div>
                 </div>
             </div>

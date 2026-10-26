@@ -22,6 +22,53 @@ function detectExt(buf) {
     return 'bin';
 }
 
+/**
+ * 从上游响应里挖出表情数组。
+ *
+ * 不同实现/版本的返回形状不一样，这里统统兼容：
+ *   [...]
+ *   { data: [...] }
+ *   { data: { list: [...] } }
+ *   { data: { data: [...] } }
+ *   { list: [...] }
+ *
+ * 返回 null 表示「拿到的响应根本不是列表」，便于上层区分
+ * 「真的没有表情」和「返回格式看不懂」——后者必须报错，不能静默成 0。
+ */
+export function extractFaceArray(resp) {
+    if (Array.isArray(resp)) return resp;
+    if (!resp || typeof resp !== 'object') return null;
+
+    const tryList = (v) => (Array.isArray(v) ? v : null);
+    const keys = ['data', 'list', 'faces', 'items'];
+
+    for (const k of keys) {
+        const hit = tryList(resp[k]);
+        if (hit) return hit;
+    }
+    // 再往下钻一层
+    for (const k of keys) {
+        const inner = resp[k];
+        if (inner && typeof inner === 'object') {
+            for (const k2 of keys) {
+                const hit = tryList(inner[k2]);
+                if (hit) return hit;
+            }
+        }
+    }
+    return null;
+}
+
+/** 把看不懂的响应压成一行日志，便于排查 */
+function describeRaw(resp) {
+    try {
+        const s = JSON.stringify(resp);
+        return s.length > 300 ? `${s.slice(0, 300)}…` : s;
+    } catch {
+        return String(resp);
+    }
+}
+
 export class FaceService {
     /**
      * @param {object} opts
@@ -93,38 +140,60 @@ export class FaceService {
         try {
             this.log('表情库：开始从 QQ 同步收藏表情…');
 
-            // SnowLuma 的 fetch_custom_face_detail 一次最多几十条，分批拉取
+            // 注意：callOnebot 返回的是完整 OneBot 响应体
+            //   { status: 'ok', retcode: 0, data: [...], echo: '...' }
+            // 表情数组在 .data 里，不是返回值本身。
             const all = [];
-            const pageSize = 50;
+            let raw = null;
+            const seen = new Set();
             const maxPages = 20; // 上限 1000 条，足够
-            for (let page = 0; page < maxPages; page++) {
-                const batch = await this.callOnebot('fetch_custom_face_detail', {
-                    count: pageSize,
-                });
-                if (!Array.isArray(batch) || batch.length === 0) break;
 
-                // 用 md5 去重（即使分页重叠也不会重复）
+            for (let page = 0; page < maxPages; page++) {
+                const resp = await this.callOnebot('fetch_custom_face_detail', {
+                    count: 50,
+                });
+                if (page === 0) raw = resp;
+
+                const batch = extractFaceArray(resp);
+                if (!batch) {
+                    // 拿不到数组时，把原始返回记进日志，避免"静默 0 条"
+                    this.syncState.lastError = batch === null
+                        ? `上游返回格式异常：${describeRaw(resp)}`
+                        : '';
+                    if (this.syncState.lastError) {
+                        this.log(`表情库：${this.syncState.lastError}`);
+                        return { ok: false, error: this.syncState.lastError };
+                    }
+                    break;
+                }
+                if (batch.length === 0) break;
+
                 let newCount = 0;
                 for (const it of batch) {
-                    const md5 = it.md5 || md5FromEmojiId(it.emoji_id ?? it.emojiId);
+                    const md5 = it.md5 || md5FromEmojiId(it.emoji_id ?? it.emojiId ?? it.resId);
                     if (!md5) continue;
-                    if (all.some((x) => x.md5 === md5)) continue;
+                    if (seen.has(md5)) continue;
+                    seen.add(md5);
                     all.push({
                         md5,
-                        emojiId: it.emoji_id ?? it.emojiId ?? '',
+                        emojiId: it.emoji_id ?? it.emojiId ?? it.resId ?? '',
                         url: it.url ?? '',
                         desc: it.desc ?? '',
                     });
                     newCount += 1;
                 }
 
-                // 这一页没有新数据，说明已经拉完
+                // 这一页没有新数据，说明已经拉完（接口不支持分页时会一直重复第一页）
                 if (newCount === 0) break;
-                if (batch.length < pageSize) break;
+                if (batch.length < 50) break;
             }
 
             if (all.length === 0) {
-                this.syncState.lastResult = { added: 0, updated: 0, total: this.store.data.faces.length };
+                this.syncState.lastResult = {
+                    added: 0,
+                    updated: 0,
+                    total: this.store.data.faces.length,
+                };
                 this.syncState.lastAt = new Date().toISOString();
                 this.log('表情库：QQ 中暂无收藏表情');
                 return { ok: true, ...this.syncState.lastResult, downloaded: 0 };
