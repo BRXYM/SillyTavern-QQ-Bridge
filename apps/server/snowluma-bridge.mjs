@@ -37,6 +37,7 @@ import {
     discoverSillyTavernDir,
     isPortOpen as isStPortOpen,
 } from './sillytavern-service.mjs';
+import { FaceService } from './faces-service.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -56,6 +57,10 @@ const DEFAULT_CONFIG = {
     snowlumaWebuiPort: 5099,
     sillyTavernDir: '',
     sillyTavernPort: 8000,
+    // 表情库：Ollama 视觉模型配置（走 HTTP API，便于换模型）
+    ollamaBaseUrl: 'http://127.0.0.1:11434',
+    ollamaVisionModel: 'qwen2.5vl:3b',
+    ollamaTextModel: '',
     // 默认角色/世界书：酒馆当前未选择角色时自动使用
     defaults: {
         character: '',      // 角色名（留空=不自动选择）
@@ -626,7 +631,19 @@ async function sendQQ(msg) {
                 await new Promise((r) => setTimeout(r, seg.delayMs));
             }
             // 检测消息里的图片标记，转成消息段
-            const payload = buildOutgoingPayload(seg.text);
+            // [表情:标签] 会按表情库检索出真实图片地址
+            const payload = buildOutgoingPayload(seg.text, (tag) => {
+                try {
+                    const hit = faces?.pickByTag(tag);
+                    return hit?.imageUrl ? absoluteFaceUrl(hit.imageUrl) : null;
+                } catch {
+                    return null;
+                }
+            });
+            if (payload === '' || (Array.isArray(payload) && payload.length === 0)) {
+                log(`分段 ${i + 1} 只有未命中的表情标记，跳过发送`);
+                continue;
+            }
             await sendOne(msg, payload);
             log(`分段 ${i + 1}/${segments.length} 已发往QQ → ${target} (${seg.text.length}字)`);
         }
@@ -638,19 +655,54 @@ async function sendQQ(msg) {
 }
 
 /**
+ * 表情图片的对外地址。
+ *
+ * 本地缓存的图片是相对路径（/faces/cache/xxx.jpg），
+ * QQ 客户端无法访问 localhost，因此需要：有原图 URL 时优先用 QQ CDN 直链，
+ * 否则才回落到本地缓存地址。
+ */
+function absoluteFaceUrl(faceOrUrl) {
+    const item = typeof faceOrUrl === 'string' ? null : faceOrUrl;
+    // 优先使用 QQ 原始 URL（公网可达，QQ 能直接下载）
+    if (item?.url) return item.url;
+    const rel = typeof faceOrUrl === 'string' ? faceOrUrl : item?.imageUrl;
+    if (!rel) return null;
+    if (/^https?:/i.test(rel)) return rel;
+    // 本地缓存不可用于 QQ，返回 null 由调用方丢弃
+    return null;
+}
+
+/**
  * 把文本里的图片标记转成 OneBot 消息段。
  * 支持形式：
- *   [img:https://...]  [image:https://...]  [图片:https://...]
- *   <img src="...">    （从酒馆 HTML 里抓）
+ *   [img:https://...]  [image:https://...]  [图片:https://...]  直链
+ *   [表情:开心]                                                标签，按表情库检索
+ *   <img src="...">                                            （从酒馆 HTML 里抓）
+ *
+ * 标签解析失败时静默丢弃该标记，避免把 `[表情:开心]` 原文发给用户。
  */
-function buildOutgoingPayload(text) {
+function buildOutgoingPayload(text, resolveTag) {
     const imgRe = /\[(?:img|image|图片|表情)[:：]\s*([^\]\s]+)\s*\]/gi;
     const imgSrcRe = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    const urlLike = /^(https?:|data:|file:|\/\/|\.\/|\/)/i;
 
     const found = [];
     let m;
-    while ((m = imgRe.exec(text)) !== null) found.push({ index: m.index, url: m[1], len: m[0].length });
-    while ((m = imgSrcRe.exec(text)) !== null) found.push({ index: m.index, url: m[1], len: m[0].length });
+    while ((m = imgRe.exec(text)) !== null) {
+        const value = (m[1] ?? '').trim();
+        if (!value) continue;
+        found.push({
+            index: m.index,
+            len: m[0].length,
+            value,
+            kind: urlLike.test(value) ? 'url' : 'tag',
+        });
+    }
+    while ((m = imgSrcRe.exec(text)) !== null) {
+        const value = (m[1] ?? '').trim();
+        if (!value) continue;
+        found.push({ index: m.index, len: m[0].length, value, kind: 'url' });
+    }
 
     if (!found.length) return text;   // 纯文本
 
@@ -663,13 +715,30 @@ function buildOutgoingPayload(text) {
             const t = text.slice(cursor, f.index).trim();
             if (t) segs.push({ type: 'text', data: { text: t } });
         }
-        segs.push({ type: 'image', data: { file: f.url } });
+
+        let url = null;
+        if (f.kind === 'url') {
+            url = f.value;
+        } else if (typeof resolveTag === 'function') {
+            try {
+                url = resolveTag(f.value);
+            } catch {
+                url = null;
+            }
+            if (url) {
+                log(`表情标签已解析：[表情:${f.value}] → ${String(url).slice(0, 60)}…`);
+            } else {
+                log(`⚠ 表情标签未命中，已丢弃：[表情:${f.value}]`);
+            }
+        }
+
+        if (url) segs.push({ type: 'image', data: { file: url } });
         cursor = f.index + f.len;
     }
     const tail = text.slice(cursor).trim();
     if (tail) segs.push({ type: 'text', data: { text: tail } });
 
-    return segs;
+    return segs.length > 0 ? segs : '';
 }
 
 function parseMessage(message) {
@@ -903,6 +972,26 @@ wss.on('connection', (socket) => {
 // ================= Web API =================
 // 说明：内置控制台网页（旧版 PAGE 模板）已弃用并移除。
 // 管理界面由 apps/web（Vue 3）提供，本服务只暴露 /api/* 接口。
+
+// ================= 表情库 =================
+// 延迟初始化：sendQQ 里可能较早引用它，用 let 占位避免暂时性死区。
+// 数据目录优先用环境变量（生产建议放到 D:\WorkSpace\Ollama 同级），
+// 否则回落到服务目录下的 data/faces。
+const FACES_DATA_DIR = process.env.BRIDGE_FACES_DIR
+    ? path.resolve(process.env.BRIDGE_FACES_DIR)
+    : path.resolve(__dirname, 'data', 'faces');
+let faces = null;
+faces = new FaceService({
+    dataDir: FACES_DATA_DIR,
+    callOnebot,
+    log,
+    ollama: {
+        baseUrl: cfg.ollamaBaseUrl ?? 'http://127.0.0.1:11434',
+        visionModel: cfg.ollamaVisionModel ?? 'qwen2.5vl:3b',
+        textModel: cfg.ollamaTextModel ?? '',
+        timeoutMs: 120000,
+    },
+});
 
 const consoleServer = http.createServer(async (req, res) => {
     // 允许酒馆页面（:8000）跨域调用诊断接口
@@ -1437,6 +1526,149 @@ const consoleServer = http.createServer(async (req, res) => {
                 res.end(JSON.stringify({ ok: false, error: e.message }));
             }
         });
+        return;
+    }
+
+    // ================= 表情库 =================
+    // GET /faces/cache/<file>   本地缓存的图片（静态资源）
+    if (req.method === 'GET' && req.url?.startsWith('/faces/cache/')) {
+        const name = decodeURIComponent(req.url.slice('/faces/cache/'.length).split('?')[0]);
+        // 防目录穿越：只允许纯文件名
+        if (!name || name.includes('..') || name.includes('/') || name.includes('\\')) {
+            res.writeHead(400);
+            res.end('bad request');
+            return;
+        }
+        const file = path.join(faces.store.cacheDir, name);
+        if (!fs.existsSync(file)) {
+            res.writeHead(404);
+            res.end('not found');
+            return;
+        }
+        const ext = path.extname(file).toLowerCase();
+        const type =
+            ext === '.png' ? 'image/png'
+                : ext === '.gif' ? 'image/gif'
+                    : ext === '.webp' ? 'image/webp'
+                        : 'image/jpeg';
+        res.writeHead(200, {
+            'Content-Type': type,
+            'Cache-Control': 'public, max-age=86400',
+        });
+        fs.createReadStream(file).pipe(res);
+        return;
+    }
+
+    // GET /api/faces?tag=&keyword=&page=&pageSize=   表情列表
+    if (req.method === 'GET' && req.url?.startsWith('/api/faces')) {
+        const u = new URL(req.url, 'http://127.0.0.1');
+        // /api/faces/tags 单独处理
+        if (u.pathname === '/api/faces/tags') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                ok: true,
+                tags: faces.tagStats(),
+                stats: faces.stats(),
+            }));
+            return;
+        }
+        if (u.pathname === '/api/faces/diagnostics') {
+            const d = await faces.diagnostics();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...d }));
+            return;
+        }
+        if (u.pathname === '/api/faces/progress') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...faces.progress(), sync: faces.syncState }));
+            return;
+        }
+
+        const r = faces.list({
+            tag: u.searchParams.get('tag') ?? '',
+            keyword: u.searchParams.get('keyword') ?? '',
+            page: Number(u.searchParams.get('page') ?? 1),
+            pageSize: Number(u.searchParams.get('pageSize') ?? 60),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            ok: true,
+            ...r,
+            stats: faces.stats(),
+        }));
+        return;
+    }
+
+    // POST /api/faces/sync   从 QQ 同步收藏表情
+    if (req.method === 'POST' && req.url === '/api/faces/sync') {
+        try {
+            const r = await faces.syncFromQQ({ downloadImages: true });
+            res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(r));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+        return;
+    }
+
+    // POST /api/faces/label   启动后台打标
+    if (req.method === 'POST' && req.url === '/api/faces/label') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+            try {
+                const input = JSON.parse(body || '{}');
+                const r = faces.startLabeling({
+                    all: !!input.all,
+                    limit: Number(input.limit ?? 0),
+                });
+                res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(r));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // POST /api/faces/label/stop   停止打标
+    if (req.method === 'POST' && req.url === '/api/faces/label/stop') {
+        const r = faces.stopLabeling();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r));
+        return;
+    }
+
+    // POST /api/faces/tags   修改用户标签
+    if (req.method === 'POST' && req.url === '/api/faces/tags') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+            try {
+                const input = JSON.parse(body || '{}');
+                const md5 = String(input.md5 ?? '').trim();
+                if (!md5) throw new Error('缺少 md5');
+                if (!Array.isArray(input.tags)) throw new Error('tags 必须是数组');
+                const ok = faces.setUserTags(md5, input.tags);
+                res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok }));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+        });
+        return;
+    }
+
+    // GET /api/faces/resolve?tag=开心   按标签取一张（调试/预览用）
+    if (req.method === 'GET' && req.url?.startsWith('/api/faces/resolve')) {
+        const u = new URL(req.url, 'http://127.0.0.1');
+        const tag = u.searchParams.get('tag') ?? '';
+        const hit = faces.pickByTag(tag);
+        res.writeHead(hit ? 200 : 404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(hit ? { ok: true, face: hit } : { ok: false, error: '未找到匹配标签' }));
         return;
     }
 

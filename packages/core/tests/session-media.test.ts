@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { sessionKeyOf, chatNameOf, parseSessionKey } from '../src/session.js';
-import { buildOutgoingPayload } from '../src/media.js';
+import { buildOutgoingPayload, findMediaMarks } from '../src/media.js';
 
 describe('sessionKeyOf', () => {
     it('私聊', () => {
@@ -76,5 +76,65 @@ describe('buildOutgoingPayload', () => {
     it('支持 [表情:] 别名', () => {
         const r = buildOutgoingPayload('[表情:https://a.com/e.gif]');
         expect(Array.isArray(r)).toBe(true);
+    });
+});
+
+describe('表情标签解析（[表情:标签]）', () => {
+    it('识别为标签而非 URL', () => {
+        const marks = findMediaMarks('哈哈[表情:开心]');
+        expect(marks).toHaveLength(1);
+        expect(marks[0]!.kind).toBe('tag');
+        expect(marks[0]!.value).toBe('开心');
+    });
+
+    it('URL 仍识别为 url', () => {
+        const marks = findMediaMarks('[图片:https://a.com/x.png]');
+        expect(marks[0]!.kind).toBe('url');
+    });
+
+    it('标签会被解析成图片', () => {
+        const r = buildOutgoingPayload('太好了[表情:开心]', () => 'https://cdn/x.jpg');
+        expect(Array.isArray(r)).toBe(true);
+        if (Array.isArray(r)) {
+            expect(r).toEqual([
+                { type: 'text', data: { text: '太好了' } },
+                { type: 'image', data: { file: 'https://cdn/x.jpg' } },
+            ]);
+        }
+    });
+
+    it('标签解析失败时静默丢弃该标记', () => {
+        const r = buildOutgoingPayload('太好了[表情:不存在]', () => null);
+        expect(Array.isArray(r)).toBe(true);
+        if (Array.isArray(r)) {
+            // 只剩文本，标签被丢弃
+            expect(r).toEqual([{ type: 'text', data: { text: '太好了' } }]);
+        }
+    });
+
+    it('整段只有未命中的标签时返回空', () => {
+        const r = buildOutgoingPayload('[表情:不存在]', () => null);
+        expect(r).toBe('');
+    });
+
+    it('未提供解析器时丢弃标签而不是原样发送', () => {
+        const r = buildOutgoingPayload('hi[表情:开心]');
+        expect(Array.isArray(r)).toBe(true);
+        if (Array.isArray(r)) {
+            expect(r.some((s) => s.type === 'text' && s.data.text?.includes('表情'))).toBe(false);
+        }
+    });
+
+    it('标签与 URL 混合时按顺序处理', () => {
+        const r = buildOutgoingPayload(
+            'A[表情:开心]B[图片:https://a.com/x.png]C',
+            (tag) => (tag === '开心' ? 'https://cdn/ok.jpg' : null),
+        );
+        expect(Array.isArray(r)).toBe(true);
+        if (Array.isArray(r)) {
+            expect(r).toHaveLength(5);
+            expect(r[1]).toEqual({ type: 'image', data: { file: 'https://cdn/ok.jpg' } });
+            expect(r[3]).toEqual({ type: 'image', data: { file: 'https://a.com/x.png' } });
+        }
     });
 });
