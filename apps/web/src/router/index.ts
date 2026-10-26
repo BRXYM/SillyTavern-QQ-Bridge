@@ -46,6 +46,12 @@ const routes = [
         meta: { title: '图片表情', desc: '多媒体回复', icon: 'Image', group: '消息' } satisfies NavMeta,
     },
     {
+        path: '/ollama',
+        name: 'ollama',
+        component: () => import('@/views/OllamaView.vue'),
+        meta: { title: 'AI 模型', desc: 'Ollama 本地模型', icon: 'BrainCircuit', group: '消息' } satisfies NavMeta,
+    },
+    {
         path: '/settings',
         name: 'settings',
         component: () => import('@/views/SettingsView.vue'),

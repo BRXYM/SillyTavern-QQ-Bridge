@@ -38,6 +38,7 @@ import {
     isPortOpen as isStPortOpen,
 } from './sillytavern-service.mjs';
 import { FaceService } from './faces-service.mjs';
+import { OllamaClient, OllamaDaemon } from './ollama-service.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -61,6 +62,11 @@ const DEFAULT_CONFIG = {
     ollamaBaseUrl: 'http://127.0.0.1:11434',
     ollamaVisionModel: 'qwen2.5vl:3b',
     ollamaTextModel: '',
+    // Ollama 本地服务：只管调用，不负责安装
+    // exePath 用于「服务未启动时一键拉起」，留空则自动探测常见安装位置
+    ollamaExePath: '',
+    // 模型目录（会作为 OLLAMA_MODELS 传给子进程）；留空则沿用系统环境变量
+    ollamaModelsDir: '',
     // 默认角色/世界书：酒馆当前未选择角色时自动使用
     defaults: {
         character: '',      // 角色名（留空=不自动选择）
@@ -1033,6 +1039,48 @@ faces = new FaceService({
     },
 });
 
+// ================= Ollama 管理 =================
+// 只负责调用已安装的 Ollama，不负责安装。
+// 服务未启动时可用配置里的 ollamaExePath 一键拉起。
+const ollamaClient = new OllamaClient({
+    baseUrl: cfg.ollamaBaseUrl ?? 'http://127.0.0.1:11434',
+    timeoutMs: 60000,
+});
+const ollamaDaemon = new OllamaDaemon({
+    exePath: cfg.ollamaExePath ?? '',
+    baseUrl: cfg.ollamaBaseUrl ?? 'http://127.0.0.1:11434',
+    modelsDir: cfg.ollamaModelsDir ?? '',
+    log,
+});
+
+/** 前端改配置后，让客户端与守护进程立即跟上 */
+function applyOllamaConfig() {
+    ollamaClient.baseUrl = String(cfg.ollamaBaseUrl ?? 'http://127.0.0.1:11434').replace(/\/$/, '');
+    ollamaDaemon.baseUrl = ollamaClient.baseUrl;
+    ollamaDaemon.exePath = cfg.ollamaExePath ?? '';
+    ollamaDaemon.modelsDir = cfg.ollamaModelsDir ?? '';
+    // 打标器与管理页共用同一套地址/模型
+    faces.labeler.reconfigure({
+        baseUrl: ollamaClient.baseUrl,
+        visionModel: cfg.ollamaVisionModel ?? 'qwen2.5vl:3b',
+        textModel: cfg.ollamaTextModel ?? '',
+    });
+}
+applyOllamaConfig();
+
+/** 拉取任务的进度（同一时刻只允许一个） */
+const ollamaPullJob = {
+    running: false,
+    model: '',
+    status: '',
+    percent: 0,
+    completed: 0,
+    total: 0,
+    startedAt: null,
+    finishedAt: null,
+    error: '',
+};
+
 const consoleServer = http.createServer(async (req, res) => {
     // 允许酒馆页面（:8000）跨域调用诊断接口
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1240,6 +1288,16 @@ const consoleServer = http.createServer(async (req, res) => {
                 if (onebotChanged) {
                     log('上游连接参数已变更，重连 SnowLuma…');
                     try { obSocket?.close(); } catch { /* 重连逻辑接管 */ }
+                }
+                // Ollama 相关配置变更后立即生效（地址 / 模型 / 可执行路径）
+                if (
+                    patch.ollamaBaseUrl !== undefined ||
+                    patch.ollamaVisionModel !== undefined ||
+                    patch.ollamaTextModel !== undefined ||
+                    patch.ollamaExePath !== undefined ||
+                    patch.ollamaModelsDir !== undefined
+                ) {
+                    applyOllamaConfig();
                 }
                 // defaults / 会话状态变更后主动同步给已连接的酒馆扩展
                 if (patch.defaults !== undefined) {
@@ -1710,6 +1768,274 @@ const consoleServer = http.createServer(async (req, res) => {
         const hit = faces.pickByTag(tag);
         res.writeHead(hit ? 200 : 404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(hit ? { ok: true, face: hit } : { ok: false, error: '未找到匹配标签' }));
+        return;
+    }
+
+    // ================= Ollama 管理 =================
+    // 定位：只调用本机已安装的 Ollama，不负责安装。
+    // 所有模型名由前端填写，因此不做白名单校验。
+    if (req.url?.startsWith('/api/ollama')) {
+        const u = new URL(req.url, 'http://127.0.0.1');
+        const p = u.pathname;
+        const json = (code, data) => {
+            res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify(data));
+        };
+        const readBody = () =>
+            new Promise((resolve) => {
+                let body = '';
+                req.on('data', (c) => (body += c));
+                req.on('end', () => {
+                    try {
+                        resolve(JSON.parse(body || '{}'));
+                    } catch {
+                        resolve({});
+                    }
+                });
+            });
+
+        // -------- GET /api/ollama/status   服务状态 + 环境 --------
+        if (req.method === 'GET' && p === '/api/ollama/status') {
+            const v = await ollamaClient.version();
+            const daemon = ollamaDaemon.status();
+            let running = [];
+            if (v.ok) running = await ollamaClient.running();
+            json(200, {
+                ok: true,
+                online: v.ok,
+                version: v.version ?? '',
+                error: v.error ?? '',
+                baseUrl: ollamaClient.baseUrl,
+                visionModel: cfg.ollamaVisionModel ?? '',
+                textModel: cfg.ollamaTextModel ?? '',
+                daemon,
+                running,
+                pull: { ...ollamaPullJob },
+            });
+            return;
+        }
+
+        // -------- GET /api/ollama/models   本地已下载模型 --------
+        if (req.method === 'GET' && p === '/api/ollama/models') {
+            try {
+                const [models, running] = await Promise.all([
+                    ollamaClient.list(),
+                    ollamaClient.running(),
+                ]);
+                const runningMap = new Map(running.map((m) => [m.name, m]));
+                json(200, {
+                    ok: true,
+                    baseUrl: ollamaClient.baseUrl,
+                    models: models.map((m) => ({
+                        ...m,
+                        loaded: runningMap.has(m.name),
+                        running: runningMap.get(m.name) ?? null,
+                    })),
+                });
+            } catch (e) {
+                json(503, { ok: false, error: e.message, models: [] });
+            }
+            return;
+        }
+
+        // -------- POST /api/ollama/start   启动本地服务 --------
+        if (req.method === 'POST' && p === '/api/ollama/start') {
+            try {
+                const r = await ollamaDaemon.start(ollamaClient);
+                log(`Ollama：服务已就绪（${r.alreadyRunning ? '复用现有进程' : '由 Bridge 启动'}）`);
+                json(200, { ok: true, ...r, daemon: ollamaDaemon.status() });
+            } catch (e) {
+                json(400, { ok: false, error: e.message, daemon: ollamaDaemon.status() });
+            }
+            return;
+        }
+
+        // -------- POST /api/ollama/stop   停止本地服务 --------
+        if (req.method === 'POST' && p === '/api/ollama/stop') {
+            try {
+                const r = await ollamaDaemon.stop(ollamaClient);
+                json(r.ok ? 200 : 400, { ...r, daemon: ollamaDaemon.status() });
+            } catch (e) {
+                json(400, { ok: false, error: e.message });
+            }
+            return;
+        }
+
+        // -------- POST /api/ollama/models/:name/load|unload|delete --------
+        const mMatch = p.match(/^\/api\/ollama\/models\/(.+)\/(load|unload|delete)$/);
+        if (req.method === 'POST' && mMatch) {
+            const name = decodeURIComponent(mMatch[1]);
+            const action = mMatch[2];
+            try {
+                if (action === 'load') {
+                    const body = await readBody();
+                    const keepAlive = body.keepAlive ?? '30m';
+                    log(`Ollama：加载模型 ${name}（keep_alive=${keepAlive}）`);
+                    await ollamaClient.load(name, { keepAlive });
+                    json(200, { ok: true, model: name, keepAlive });
+                } else if (action === 'unload') {
+                    await ollamaClient.unload(name);
+                    log(`Ollama：已卸载模型 ${name}`);
+                    json(200, { ok: true, model: name });
+                } else {
+                    await ollamaClient.remove(name);
+                    log(`Ollama：已删除模型 ${name}`);
+                    json(200, { ok: true, model: name });
+                }
+            } catch (e) {
+                json(400, { ok: false, error: e.message });
+            }
+            return;
+        }
+
+        // -------- POST /api/ollama/models/:name/show   模型详情 --------
+        const showMatch = p.match(/^\/api\/ollama\/models\/(.+)\/show$/);
+        if (req.method === 'GET' && showMatch) {
+            const name = decodeURIComponent(showMatch[1]);
+            try {
+                json(200, { ok: true, ...(await ollamaClient.show(name)) });
+            } catch (e) {
+                json(400, { ok: false, error: e.message });
+            }
+            return;
+        }
+
+        // -------- POST /api/ollama/pull   拉取模型（后台任务） --------
+        if (req.method === 'POST' && p === '/api/ollama/pull') {
+            const body = await readBody();
+            const model = String(body.model ?? '').trim();
+            if (!model) {
+                json(400, { ok: false, error: '请填写模型名，例如 qwen2.5vl:3b' });
+                return;
+            }
+            if (ollamaPullJob.running) {
+                json(409, { ok: false, error: `已在拉取 ${ollamaPullJob.model}，请等待完成` });
+                return;
+            }
+            Object.assign(ollamaPullJob, {
+                running: true,
+                model,
+                status: '准备中…',
+                percent: 0,
+                completed: 0,
+                total: 0,
+                startedAt: new Date().toISOString(),
+                finishedAt: null,
+                error: '',
+            });
+            log(`Ollama：开始拉取模型 ${model}`);
+            // 后台执行，立刻返回，前端轮询 /progress
+            void (async () => {
+                try {
+                    await ollamaClient.pull(model, (ev) => {
+                        if (ev.status) ollamaPullJob.status = String(ev.status);
+                        if (typeof ev.completed === 'number') ollamaPullJob.completed = ev.completed;
+                        if (typeof ev.total === 'number') ollamaPullJob.total = ev.total;
+                        if (ollamaPullJob.total > 0) {
+                            ollamaPullJob.percent = Math.min(
+                                100,
+                                Math.floor((ollamaPullJob.completed / ollamaPullJob.total) * 100),
+                            );
+                        }
+                    });
+                    ollamaPullJob.percent = 100;
+                    ollamaPullJob.status = '完成';
+                    log(`Ollama：模型 ${model} 拉取完成`);
+                } catch (e) {
+                    ollamaPullJob.error = e.message;
+                    log(`Ollama：拉取 ${model} 失败 - ${e.message}`);
+                } finally {
+                    ollamaPullJob.running = false;
+                    ollamaPullJob.finishedAt = new Date().toISOString();
+                }
+            })();
+            json(200, { ok: true, model, pull: { ...ollamaPullJob } });
+            return;
+        }
+
+        // -------- GET /api/ollama/pull/progress   拉取进度 --------
+        if (req.method === 'GET' && p === '/api/ollama/pull/progress') {
+            json(200, { ok: true, ...ollamaPullJob });
+            return;
+        }
+
+        // -------- POST /api/ollama/chat   文本对话（连通性测试） --------
+        if (req.method === 'POST' && p === '/api/ollama/chat') {
+            const body = await readBody();
+            const model = String(body.model ?? cfg.ollamaVisionModel ?? '').trim();
+            const prompt = String(body.prompt ?? '你好，请用一句话介绍你自己。');
+            if (!model) {
+                json(400, { ok: false, error: '请填写模型名' });
+                return;
+            }
+            try {
+                const t0 = Date.now();
+                const content = await ollamaClient.chat(model, prompt, {
+                    timeoutMs: Number(body.timeoutMs ?? 120000),
+                    keepAlive: body.keepAlive,
+                    temperature: Number(body.temperature ?? 0.2),
+                    numPredict: Number(body.numPredict ?? 200),
+                });
+                json(200, { ok: true, model, content, elapsedMs: Date.now() - t0 });
+            } catch (e) {
+                json(400, { ok: false, error: e.message });
+            }
+            return;
+        }
+
+        // -------- POST /api/ollama/vision   视觉对话（图片路径或 base64） --------
+        if (req.method === 'POST' && p === '/api/ollama/vision') {
+            const body = await readBody();
+            const model = String(body.model ?? cfg.ollamaVisionModel ?? '').trim();
+            const prompt = String(body.prompt ?? '用一句话描述这张图。');
+            if (!model) {
+                json(400, { ok: false, error: '请填写模型名' });
+                return;
+            }
+            try {
+                let images = [];
+                if (Array.isArray(body.images) && body.images.length) {
+                    images = body.images.map((s) => String(s).replace(/^data:[^,]+,/, ''));
+                } else if (body.imagePath) {
+                    const abs = path.resolve(String(body.imagePath));
+                    if (!fs.existsSync(abs)) throw new Error(`图片不存在：${abs}`);
+                    images = [fs.readFileSync(abs).toString('base64')];
+                }
+                if (!images.length) throw new Error('请提供 imagePath 或 images（base64 数组）');
+                const t0 = Date.now();
+                const content = await ollamaClient.vision(model, prompt, images, {
+                    timeoutMs: Number(body.timeoutMs ?? 180000),
+                    keepAlive: body.keepAlive,
+                });
+                json(200, { ok: true, model, content, elapsedMs: Date.now() - t0 });
+            } catch (e) {
+                json(400, { ok: false, error: e.message });
+            }
+            return;
+        }
+
+        // -------- POST /api/ollama/select   选择打标用模型 --------
+        if (req.method === 'POST' && p === '/api/ollama/select') {
+            const body = await readBody();
+            if (body.visionModel !== undefined) cfg.ollamaVisionModel = String(body.visionModel).trim();
+            if (body.textModel !== undefined) cfg.ollamaTextModel = String(body.textModel).trim();
+            if (body.baseUrl !== undefined) cfg.ollamaBaseUrl = String(body.baseUrl).trim();
+            saveConfig();
+            applyOllamaConfig();
+            log(
+                `Ollama：打标模型已切换为 ${cfg.ollamaVisionModel}`
+                + (cfg.ollamaTextModel ? ` / ${cfg.ollamaTextModel}` : ''),
+            );
+            json(200, {
+                ok: true,
+                visionModel: cfg.ollamaVisionModel,
+                textModel: cfg.ollamaTextModel,
+                baseUrl: cfg.ollamaBaseUrl,
+            });
+            return;
+        }
+
+        json(404, { ok: false, error: `未知的 Ollama 接口：${req.method} ${p}` });
         return;
     }
 

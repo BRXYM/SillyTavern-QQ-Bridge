@@ -238,13 +238,15 @@ export class FaceService {
                 const ping = await this.labeler.ping();
                 if (!ping.ok) {
                     throw new Error(
-                        `Ollama 不可用（${ping.error}）。请确认服务已启动：ollama serve`,
+                        `Ollama 不可用（${ping.error}）。请先在「AI 模型」页启动服务或填写正确地址`,
                     );
                 }
                 const hasModel = await this.labeler.hasModel(this.labeler.visionModel);
                 if (!hasModel) {
+                    const local = (ping.models ?? []).join('、') || '（无）';
                     throw new Error(
-                        `模型 ${this.labeler.visionModel} 未安装。请执行：ollama pull ${this.labeler.visionModel}`,
+                        `模型 ${this.labeler.visionModel} 未安装。本地已有：${local}。`
+                        + '请到「AI 模型」页拉取，或在打标模型里改选已有模型',
                     );
                 }
 

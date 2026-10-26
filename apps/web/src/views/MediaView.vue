@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import {
     Image as ImageIcon, RefreshCw, Wand2, X, Save, Plus, Sparkles, User,
-    CheckCircle2, AlertTriangle, Cpu, StopCircle, Info, Search, Tag,
+    CheckCircle2, AlertTriangle, Cpu, StopCircle, Info, Search, Tag, Settings2,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -288,6 +288,14 @@ onUnmounted(() => {
                     <span v-if="!diag.ollama.reachable" class="text-warning">
                         {{ diag.ollama.error }}
                     </span>
+                    <div class="flex-1" />
+                    <RouterLink
+                        to="/ollama"
+                        class="flex items-center gap-1 rounded px-1.5 py-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                        <Settings2 class="size-3" />
+                        管理模型
+                    </RouterLink>
                 </div>
             </div>
 

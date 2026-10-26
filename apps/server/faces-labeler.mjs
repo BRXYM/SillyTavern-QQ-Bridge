@@ -6,16 +6,17 @@
  *   - 便于替换为云端 API（同一套接口形状）
  *   - 可精确控制超时 / 并发 / 模型卸载
  *
+ * 网络层复用 ollama-service.mjs 的 OllamaClient，
+ * 保证「模型管理页」与「打标任务」使用同一套地址与超时策略。
+ *
  * 两阶段识别：
  *   阶段 1  视觉模型看图，产出自由描述
  *   阶段 2  文本模型把描述收敛到受控词表
  * 分开做的原因：视觉模型直接输出标签容易发散（同义不同词），无法检索。
  */
 import fs from 'node:fs';
-import path from 'node:path';
 import { TAG_VOCAB, flatVocab } from './faces-store.mjs';
-
-const DEFAULT_BASE = 'http://127.0.0.1:11434';
+import { OllamaClient, DEFAULT_BASE } from './ollama-service.mjs';
 
 export class OllamaLabeler {
     /**
@@ -26,22 +27,49 @@ export class OllamaLabeler {
      * @param {number} opts.timeoutMs     单次请求超时
      */
     constructor(opts = {}) {
-        this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE).replace(/\/$/, '');
         this.visionModel = opts.visionModel ?? 'qwen2.5vl:3b';
         this.textModel = opts.textModel ?? '';
         this.timeoutMs = opts.timeoutMs ?? 120000;
+        this.client = new OllamaClient({
+            baseUrl: opts.baseUrl ?? DEFAULT_BASE,
+            timeoutMs: this.timeoutMs,
+        });
+    }
+
+    /** 供外部读取（诊断接口用） */
+    get baseUrl() {
+        return this.client.baseUrl;
+    }
+
+    /**
+     * 运行时更新配置：前端改了地址或模型后立刻生效，无需重启 Bridge。
+     */
+    reconfigure({ baseUrl, visionModel, textModel, timeoutMs } = {}) {
+        if (baseUrl) this.client.baseUrl = String(baseUrl).replace(/\/$/, '');
+        if (visionModel) this.visionModel = visionModel;
+        if (textModel !== undefined) this.textModel = textModel;
+        if (timeoutMs) {
+            this.timeoutMs = timeoutMs;
+            this.client.timeoutMs = timeoutMs;
+        }
+        return this.describeConfig();
+    }
+
+    describeConfig() {
+        return {
+            baseUrl: this.client.baseUrl,
+            visionModel: this.visionModel,
+            textModel: this.textModel || this.visionModel,
+        };
     }
 
     /** 服务是否可用 */
     async ping() {
+        const v = await this.client.version();
+        if (!v.ok) return { ok: false, error: v.error };
         try {
-            const res = await fetch(`${this.baseUrl}/api/tags`, {
-                signal: AbortSignal.timeout(5000),
-            });
-            if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
-            const data = await res.json();
-            const models = (data.models ?? []).map((m) => m.name);
-            return { ok: true, models };
+            const models = await this.client.list();
+            return { ok: true, version: v.version, models: models.map((m) => m.name) };
         } catch (e) {
             return { ok: false, error: e.message };
         }
@@ -53,30 +81,6 @@ export class OllamaLabeler {
         if (!r.ok) return false;
         // ollama 返回的名字可能带 :latest 后缀
         return r.models.some((m) => m === name || m === `${name}:latest` || m.startsWith(`${name}:`));
-    }
-
-    async #chat(model, messages, options) {
-        const body = {
-            model,
-            messages,
-            stream: false,
-            options: {
-                temperature: 0.2,
-                ...options,
-            },
-        };
-        const res = await fetch(`${this.baseUrl}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(this.timeoutMs),
-        });
-        if (!res.ok) {
-            const text = await res.text().catch(() => '');
-            throw new Error(`Ollama ${res.status}: ${text.slice(0, 200)}`);
-        }
-        const data = await res.json();
-        return String(data?.message?.content ?? '').trim();
     }
 
     /**
@@ -94,13 +98,12 @@ export class OllamaLabeler {
             '如果图中有文字，一并说明文字内容。',
         ].join('');
 
-        const caption = await this.#chat(
-            this.visionModel,
-            [{ role: 'user', content: prompt, images: [b64] }],
-            { num_predict: 120 },
-        );
+        const caption = await this.client.vision(this.visionModel, prompt, [b64], {
+            timeoutMs: this.timeoutMs,
+            numPredict: 120,
+        });
 
-        return caption.replace(/\s+/g, ' ').trim().slice(0, 300);
+        return String(caption).replace(/\s+/g, ' ').trim().slice(0, 300);
     }
 
     /**
@@ -126,9 +129,10 @@ export class OllamaLabeler {
             '错误示例：1. 生气 2. 卡通（不要编号）',
         ].join('\n');
 
-        const raw = await this.#chat(model, [{ role: 'user', content: prompt }], {
+        const raw = await this.client.chat(model, prompt, {
+            timeoutMs: this.timeoutMs,
             temperature: 0,
-            num_predict: 60,
+            numPredict: 60,
         });
 
         let tags = parseTags(raw, vocab);
@@ -174,12 +178,7 @@ export class OllamaLabeler {
     async unload() {
         for (const model of [this.visionModel, this.textModel].filter(Boolean)) {
             try {
-                await fetch(`${this.baseUrl}/api/generate`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model, keep_alive: 0 }),
-                    signal: AbortSignal.timeout(10000),
-                });
+                await this.client.unload(model);
             } catch {
                 /* 忽略：卸载失败不影响主流程 */
             }
