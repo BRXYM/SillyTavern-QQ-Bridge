@@ -9,9 +9,9 @@ export interface Segment {
 
 export const DEFAULT_SEGMENTATION: SegmentationConfig = {
     enabled: true,
-    maxLen: 100,
+    maxLen: 200,
     minLen: 6,
-    maxSegments: 8,
+    maxSegments: 12,
     hardChars: '。！？!?…',
     softChars: '，,；;',
     pairChars: [
@@ -239,7 +239,11 @@ export function segmentText(
     }
     if (acc) merged.push(acc);
 
-    // ---- 步骤 7：限制条数（配对片段优先保留） ----
+    // ---- 步骤 7：限制条数（保序合并，不重排不丢弃） ----
+    // 早期实现把「超出的配对片段删掉再补到末尾」，会导致：
+    //   ① 动作描写被挪到最后，与台词顺序错乱
+    //   ② join('') 让相邻 * 粘成 **，表现为星号重复
+    // 现在改为就地合并相邻项，顺序与内容都保持不变。
     let result = merged;
     if (result.length > maxSegments) {
         const isSpecial = (t: string) => {
@@ -249,42 +253,38 @@ export function segmentText(
             return pairs.some(([o, c]) => first === o && last === c);
         };
 
-        const special: string[] = [];
-        const plain: string[] = [];
-        for (const t of result) (isSpecial(t) ? special : plain).push(t);
+        const joinTwo = (a: string, b: string) => `${a}\n${b}`;
 
-        const slots = Math.max(1, maxSegments - special.length);
-        const packed = plain.slice();
-
-        if (packed.length > slots) {
-            const head = packed.slice(0, slots - 1);
-            const tail = packed.slice(slots - 1).join('');
-            packed.length = 0;
-            packed.push(...head, tail);
-        }
-
-        let keepSpecial = special;
-        if (special.length > maxSegments - packed.length) {
-            const allow = Math.max(1, maxSegments - packed.length);
-            keepSpecial = special.slice(0, allow);
-            const dropped = special.slice(allow).join('');
-            if (dropped) {
-                if (packed.length) packed[packed.length - 1] += dropped;
-                else packed.push(dropped);
+        while (result.length > maxSegments) {
+            // 优先合并「两个都不是配对片段」的相邻位置
+            let target = -1;
+            for (let i = 0; i < result.length - 1; i++) {
+                const a = result[i]!;
+                const b = result[i + 1]!;
+                if (!isSpecial(a) && !isSpecial(b)) {
+                    target = i;
+                    break;
+                }
             }
-        }
-
-        const out: string[] = [];
-        let qi = 0;
-        for (const t of result) {
-            if (isSpecial(t)) {
-                if (keepSpecial.includes(t)) out.push(t);
-            } else if (qi < packed.length) {
-                out.push(packed[qi++]!);
+            // 没有纯文本对可合并时，合并长度最小的一对，避免单条过长
+            if (target < 0) {
+                let bestLen = Infinity;
+                for (let i = 0; i < result.length - 1; i++) {
+                    const len = result[i]!.length + result[i + 1]!.length;
+                    if (len < bestLen) {
+                        bestLen = len;
+                        target = i;
+                    }
+                }
             }
+            if (target < 0) break;
+
+            result = [
+                ...result.slice(0, target),
+                joinTwo(result[target]!, result[target + 1]!),
+                ...result.slice(target + 2),
+            ];
         }
-        while (qi < packed.length) out.push(packed[qi++]!);
-        result = out.filter(Boolean);
     }
 
     // ---- 步骤 8：标记转换 + 长度兜底 + 延迟 ----

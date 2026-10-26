@@ -504,6 +504,11 @@ function hookEvents() {
         const text = (last.mes ?? '').trim();
         if (!text) return;
 
+        // 幂等保护：MESSAGE_RECEIVED 与 GENERATION_ENDED 可能在同一轮都触发，
+        // 用「本次生成已回传」标记避免同一条回复被发送两次（表现为内容重复）。
+        if (last.__snowlumaSent) return;
+        last.__snowlumaSent = true;
+
         const key = generatingFor;
         log(`[${key}] 回复就绪 (${text.length} 字)`);
         wsSend({ type: 'st_reply', sessionKey: key, text });

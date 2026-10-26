@@ -16,9 +16,9 @@ const store = useStatusStore();
 const toast = useToastStore();
 
 const enabled = ref(true);
-const maxLen = ref(100);
+const maxLen = ref(200);
 const minLen = ref(6);
-const maxSegments = ref(8);
+const maxSegments = ref(12);
 const hardChars = ref('。！？!?…');
 const softChars = ref('，,；;');
 const splitOnPairs = ref(true);

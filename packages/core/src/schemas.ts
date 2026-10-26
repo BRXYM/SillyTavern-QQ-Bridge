@@ -5,9 +5,9 @@ export const pairDelimiterSchema = z.tuple([z.string(), z.string().min(1)]);
 
 export const segmentationSchema = z.object({
     enabled: z.boolean().default(true),
-    maxLen: z.number().int().min(20).max(2000).default(100),
+    maxLen: z.number().int().min(20).max(2000).default(200),
     minLen: z.number().int().min(0).max(100).default(6),
-    maxSegments: z.number().int().min(1).max(20).default(8),
+    maxSegments: z.number().int().min(1).max(20).default(12),
     hardChars: z.string().default('。！？!?…'),
     softChars: z.string().default('，,；;'),
     pairChars: z.array(pairDelimiterSchema).default([

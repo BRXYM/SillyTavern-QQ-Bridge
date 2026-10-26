@@ -304,9 +304,9 @@ function callOnebot(action, params) {
 function segmentText(text, opts = {}) {
     const {
         enabled = true,
-        maxLen = 120,
+        maxLen = 200,
         minLen = 8,
-        maxSegments = 4,
+        maxSegments = 12,
         hardChars = '。！？!?…',
         softChars = '，,；;',
         pairChars = ['*', '"', '\u201c\u201d'],
@@ -500,16 +500,20 @@ function segmentText(text, opts = {}) {
     if (acc) merged.push(acc);
 
     // ---------- 步骤 7：限制条数 ----------
-    // 智能策略：纯文本片段优先合并，配对符片段（*动作*）保持独立。
-    // 这样即使 maxSegments 很小，也不会把动作描写和台词糊成一坨。
+    // 策略：保序合并。分段结果按原顺序两两合并（相邻的合并，不重排、不丢弃），
+    // 直到条数 ≤ maxSegments。优先合并纯文本对，其次才动配对片段。
+    //
+    // 早期实现把「超出的配对片段删掉再补到末尾」，会导致：
+    //   ① 动作描写被挪到最后，与台词顺序错乱
+    //   ② join('') 让相邻 * 粘成 **，QQ 里表现为星号重复
+    // 现在改为就地合并，顺序与内容都保持不变。
     let result = merged;
+
     if (result.length > maxSegments) {
-        // 保留所有配对/自定义分隔片段，只合并纯文本
         const isSpecial = (t) => {
-            // 配对片段特征：以配对符开头结尾，或在 pairSegments 中
             if (pairSegments.includes(t)) return true;
-            const p0 = (t[0] ?? '');
-            const p1 = (t[t.length - 1] ?? '');
+            const p0 = t[0] ?? '';
+            const p1 = t[t.length - 1] ?? '';
             return pairChars.some((pc) => {
                 let token = pc;
                 if (Array.isArray(pc)) token = pc[1] ?? pc[0];
@@ -520,51 +524,39 @@ function segmentText(text, opts = {}) {
             });
         };
 
-        const special = [];
-        const plain = [];
-        for (const t of result) {
-            (isSpecial(t) ? special : plain).push(t);
-        }
+        // 合并相邻两项，用换行分隔，避免句首句尾粘连
+        const joinTwo = (a, b) => `${a}\n${b}`;
 
-        // 可用给纯文本的槽位数
-        const slots = Math.max(1, maxSegments - special.length);
-
-        // 纯文本：保持一句一条（不填充式打包），仅在总条数超限时按顺序合并
-        const packed = plain.slice();
-
-        // 若纯文本打包结果超过可用槽位，把多出的并入末条
-        if (packed.length > slots) {
-            const head = packed.slice(0, slots - 1);
-            const tail = packed.slice(slots - 1).join('');
-            packed.length = 0;
-            packed.push(...head, tail);
-        }
-
-        // 若特殊片段本身超限，保留前 maxSegments-slots 个（至少 1 个），其余并入末条
-        let keepSpecial = special;
-        if (special.length > maxSegments - packed.length) {
-            const allow = Math.max(1, maxSegments - packed.length);
-            keepSpecial = special.slice(0, allow);
-            const dropped = special.slice(allow).join('');
-            if (dropped) {
-                if (packed.length) packed[packed.length - 1] += dropped;
-                else packed.push(dropped);
+        // 反复合并，直到条数满足要求或无法再合并
+        while (result.length > maxSegments) {
+            // 找第一个「两个都不是配对片段」的相邻位置优先合并
+            let target = -1;
+            for (let i = 0; i < result.length - 1; i++) {
+                if (!isSpecial(result[i]) && !isSpecial(result[i + 1])) {
+                    target = i;
+                    break;
+                }
             }
-        }
-
-        // 按原顺序还原：特殊片段位置保持，纯文本槽位依次填充
-        const out = [];
-        let qi = 0;
-        for (const t of result) {
-            if (isSpecial(t)) {
-                if (keepSpecial.includes(t)) out.push(t);
-            } else {
-                if (qi < packed.length) out.push(packed[qi++]);
+            // 没有纯文本对可合并时，退而求其次合并任意相邻对
+            if (target < 0) {
+                // 尽量选择合并后长度最小的一对，减少单条过长
+                let bestLen = Infinity;
+                for (let i = 0; i < result.length - 1; i++) {
+                    const len = result[i].length + result[i + 1].length;
+                    if (len < bestLen) {
+                        bestLen = len;
+                        target = i;
+                    }
+                }
             }
+            if (target < 0) break;
+
+            result = [
+                ...result.slice(0, target),
+                joinTwo(result[target], result[target + 1]),
+                ...result.slice(target + 2),
+            ];
         }
-        // 追加没被放入的纯文本
-        while (qi < packed.length) out.push(packed[qi++]);
-        result = out.filter(Boolean);
     }
 
     // ---------- 步骤 8：动作标记转换 + 长度兜底 + 随机延迟 ----------

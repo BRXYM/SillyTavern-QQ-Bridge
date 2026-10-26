@@ -18,9 +18,9 @@
     "stDataDir": "",
     "segmentation": {
         "enabled": true,
-        "maxLen": 100,
+        "maxLen": 200,
         "minLen": 6,
-        "maxSegments": 8,
+        "maxSegments": 12,
         "hardChars": "。！？!?…",
         "softChars": "，,；;",
         "pairChars": [

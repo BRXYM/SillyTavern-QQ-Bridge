@@ -150,3 +150,49 @@ describe('pairMinLen（配对符忽略长度）', () => {
         expect(DEFAULT_SEGMENTATION.pairMinLen).toBe(3);
     });
 });
+
+describe('maxSegments 超限时不得产生粘连', () => {
+    /**
+     * 回归测试：maxSegments 很小时，被挤出的配对片段若直接 join('')，
+     * 相邻的 *动作* 会粘成 **，表现为 QQ 消息里出现重复的星号组合。
+     */
+    const text = [
+        '*她抬头看了看钟楼，眉头微微皱起*',
+        '这钟停了有些年头了。',
+        '*她伸手摸了摸钟面的铁锈*',
+        '镇上的人说是锈蚀。',
+        '*她把手在围裙上擦了擦*',
+        '可我觉得不对劲。',
+        '*她压低声音，凑近了些*',
+        '你听，里面还有声音。',
+    ].join('\n\n');
+
+    it('不出现 ** 连续星号', () => {
+        const r = segmentText(text, cfg({ maxSegments: 4, convertActionMarkers: false }));
+        for (const s of r) {
+            expect(s.text).not.toContain('**');
+        }
+    });
+
+    it('不出现两个动作片段紧贴（无分隔符）', () => {
+        const r = segmentText(text, cfg({ maxSegments: 4, convertActionMarkers: false }));
+        for (const s of r) {
+            // 形如 …*动作a**动作b* 的紧贴形式
+            expect(/\*[^*\n]*\*\*[^*\n]*\*/.test(s.text)).toBe(false);
+        }
+    });
+
+    it('内容字符不丢失', () => {
+        const r = segmentText(text, cfg({ maxSegments: 4, convertActionMarkers: false }));
+        const strip = (s: string) => s.replace(/[\s*]/g, '');
+        const before = strip(text);
+        const after = strip(r.map((s) => s.text).join(''));
+        expect(after).toBe(before);
+    });
+
+    it('maxSegments=12 时每个动作独立成段', () => {
+        const r = segmentText(text, cfg({ maxSegments: 12, convertActionMarkers: false }));
+        expect(r.length).toBeGreaterThanOrEqual(4);
+        expect(r.some((s) => s.text.includes('她抬头看了看钟楼'))).toBe(true);
+    });
+});

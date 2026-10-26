@@ -4,8 +4,8 @@ import { parseConfig, safeParseConfig, segmentationSchema } from '../src/schemas
 describe('segmentationSchema', () => {
     it('空对象填充默认值', () => {
         const s = segmentationSchema.parse({});
-        expect(s.maxLen).toBe(100);
-        expect(s.maxSegments).toBe(8);
+        expect(s.maxLen).toBe(200);
+        expect(s.maxSegments).toBe(12);
         expect(s.pairChars.length).toBe(4);
     });
 
@@ -47,6 +47,6 @@ describe('safeParseConfig', () => {
         const r = safeParseConfig({ segmentation: { maxLen: 1 } });
         expect(r.errors.length).toBeGreaterThan(0);
         expect(r.errors[0]).toContain('segmentation');
-        expect(r.config.segmentation.maxLen).toBe(100); // 默认
+        expect(r.config.segmentation.maxLen).toBe(200); // 默认
     });
 });
