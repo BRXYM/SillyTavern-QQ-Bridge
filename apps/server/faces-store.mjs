@@ -15,7 +15,13 @@ import crypto from 'node:crypto';
 
 /** 标签词表：AI 打标时受此约束，保证标签可检索 */
 export const TAG_VOCAB = {
-    情绪: ['开心', '大笑', '微笑', '无语', '生气', '难过', '委屈', '害羞', '疑惑', '震惊', '得意', '嫌弃', '期待', '疲惫'],
+    情绪: [
+        '开心', '大笑', '微笑', '无语', '生气', '难过', '委屈', '害羞',
+        '疑惑', '震惊', '得意', '嫌弃', '期待', '疲惫',
+        // 以下为实测补充：3B 模型常能识别出「害怕/崩溃」这类强情绪，
+        // 但旧词表里没有，只能硬塞进「震惊」，导致标签失真。
+        '害怕', '崩溃', '无奈', '尴尬', '嘲讽',
+    ],
     动作: ['点赞', '摇头', '点头', '鼓掌', '挥手', '鞠躬', '擦汗', '流泪', '捂脸', '比心', '拥抱', '推门'],
     主体: ['猫', '狗', '人', '卡通', '动物', '动画角色', '表情包', '梗图'],
     风格: ['搞怪', '可爱', '沙雕', '正经', '复古', '像素'],
@@ -244,11 +250,12 @@ export class FaceStore {
     }
 
     /** 写入 AI 标签（整体替换 aiTags，保留 userTags） */
-    setAiLabels(md5, { caption, aiTags, model }) {
+    setAiLabels(md5, { caption, aiTags, model, imageText }) {
         const f = this.get(md5);
         if (!f) return false;
         f.caption = String(caption ?? '').slice(0, 500);
         f.aiTags = uniqueTags(aiTags);
+        f.imageText = String(imageText ?? '').slice(0, 100);
         f.labeledAt = new Date().toISOString();
         f.labelModel = model ?? '';
         f.labelError = '';

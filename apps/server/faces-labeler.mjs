@@ -85,6 +85,13 @@ export class OllamaLabeler {
 
     /**
      * 阶段 1：看图描述。
+     *
+     * 提示词设计依据（实测出来的）：
+     *   - 让模型"顺便说情绪"会让它偷懒，同一张图反复给"愤怒/惊讶"
+     *   - 改成只描述画面（主体 + 脸部状态），把情绪判断交给阶段 2，
+     *     准确度反而更高，因为阶段 1 专心想"看到了什么"
+     *   - temperature=0：同一张图每次结果一致，可复现
+     *
      * @param {string} imagePath 本地图片绝对路径
      */
     async describe(imagePath) {
@@ -100,6 +107,9 @@ export class OllamaLabeler {
 
         const caption = await this.client.vision(this.visionModel, prompt, [b64], {
             timeoutMs: this.timeoutMs,
+            // 关键：temperature=0 保证同一张图每次结果一致。
+            // 之前用默认 0.2，同一张图三次能给出"愤怒/惊讶/无语"三种答案。
+            temperature: 0,
             numPredict: 120,
         });
 
@@ -107,50 +117,107 @@ export class OllamaLabeler {
     }
 
     /**
+     * 阶段 0：读图内文字。
+     *
+     * 为什么单独做：表情包里的文字往往是最强的语义线索
+     * ——「害怕」「危」「嘶」「梆」这类字直接决定情绪。
+     * 实测 3B 模型在正常描述时经常漏掉这些字，单独问却读得出来
+     * （5 张带字的图里能正确读出 3 张）。
+     * 读到的文字直接匹配词表，命中就当作高置信标签。
+     *
+     * @param {string} imagePath
+     * @returns {Promise<{ text: string, tags: string[] }>}
+     */
+    async readText(imagePath) {
+        const buf = fs.readFileSync(imagePath);
+        const b64 = buf.toString('base64');
+
+        const raw = await this.client
+            .vision(
+                this.visionModel,
+                '这张图里有什么文字？把看到的字原样写出来；没有任何文字就只回答"无"。只输出文字内容，不要解释。',
+                [b64],
+                { timeoutMs: this.timeoutMs, temperature: 0, numPredict: 40 },
+            )
+            .catch(() => '');
+
+        const text = String(raw).replace(/\s+/g, ' ').trim().slice(0, 100);
+
+        // 文字里出现词表中的词，直接当标签用
+        let tags = [];
+        if (text && text !== '无' && !/^无/.test(text)) {
+            tags = flatVocab().filter((v) => text.includes(v));
+        }
+        return { text, tags };
+    }
+
+    /**
      * 阶段 2：把描述收敛到受控词表。
+     *
+     * 为什么分两次问（实测结论）：
+     *   把 36 个词一次性丢给 3B 模型，它会塌缩到固定几个词
+     *   —— 4 张完全不同的图，3 张都回"无语，委屈"。
+     *   拆成"情绪"和"主体"两问，命中率更高。
+     *
      * @param {string} caption 阶段 1 的描述
      * @returns {Promise<string[]>}
      */
     async toTags(caption) {
-        const vocab = flatVocab();
         const model = this.textModel || this.visionModel;
+        const tags = [];
 
-        const prompt = [
-            '你是一个表情包标签分类器。',
-            `可用标签（只能从中选择）：${vocab.join('、')}`,
-            `表情描述：${caption}`,
-            '任务：从可用标签中选出 2 到 4 个最贴切的。',
-            '注意：',
-            '- 必须包含情绪类标签（如开心、生气、无语）',
-            '- 如果描述里提到动物或卡通形象，加上主体标签',
-            '- 只输出标签本身，用中文逗号分隔',
-            '- 不要解释、不要编号、不要引号、不要句号',
-            '正确示例：生气，卡通，皱眉',
-            '错误示例：1. 生气 2. 卡通（不要编号）',
-        ].join('\n');
+        // 情绪：只给情绪词，避免模型用主体词顶替
+        const emoRaw = await this.client.chat(
+            model,
+            [
+                '从下面情绪词里选 2 个最符合这张表情包的，按贴切程度排序。',
+                `情绪词：${TAG_VOCAB.情绪.join('、')}`,
+                `画面：${caption}`,
+                '只输出情绪词本身，用中文逗号分隔，不要解释。',
+            ].join('\n'),
+            { timeoutMs: this.timeoutMs, temperature: 0, numPredict: 24 },
+        ).catch(() => '');
 
-        const raw = await this.client.chat(model, prompt, {
-            timeoutMs: this.timeoutMs,
-            temperature: 0,
-            numPredict: 60,
-        });
+        tags.push(...parseTags(emoRaw, TAG_VOCAB.情绪));
 
-        let tags = parseTags(raw, vocab);
+        // 主体：从描述文本里匹配，不再单独问模型。
+        // 单独问会让 3B 模型瞎编（图中是笑脸，却给出"猫/人"）。
+        // 描述里提到了才算数，这样至少不会凭空捏造。
+        tags.push(...matchVocab(caption));
 
-        // 模型只给 1 个标签时，补充主体标签提升可检索性
-        if (tags.length === 1) {
-            const extra = matchVocab(caption).filter((t) => !tags.includes(t));
-            tags = [...tags, ...extra].slice(0, 4);
+        // 去重
+        const uniq = [];
+        const seen = new Set();
+        for (const t of tags) {
+            if (seen.has(t)) continue;
+            seen.add(t);
+            uniq.push(t);
+            if (uniq.length >= 4) break;
         }
 
-        return tags;
+        // 模型什么都没给时，退化为从描述里直接匹配词表
+        if (uniq.length === 0) return matchVocab(caption);
+
+        // 只有主体词、没有情绪词时，用描述兜底补情绪
+        const hasEmotion = uniq.some((t) => TAG_VOCAB.情绪.includes(t));
+        if (!hasEmotion) {
+            const guess = matchVocab(caption).filter(
+                (t) => TAG_VOCAB.情绪.includes(t) && !seen.has(t),
+            );
+            return [...guess, ...uniq].slice(0, 4);
+        }
+
+        return uniq;
     }
 
     /**
-     * 完整打标：描述 + 标签。
+     * 完整打标：读字 + 描述 + 标签。
      * @param {string} imagePath
      */
     async label(imagePath) {
+        // 阶段 0：图内文字（高置信线索，先拿到手）
+        const ocr = await this.readText(imagePath).catch(() => ({ text: '', tags: [] }));
+
         const caption = await this.describe(imagePath);
         let tags = [];
         let tagError = '';
@@ -166,11 +233,26 @@ export class OllamaLabeler {
             tags = matchVocab(caption);
         }
 
+        // 图内文字命中词表的标签优先（「害怕」「危」这类字几乎不会错）
+        if (ocr.tags.length > 0) {
+            const merged = [];
+            const seen = new Set();
+            for (const t of [...ocr.tags, ...tags]) {
+                if (seen.has(t)) continue;
+                seen.add(t);
+                merged.push(t);
+                if (merged.length >= 4) break;
+            }
+            tags = merged;
+        }
+
         return {
             caption,
             tags,
             model: this.visionModel,
             tagError,
+            /** 图内识别到的文字，便于前端核对 */
+            imageText: ocr.text,
         };
     }
 

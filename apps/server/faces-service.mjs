@@ -365,6 +365,7 @@ export class FaceService {
                             caption: r.caption,
                             aiTags: r.tags,
                             model: r.model,
+                            imageText: r.imageText,
                         });
 
                         if (r.tagError) {
