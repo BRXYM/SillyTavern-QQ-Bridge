@@ -325,6 +325,137 @@ export class FaceStore {
         return list.map((f) => ({ md5: f.md5, url: f.url, localFile: f.localFile }));
     }
 
+    /**
+     * 按多个标签挑一张最合适的表情。
+     *
+     * 这是"AI 出标签、本地挑图"方案的核心。
+     *
+     * 打分规则（分高者优先）：
+     *   +3  命中用户标签（人工标注更可信）
+     *   +2  命中 AI 标签
+     *   +1  描述文本里出现该词
+     *   多个标签命中会累加，越贴合分越高
+     *
+     * 排除项：
+     *   - recentlyUsed 里的 md5（避免连着发同一张）
+     *
+     * @param {string[]} tags 按贴切程度排序的标签
+     * @param {object} opts
+     * @param {string[]} opts.exclude 需要排除的 md5 列表
+     * @returns {object|null} 表情 DTO
+     */
+    /**
+     * 按多个标签挑一张最合适的表情，并返回完整评分明细。
+     *
+     * 打分规则（分高者优先）：
+     *   +3  命中用户标签（人工标注更可信）
+     *   +2  命中 AI 标签
+     *   +1  描述文本里出现该词
+     *   多标签命中累加，越靠前的标签权重越高
+     *
+     * @param {string[]} tags 按贴切程度排序的标签
+     * @param {object} opts
+     * @param {string[]} opts.exclude 需要排除的 md5
+     * @param {number} opts.topN 返回前几名用于日志
+     * @returns {{
+     *   face: object|null,
+     *   wanted: string[],
+     *   excluded: number,
+     *   candidates: Array<{md5:string, score:number, hitTags:string[], caption:string}>,
+     *   reason: string,
+     * }}
+     */
+    pickByTagsDetailed(tags, { exclude = [], topN = 3 } = {}) {
+        const wanted = (Array.isArray(tags) ? tags : [tags])
+            .map((t) => String(t ?? '').trim().toLowerCase())
+            .filter(Boolean);
+
+        const base = { wanted, excluded: 0, candidates: [], reason: '' };
+        if (wanted.length === 0) return { ...base, face: null, reason: '无标签' };
+
+        const excludeSet = new Set(exclude.map((x) => String(x).toLowerCase()));
+
+        const scored = [];
+        let excludedCount = 0;
+        let noTagCount = 0;
+
+        for (const f of this.data.faces) {
+            const ai = f.aiTags.map((x) => x.toLowerCase());
+            const user = f.userTags.map((x) => x.toLowerCase());
+            if (ai.length === 0 && user.length === 0) {
+                noTagCount += 1;
+                continue;
+            }
+            if (excludeSet.has(f.md5.toLowerCase())) {
+                excludedCount += 1;
+                continue;
+            }
+
+            const caption = String(f.caption ?? '').toLowerCase();
+            let score = 0;
+            const hitTags = [];
+            for (let i = 0; i < wanted.length; i += 1) {
+                const t = wanted[i];
+                const weight = wanted.length - i;
+                if (user.includes(t)) {
+                    score += 3 * weight;
+                    hitTags.push(t + '(用户)');
+                } else if (ai.includes(t)) {
+                    score += 2 * weight;
+                    hitTags.push(t + '(AI)');
+                } else if (caption.includes(t)) {
+                    score += 1 * weight;
+                    hitTags.push(t + '(描述)');
+                }
+            }
+            if (score > 0) {
+                scored.push({
+                    f,
+                    score,
+                    hitTags,
+                    caption: String(f.caption ?? '').slice(0, 40),
+                });
+            }
+        }
+
+        scored.sort((a, b) => b.score - a.score);
+
+        const candidates = scored.slice(0, topN).map((x) => ({
+            md5: x.f.md5.slice(0, 6),
+            score: x.score,
+            hitTags: x.hitTags,
+            caption: x.caption,
+        }));
+
+        if (scored.length === 0) {
+            const reason =
+                `无匹配（标签: ${wanted.join(',')}｜库内 ${this.data.faces.length} 个｜`
+                + `未标注 ${noTagCount} 个｜被排除 ${excludedCount} 个）`;
+            return { ...base, face: null, excluded: excludedCount, candidates, reason };
+        }
+
+        // 同分随机
+        const top = scored[0].score;
+        const best = scored.filter((x) => x.score === top);
+        const pick = best[Math.floor(Math.random() * best.length)];
+
+        return {
+            face: this.toDto(pick.f),
+            wanted,
+            excluded: excludedCount,
+            candidates,
+            score: pick.score,
+            hitTags: pick.hitTags,
+            totalScored: scored.length,
+            reason: '',
+        };
+    }
+
+    /** 按多个标签挑一张最合适的表情（简化接口，返回 DTO 或 null） */
+    pickByTags(tags, opts = {}) {
+        return this.pickByTagsDetailed(tags, opts).face;
+    }
+
     /** 按标签随机取一张（供 [表情:标签] 解析） */
     pickByTag(tag) {
         const t = String(tag).trim().toLowerCase();
@@ -371,30 +502,45 @@ export class FaceStore {
     }
 
     /**
-     * 生成给 AI 看的表情清单（带描述，便于挑选贴合对话的那张）。
+     * 生成「只包含库内实际可用标签」的词表。
      *
-     * 相比只下发标签，多给「短 ID + 描述」能让 AI 判断这张图具体是什么，
-     * 而不是靠标签名猜。实测 11 个表情约 435 字符，成本可接受；
-     * 超过 limit 时按「标签使用频次」排序截断。
+     * 为什么不能直接把 TAG_VOCAB 全部下发：
+     *   固定词表 45 个词，但库内可能只有 11 个表情，
+     *   实际覆盖不到 40%。AI 说出没覆盖的词，挑图会失败并被静默丢弃。
+     *   所以这里取「词表 ∩ 库内实际标签」，保证 AI 说的每个词都真能挑到图。
+     *
+     * 保留分组结构（情绪/主体等），方便 AI 按语义组合标签。
      *
      * @param {object} opts
-     * @param {number} opts.limit 最多返回多少个
+     * @param {number} opts.minCount 标签至少出现几次才下发（过滤一次性噪音）
      */
-    manifest({ limit = 60 } = {}) {
-        const items = this.data.faces
-            .filter((f) => (f.aiTags.length > 0 || f.userTags.length > 0))
-            .map((f) => {
-                const tags = [...new Set([...f.userTags, ...f.aiTags])];
-                return {
-                    id: f.md5.slice(0, 6),
-                    tags,
-                    caption: String(f.caption ?? '').replace(/\s+/g, ' ').slice(0, 60),
-                };
-            });
+    manifest({ minCount = 1 } = {}) {
+        // 统计库内实际出现的标签
+        const count = new Map();
+        for (const f of this.data.faces) {
+            for (const t of [...f.userTags, ...f.aiTags]) {
+                count.set(t, (count.get(t) ?? 0) + 1);
+            }
+        }
 
-        // 先按「用户标签优先、标签数多优先」排，再截断
-        items.sort((a, b) => b.tags.length - a.tags.length);
-        return items.slice(0, limit);
+        const vocab = {};
+        let totalWords = 0;
+        for (const [group, words] of Object.entries(TAG_VOCAB)) {
+            // 只保留「词表里有 且 库里真存在」的词
+            const usable = words.filter((w) => (count.get(w) ?? 0) >= minCount);
+            if (usable.length > 0) {
+                vocab[group] = usable;
+                totalWords += usable.length;
+            }
+        }
+
+        const stats = this.stats();
+        return {
+            vocab,
+            totalWords,
+            total: stats.total,
+            labeled: stats.labeled,
+        };
     }
 }
 

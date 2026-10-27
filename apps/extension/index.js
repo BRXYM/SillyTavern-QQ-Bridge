@@ -16,7 +16,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 let worldNamesCache = null;
 
 const extensionName = 'SnowLuma-Bridge';
-const version = '4.7.0';
+const version = '4.8.0';
 const defaultSettings = {
     bridgeUrl: 'ws://127.0.0.1:9500',
     autoConnect: true,
@@ -158,12 +158,16 @@ function injectFaceInstruction() {
     const cfg = window.__snowlumaImageCfg;
     const manifest = remoteFaceTags;
 
-    // 图片功能被关闭，或表情库为空时清除
+    // 图片功能被关闭时清除
     if (!cfg || cfg.enabled === false || cfg.instruction === false) {
         removeFaceInstruction();
         return;
     }
-    if (!manifest || !Array.isArray(manifest.tags) || manifest.tags.length === 0) {
+
+    // 新方案：后端只下发词表（不与库大小相关），这里据此生成提示词
+    const vocab = manifest?.vocab ?? null;
+    const hasVocab = vocab && Object.keys(vocab).length > 0;
+    if (!hasVocab) {
         removeFaceInstruction();
         return;
     }
@@ -174,91 +178,70 @@ function injectFaceInstruction() {
         return;
     }
 
-    // 优先用带描述的清单（能精确挑图）；旧后端只有 tags 时退回只列标签
-    const items = Array.isArray(manifest.items) ? manifest.items : [];
-    const hasDetail = items.length > 0;
-
-    let catalog;
-    if (hasDetail) {
-        catalog = items
-            .slice(0, 60)
-            .map((it) => {
-                const tags = (it.tags ?? []).join('/');
-                const desc = it.caption ? ' · ' + it.caption : '';
-                return `#${it.id} [${tags}]${desc}`;
-            })
-            .join('\n');
-    } else {
-        catalog = manifest.tags
-            .slice(0, 30)
-            .map((t) => t.tag)
-            .join(' / ');
+    // 只列词表，绝不列具体表情 —— 库再大，注入体积也不变
+    const lines = [];
+    const groupName = {
+        情绪: '情绪',
+        动作: '动作',
+        主体: '主体',
+        风格: '风格',
+    };
+    for (const [group, words] of Object.entries(vocab)) {
+        if (!Array.isArray(words) || words.length === 0) continue;
+        lines.push(`${groupName[group] ?? group}：${words.join('、')}`);
     }
 
-    // 最近发过的表情，提示 AI 换一张
     const recent = Array.isArray(manifest.recent) ? manifest.recent : [];
     const recentHint =
-        recent.length > 0
-            ? `- 最近刚发过：${recent.map((x) => '#' + x).join('、')}，这次尽量换一张`
-            : '';
+        recent.length > 0 ? `（最近发过：${recent.join('、')}，这次换个角度）` : '';
 
-    const instruction = hasDetail
-        ? [
-              '【表情包】',
-              '你有一个表情包库，可以在回复里发图。下面是可用的表情：',
-              catalog,
-              '',
-              '发送格式：[表情:#ID]',
-              '把 ID 换成上面对应表情的 6 位编号。标记本身不会显示给用户，会被替换成真实图片。',
-              '',
-              '什么时候发（这是判断，不是必做）：',
-              '- 情绪到位时发：开心、无语、震惊、委屈、得意等有明显情绪的时候',
-              '- 对话轻松、日常闲聊、互相调侃时适合发',
-              '- 自己说完一句带情绪的话，可以补一个贴切的表情加强语气',
-              '',
-              '什么时候不发：',
-              '- 严肃话题：答疑、排查故障、讲道理、对方在倾诉痛苦时',
-              '- 信息量大、需要对方认真读的时候',
-              '- 自己拿不准情绪的时候，宁可发文字',
-              '',
-              '发几个（按对话氛围自己判断）：',
-              '- 大多数情况发 1 个就够了',
-              '- 情绪特别强烈时，可以连发 2 个，但仅限情绪真的到位',
-              '- 一条回复最多 3 个，不要靠刷表情凑长度',
-              '- 也可以完全不发，发不发由你决定',
-              '',
-              '怎么挑（重要）：',
-              '- 看每个表情后面的描述，挑内容最贴合当前这句回复的那张',
-              '- 不要只看标签名，要看描述里画的是什么',
-              recentHint,
-              '',
-              '示例（ID 是占位，实际要用上面清单里的编号）：',
-              '  用户：今天加班到十点，累死了',
-              '  回复：这也太惨了，早点休息吧[表情:#abc123]',
-              '  用户：我考试过了！',
-              '  回复：恭喜恭喜！[表情:#def456]',
-              '  用户：这个报错怎么解决',
-              '  回复：（正常讲解决步骤，不发任何表情）',
-          ]
-              .filter((x) => x !== '')
-              .join('\n')
-        : [
-              '【表情包回复】',
-              `你可以使用表情包表达情绪。当前可用标签：${catalog}`,
-              '用法：在回复末尾插入 [表情:标签]，标签从上表中选择。',
-              '示例：[表情:开心]',
-              '',
-              '使用规则：',
-              '1. 一条消息最多使用一个表情；',
-              '2. 只在情绪明确、氛围轻松时使用，严肃话题、答疑、排查问题时不要用；',
-              '3. 不要每条消息都发表情，适当使用才自然；',
-              '4. 表情标记不会显示给用户，会替换成真实图片。',
-          ].join('\n');
+    const instruction = [
+        '【表情包】',
+        '你可以发表情包表达情绪。你只需给出标签，系统会自动从本地表情库里挑一张最贴合的图。',
+        '',
+        '可用标签：',
+        ...lines,
+        '',
+        '发送格式：[表情:标签] 或 [表情:标签1,标签2]',
+        '标签从上表选，不要自己编造词。多个标签用逗号分隔，按贴切程度排序。',
+        '标记不会显示给用户，会被替换成真实图片。',
+        '',
+        '什么时候发（这是判断，不是必做）：',
+        '- 情绪到位时发：开心、无语、震惊、委屈、得意等有明显情绪的时候',
+        '- 对话轻松、日常闲聊、互相调侃时适合发',
+        '- 自己说完一句带情绪的话，可以补一个贴切的表情加强语气',
+        '',
+        '什么时候不发：',
+        '- 严肃话题：答疑、排查故障、讲道理、对方在倾诉痛苦时',
+        '- 信息量大、需要对方认真读的时候',
+        '- 自己拿不准情绪的时候，宁可发文字',
+        '',
+        '发几个（按对话氛围自己判断）：',
+        '- 大多数情况发 1 个就够了',
+        '- 情绪特别强烈时，可以连发 2 个，但仅限情绪真的到位',
+        '- 一条回复最多 3 个，不要靠刷表情凑长度',
+        '- 也可以完全不发，发不发由你决定',
+        '',
+        '怎么选标签（重要）：',
+        '- 先定情绪，再加一个主体（如：委屈,猫）',
+        '- 情绪标签决定了挑出什么图，选你最想表达的那个',
+        `- 标签组合越具体越好${recentHint}`,
+        '',
+        '示例：',
+        '  用户：今天加班到十点，累死了',
+        '  回复：这也太惨了，早点休息吧[表情:疲惫]',
+        '  用户：我考试过了！',
+        '  回复：恭喜恭喜！[表情:开心]',
+        '  用户：这个报错怎么解决',
+        '  回复：（正常讲解决步骤，不发任何表情）',
+    ].join('\n');
 
     try {
         ctx.setExtensionPrompt(FACE_PROMPT_KEY, instruction, 1, 4, false);
+        const total = manifest.total ?? 0;
+        const labeled = manifest.labeled ?? 0;
         log(
-            `已注入表情提示（${hasDetail ? items.length + ' 个带描述的表情' : manifest.tags.length + ' 个标签'}，库内 ${manifest.total} 个）`,
+            `已注入表情词表（${Object.values(vocab).flat().length} 个词，库内 ${total} 个表情 / 已标注 ${labeled} 个）`,
         );
     } catch (e) {
         log('表情提示注入失败:', e.message);

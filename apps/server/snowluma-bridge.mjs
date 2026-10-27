@@ -38,6 +38,7 @@ import {
     isPortOpen as isStPortOpen,
 } from './sillytavern-service.mjs';
 import { FaceService } from './faces-service.mjs';
+import { TAG_VOCAB } from './faces-store.mjs';
 import { OllamaClient, OllamaDaemon, countModelsIn } from './ollama-service.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -49,7 +50,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * 之前就因为这个踩过坑 —— 修好的逻辑没生效，还以为是修复本身有问题。
  * 每次改后端逻辑时顺手更新这个值。
  */
-const CODE_VERSION = '2026-10-26.3';
+const CODE_VERSION = '2026-10-27.3-face-log';
 
 /** 后端入口文件的最后修改时间（秒级），用来判断进程是否落后于代码 */
 const CODE_MTIME = (() => {
@@ -649,6 +650,14 @@ async function sendQQ(msg) {
 
     if (!segments.length) return;
 
+    // 记录本轮表情决策，用于日志排查"为什么不发"
+    const faceDecision = {
+        hasMark: false,
+        sent: 0,
+        failed: 0,
+        tokens: [],
+    };
+
     try {
         for (let i = 0; i < segments.length; i++) {
             const seg = segments[i];
@@ -656,22 +665,60 @@ async function sendQQ(msg) {
                 await new Promise((r) => setTimeout(r, seg.delayMs));
             }
             // 检测消息里的图片标记，转成消息段
-            // [表情:#id] 按短 ID 精确取图；[表情:标签] 按标签随机取
+            // [表情:无语,委屈] → 本地库按多标签打分挑一张
             const payload = buildOutgoingPayload(seg.text, (token) => {
                 try {
+                    faceDecision.hasMark = true;
+                    faceDecision.tokens.push(token);
                     if (!faces) return null;
-                    // # 开头视为短 ID
+                    // # 开头视为短 ID（兼容旧行为）
                     if (token.startsWith('#')) {
                         const hit = faces.store.pickById(token);
-                        if (!hit) return null;
+                        if (!hit) {
+                            log(`  │  表情 ✗ [表情:${token}] 短 ID 不存在`);
+                            faceDecision.failed += 1;
+                            return null;
+                        }
                         rememberFace(hit.md5.slice(0, 6));
+                        log(`  │  表情 ✓ [表情:${token}] → ${hit.md5.slice(0, 6)}`);
+                        faceDecision.sent += 1;
                         return hit.imageUrl ? absoluteFaceUrl(hit.imageUrl) : null;
                     }
-                    const hit = faces.pickByTag(token);
-                    if (!hit) return null;
-                    rememberFace(hit.md5.slice(0, 6));
-                    return hit.imageUrl ? absoluteFaceUrl(hit.imageUrl) : null;
-                } catch {
+                    // 标签：拆成数组，在本地库里挑最贴合的
+                    const tags = splitFaceTags(token);
+                    if (tags.length === 0) return null;
+
+                    const r = faces.store.pickByTagsDetailed(tags, { exclude: recentMd5 });
+
+                    if (!r.face) {
+                        log(`  │  表情 ✗ ${r.reason || '无匹配'}`);
+                        if (r.candidates.length > 0) {
+                            for (const c of r.candidates) {
+                                log(`  │    候选 ${c.md5} 分=${c.score} [${c.hitTags.join(',')}]`);
+                            }
+                        }
+                        faceDecision.failed += 1;
+                        return null;
+                    }
+
+                    rememberFace(r.face.md5.slice(0, 6));
+                    recentMd5.push(r.face.md5);
+                    while (recentMd5.length > 3) recentMd5.shift();
+                    log(
+                        `  │  表情 ✓ [表情:${token}] → ${r.face.md5.slice(0, 6)}`
+                        + ` 分=${r.score} 命中=[${(r.hitTags ?? []).join(',')}]`
+                        + ` 候选=${r.totalScored} 排除=${r.excluded}`,
+                    );
+                    if (r.candidates.length > 1) {
+                        for (const c of r.candidates.slice(1)) {
+                            log(`  │    次选 ${c.md5} 分=${c.score} [${c.hitTags.join(',')}]`);
+                        }
+                    }
+                    faceDecision.sent += 1;
+                    return r.face.imageUrl ? absoluteFaceUrl(r.face.imageUrl) : null;
+                } catch (e) {
+                    log(`  │  表情 ✗ 异常: ${e.message}`);
+                    faceDecision.failed += 1;
                     return null;
                 }
             });
@@ -682,11 +729,149 @@ async function sendQQ(msg) {
             await sendOne(msg, payload);
             log(`分段 ${i + 1}/${segments.length} 已发往QQ → ${target} (${seg.text.length}字)`);
         }
+
+        // 表情决策汇总：让"为什么没发表情"在日志里一目了然
+        if (!faceDecision.hasMark) {
+            log(
+                `  └ 表情：本轮未发（AI 未生成表情标记）`
+                + `｜库内 ${faceStatsSummary()}`,
+            );
+        } else if (faceDecision.sent === 0 && faceDecision.failed > 0) {
+            log(
+                `  └ 表情：本轮未发（${faceDecision.failed} 个标记全部未命中）`
+                + `｜AI 给的标签 [${faceDecision.tokens.join(' | ')}]`,
+            );
+        } else {
+            log(
+                `  └ 表情：发出 ${faceDecision.sent} 个`
+                + (faceDecision.failed ? `，失败 ${faceDecision.failed} 个` : '')
+                + `｜标签 [${faceDecision.tokens.join(' | ')}]`,
+            );
+        }
+
         const st = sessionStats.get(msg.sessionKey);
         if (st) st.out++;
     } catch (e) {
         log(`QQ 发送失败(${target}):`, e.message);
     }
+}
+
+/** 表情库的一句话摘要，用于日志 */
+function faceStatsSummary() {
+    try {
+        if (!faces) return '未初始化';
+        const s = faces.stats();
+        const m = faces.store.manifest();
+        return `${s.total} 个 / 已标注 ${s.labeled} / 可用词 ${m.totalWords}`;
+    } catch {
+        return '读取失败';
+    }
+}
+
+/**
+ * 预演一次表情决策，不实际发送。
+ *
+ * 与 sendQQ 里的解析逻辑保持一致，但把过程摊开返回，
+ * 便于前端/日志直接看到：命中什么、评分多少、为什么没中。
+ */
+function dryRunFaceDecision(text) {
+    const result = {
+        ok: true,
+        input: text,
+        hasMark: false,
+        tokens: [],
+        images: 0,
+        details: [],
+        segments: [],
+        library: faceStatsSummary(),
+    };
+
+    try {
+        const segs = buildOutgoingPayload(text, (token) => {
+            result.hasMark = true;
+            result.tokens.push(token);
+
+            if (!faces) {
+                result.details.push({ token, ok: false, reason: '表情库未初始化' });
+                return null;
+            }
+
+            // 短 ID
+            if (token.startsWith('#')) {
+                const hit = faces.store.pickById(token);
+                if (!hit) {
+                    result.details.push({ token, ok: false, reason: `短 ID 不存在: ${token}` });
+                    return null;
+                }
+                result.details.push({
+                    token,
+                    ok: true,
+                    mode: 'id',
+                    picked: hit.md5.slice(0, 6),
+                    tags: [...hit.userTags, ...hit.aiTags],
+                });
+                return hit.imageUrl ? absoluteFaceUrl(hit.imageUrl) : null;
+            }
+
+            // 标签
+            const tags = splitFaceTags(token);
+            if (tags.length === 0) {
+                result.details.push({ token, ok: false, reason: '标签为空' });
+                return null;
+            }
+
+            const r = faces.store.pickByTagsDetailed(tags, { exclude: [] });
+            if (!r.face) {
+                result.details.push({
+                    token,
+                    ok: false,
+                    mode: 'tag',
+                    tags,
+                    reason: r.reason || '无匹配',
+                    candidates: r.candidates,
+                });
+                return null;
+            }
+
+            result.details.push({
+                token,
+                ok: true,
+                mode: 'tag',
+                tags,
+                picked: r.face.md5.slice(0, 6),
+                pickedTags: [...r.face.userTags, ...r.face.aiTags],
+                score: r.score,
+                hitTags: r.hitTags,
+                totalScored: r.totalScored,
+                excluded: r.excluded,
+                candidates: r.candidates,
+            });
+            return r.face.imageUrl ? absoluteFaceUrl(r.face.imageUrl) : null;
+        });
+
+        if (typeof segs === 'string') {
+            result.segments = [{ type: 'text', text: segs }];
+        } else {
+            result.segments = segs.map((s) =>
+                s.type === 'text' ? { type: 'text', text: s.data.text } : { type: 'image' },
+            );
+            result.images = segs.filter((s) => s.type === 'image').length;
+        }
+
+        // 一句话结论，直接给日志/前端展示
+        if (!result.hasMark) {
+            result.verdict = `本轮未发：AI 未生成表情标记（${result.library}）`;
+        } else if (result.images === 0) {
+            result.verdict = `本轮未发：${result.details.length} 个标记全部未命中`;
+        } else {
+            result.verdict = `发出 ${result.images} 张`;
+        }
+    } catch (e) {
+        result.ok = false;
+        result.error = e.message;
+    }
+
+    return result;
 }
 
 /**
@@ -697,6 +882,8 @@ async function sendQQ(msg) {
  */
 const recentFaces = [];
 const RECENT_FACES_MAX = 3;
+/** 最近发过的表情 md5，用于挑图去重 */
+const recentMd5 = [];
 
 function rememberFace(id) {
     const v = String(id ?? '').replace(/^#/, '');
@@ -710,30 +897,34 @@ function rememberFace(id) {
 /**
  * 表情库的提示词用清单。
  *
- * 为什么带描述而不只是标签：
- *   只给标签时 AI 只能按名字猜，例如「疑惑」它并不知道图里是熊猫还是黑猫。
- *   带上「短 ID + 标签 + 一句描述」后，AI 能挑出真正贴合当前对话的那张。
- *   实测 11 个表情约 435 字符，100 个约 4000 字符，成本可接受。
+ * 关键设计：只下发「词表」，不下发「全部表情」。
  *
- * 超过上限时按标签丰富度截断，避免提示词无限膨胀。
+ *   旧方案（全量清单）：每个表情约 55 字符
+ *     11 个 → 607 字符
+ *     100 个 → 5518 字符   ← 已经过大
+ *     1000 个 → 55182 字符 ← 完全不可用
+ *
+ *   新方案（动态词表）：约 750 字符，与库大小无关
+ *     且词表取自「预设词表 ∩ 库内实际标签」，
+ *     保证 AI 说出的每个词都真能挑到图。
+ *
+ * AI 只负责根据对话生成标签，例如 [表情:无语,委屈]，
+ * 由 Bridge 在本地表情库里检索并挑一张。这样：
+ *   - 提示词体积恒定，库再大也不怕
+ *   - AI 不需要「看过」每张图，只需理解情绪
+ *   - 挑选逻辑留在本地，可加打分、去重等策略
  */
-function faceTagManifest(limit = 60) {
+function faceTagManifest() {
     try {
-        if (!faces) return { tags: [], items: [], total: 0 };
-        const stats = faces.tagStats();
-        const total = faces.stats().total;
-        const items = faces.store.manifest({ limit });
+        if (!faces) return { vocab: {}, totalWords: 0, total: 0, labeled: 0, recent: [] };
+        const m = faces.store.manifest();
         return {
-            // 保留 tags 字段：旧版扩展仍在读它
-            tags: stats.slice(0, 40).map((t) => ({ tag: t.tag, count: t.total })),
-            // 新增：带描述的表情清单，供新版扩展做精确选择
-            items,
-            // 最近发过的表情，让 AI 避开重复
+            ...m,
+            // 最近发过的标签，避免连续重复
             recent: [...recentFaces],
-            total,
         };
     } catch {
-        return { tags: [], items: [], recent: [], total: 0 };
+        return { vocab: {}, totalWords: 0, total: 0, labeled: 0, recent: [] };
     }
 }
 
@@ -765,11 +956,14 @@ function absoluteFaceUrl(faceOrUrl) {
  * 标签解析失败时静默丢弃该标记，避免把 `[表情:开心]` 原文发给用户。
  */
 function buildOutgoingPayload(text, resolveFace) {
-    // 支持三种写法：
-    //   [表情:#abc123]   短 ID 精确选择（AI 主要用这个）
-    //   [表情:开心]      按标签随机取一张（兼容旧行为）
-    //   [图片:URL]       直链
-    const imgRe = /\[(?:img|image|图片|表情)[:：]\s*([^\]\s]+)\s*\]/gi;
+    // 支持的写法：
+    //   [表情:无语]            单标签
+    //   [表情:无语,委屈]        多标签（逗号分隔，按贴切度排序）
+    //   [表情:无语 委屈]        多标签（空格分隔）
+    //   [表情:#abc123]          短 ID 精确选择（保留兼容）
+    //   [图片:URL]              直链
+    // 注意：标签里可能含中文逗号、句号，因此不能用 \S+ 粗暴截断
+    const imgRe = /\[(?:img|image|图片|表情)[:：]\s*([^\]]+?)\s*\]/gi;
     const imgSrcRe = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
     const urlLike = /^(https?:|data:|file:|\/\/|\.\/|\/)/i;
 
@@ -797,7 +991,6 @@ function buildOutgoingPayload(text, resolveFace) {
 
     const segs = [];
     let cursor = 0;
-    let faceCount = 0;
 
     for (const f of found) {
         if (f.index > cursor) {
@@ -815,7 +1008,6 @@ function buildOutgoingPayload(text, resolveFace) {
                 url = null;
             }
             if (url) {
-                faceCount += 1;
                 log(`表情已解析：[表情:${f.value}] → ${String(url).slice(0, 60)}…`);
             } else {
                 log(`⚠ 表情未命中，已丢弃：[表情:${f.value}]`);
@@ -845,6 +1037,15 @@ function buildOutgoingPayload(text, resolveFace) {
     if (tail) segs.push({ type: 'text', data: { text: tail } });
 
     return segs.length > 0 ? segs : '';
+}
+
+/** 把 "[表情:无语,委屈]" 里的值拆成标签数组 */
+function splitFaceTags(value) {
+    return String(value ?? '')
+        .split(/[,，、\s/|]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 4);
 }
 
 function parseMessage(message) {
@@ -1440,6 +1641,27 @@ const consoleServer = http.createServer(async (req, res) => {
             const { text, rules } = JSON.parse(body);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ result: applyReplyProcessors(text, rules ?? []) }));
+        });
+        return;
+    }
+
+    // POST /api/faces/preview   预演表情决策（不真的发 QQ）
+    // body: { text }
+    // 用途：把 AI 会输出的一段文本丢进来，看表情标记会被解析成什么、
+    //      命中哪张图、评分多少、没命中是什么原因。排查"为什么不发表情"专用。
+    if (req.method === 'POST' && req.url === '/api/faces/preview') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+            try {
+                const { text } = JSON.parse(body || '{}');
+                const input = String(text ?? '');
+                res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify(dryRunFaceDecision(input)));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
         });
         return;
     }
