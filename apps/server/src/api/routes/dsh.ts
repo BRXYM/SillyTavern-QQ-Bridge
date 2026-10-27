@@ -29,7 +29,12 @@ import { log } from '../../core/logger.ts';
 
 export interface DshRouteDeps {
     serverRoot: string;
-    dshSettings: () => DshSettings & { serviceProfile: string; servicePort: number; serviceLogFile: string };
+    dshSettings: () => DshSettings & {
+        serviceProfile: string;
+        servicePort: number;
+        serviceLogFile: string;
+        downstreamId: string;
+    };
     makeHeadless: (settings: DshSettings) => unknown;
 }
 
@@ -137,9 +142,20 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
                 url: pluginUrl(),
                 token: app.config().registrationToken,
                 cwdRoot: settings.workRoot,
+                downstreamId: settings.downstreamId ?? 'dsh',
+                consolePort: app.config().consolePort,
             },
             profiles: listProfileBundles(dshHome()),
             injection: probeInjection({ profile, home: dshHome() }),
+            // 在线插件连接：从下游适配器实时读，而不是单独维护一份
+            clients: (() => {
+                const adapter = app.downstreams.get(settings.downstreamId ?? 'dsh') as unknown as {
+                    pluginClients?: () => Array<{ pid: number; profile: string; version: string; connectedAt: number | null }>;
+                    onlineCount?: () => number;
+                } | undefined;
+                return adapter?.pluginClients?.() ?? [];
+            })(),
+            online: ((app.downstreams.get(settings.downstreamId ?? 'dsh') as unknown as { onlineCount?: () => number } | undefined)?.onlineCount?.() ?? 0) > 0,
         });
     });
 
@@ -147,21 +163,47 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
         const settings = deps.dshSettings();
         const profile = String(body.profile ?? settings.serviceProfile).trim();
 
+        // ---- 1) 前置检查：插件源码在不在 ----
+        if (!fs.existsSync(path.join(pluginSourceDir, 'package.json'))) {
+            json(res, 400, {
+                ok: false,
+                error: `插件源码缺失：${pluginSourceDir}（发行包里应自带 apps/dsh-plugin）`,
+                stage: 'precheck',
+            });
+            return;
+        }
+
+        // ---- 2) 注册 token 必须有，否则插件连上也登记不进来 ----
+        const token = String(body.token ?? app.config().registrationToken ?? '').trim();
+        if (!token) {
+            json(res, 400, {
+                ok: false,
+                error: '缺少 registrationToken：重启 Bridge 会自动生成，或在配置里手动设置',
+                stage: 'precheck',
+            });
+            return;
+        }
+
+        // ---- 3) 注入（复制文件 + 写 bundles + 写 patch 配置）----
         const inject = injectPlugin({
             profile,
             sourceDir: pluginSourceDir,
             url: pluginUrl(),
-            token: String(body.token ?? app.config().registrationToken ?? ''),
+            token,
             cwdRoot: String(body.cwdRoot ?? settings.workRoot ?? ''),
+            // 让插件知道连哪个实例 + 控制台端口，用于自注册
+            downstreamId: settings.downstreamId ?? 'dsh',
+            consolePort: app.config().consolePort,
             home: dshHome(),
         });
 
         if (!inject.ok) {
-            json(res, 400, { ok: false, error: inject.error, inject });
+            json(res, 400, { ok: false, error: inject.error, stage: 'inject', inject });
             return;
         }
-        log(`dsh：连接插件已${inject.action === 'injected' ? '注入' : '更新'}到 profile ${profile}`);
+        log(`dsh：连接插件已${inject.action === 'injected' ? '安装' : '更新'}到 profile ${profile}`);
 
+        // ---- 4) 校验组合结果（--dump-config 里必须出现插件行）----
         let verified: { ok: boolean; error: string } | null = null;
         if (body.verify !== false) {
             const v = verifyInjection({ exePath: settings.exePath, profile, home: dshHome() });
@@ -169,14 +211,44 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
             log(v.ok ? 'dsh：插件已进入 profile 组合结果' : `dsh：插件校验未通过 —— ${v.error}`);
         }
 
-        let restart: { ok: boolean; error?: string } | null = null;
-        if (body.restart === true) {
+        // ---- 5) 重启服务让插件生效 ----
+        let restart: { ok: boolean; error?: string; pid?: number } | null = null;
+        if (body.restart !== false) {
             const r = await app.dshService().restart();
             restart = { ok: r.ok, error: r.error };
-            log(r.ok ? 'dsh：服务已重启' : `dsh：重启失败 —— ${r.error ?? '未知'}`);
+            log(r.ok ? 'dsh：服务已重启，等待插件上线' : `dsh：重启失败 —— ${r.error ?? '未知'}`);
         }
 
-        json(res, 200, { ok: true, inject, verified, restart });
+        // ---- 6) 等插件真的连上来（最多 20 秒）----
+        let online = false;
+        if (body.waitOnline !== false && restart?.ok) {
+            const deadline = Date.now() + 20000;
+            while (Date.now() < deadline) {
+                await new Promise((r) => setTimeout(r, 600));
+                const adapter = app.downstreams.get(settings.downstreamId) ?? app.downstreams.get('dsh');
+                const st = adapter?.status();
+                if (st?.available && (st.detail?.pluginConnections as number) > 0) {
+                    online = true;
+                    break;
+                }
+            }
+            log(online ? 'dsh：插件已上线，消息将走插件链路' : 'dsh：插件未在 20 秒内上线（可查看服务日志）');
+        }
+
+        json(res, 200, {
+            ok: true,
+            stage: online ? 'online' : (restart?.ok === false ? 'restart-failed' : 'installed'),
+            inject,
+            verified,
+            restart,
+            online,
+            // 给前端直接可展示的结论
+            message: online
+                ? '安装完成，插件已连接，消息将直接进入 dsh'
+                : restart?.ok === false
+                    ? `已安装但服务重启失败：${restart.error ?? '未知'}`
+                    : '已安装并重启，插件尚未上线（见服务日志）',
+        });
     });
 
     router.post('/api/dsh/plugin/remove', async ({ res, body }) => {

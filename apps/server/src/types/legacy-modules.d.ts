@@ -120,6 +120,10 @@ declare module '*dsh-profile-service.mjs' {
         url: string;
         token?: string;
         cwdRoot?: string;
+        /** 插件注册到哪个下游实例 */
+        downstreamId?: string;
+        /** 控制台端口，插件据此自注册 */
+        consolePort?: number;
         home?: string;
     }): InjectResult;
 

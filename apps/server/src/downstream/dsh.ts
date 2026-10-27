@@ -156,6 +156,22 @@ export class DshAdapter implements DownstreamAdapter {
         };
     }
 
+    /** 在线插件的连接信息（控制台展示用） */
+    pluginClients(): Array<{ pid: number; profile: string; version: string; connectedAt: number | null }> {
+        const out: Array<{ pid: number; profile: string; version: string; connectedAt: number | null }> = [];
+        for (const s of this.clients) {
+            if (s.readyState !== WebSocket.OPEN) continue;
+            const meta = s as WebSocket & { dshPid?: number; dshProfile?: string; dshVersion?: string; connectedAt?: number };
+            out.push({
+                pid: meta.dshPid ?? 0,
+                profile: meta.dshProfile ?? '',
+                version: meta.dshVersion ?? '',
+                connectedAt: meta.connectedAt ?? null,
+            });
+        }
+        return out;
+    }
+
     onlineCount(): number {
         let n = 0;
         for (const s of this.clients) {

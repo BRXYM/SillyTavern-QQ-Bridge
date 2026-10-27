@@ -164,6 +164,35 @@ $env:WEB_PORT='5180'; $env:API_PORT='9520'; $env:EXT_PORT='9521'; pnpm dev
 4. 点「保存参数」，再点「dsh DeepSeek Harness」切换全局默认后端
 5. 发一条 QQ 消息验证；运行日志里会看到 `QQ消息 → dsh [...]`
 
+### 一键安装连接插件
+
+「下游管理」页展开任意 dsh 实例，点 **一键安装插件** 即可。后端会依次完成：
+
+1. 检查插件源码（发行包自带 `apps/dsh-plugin`）
+2. 复制插件到 `~/.dsh/profiles/node_modules/@snowluma/dsh-bridge-connector`
+3. 把 `@snowluma/dsh-bridge-connector` 追加到该 profile 的 `dsh.profile.bundles`
+4. 在 `cordis.patch.yml` 写入带标记的连接配置块（url / token / cwdRoot / downstreamId / consolePort），重复安装只更新这一块
+5. 用 `dsh --dump-config` 校验插件确实进了组合结果
+6. **重启 dsh 服务**
+7. 最多等 20 秒确认插件连上来，返回 `stage=online`
+
+> 全程不动用户的其它插件、不跑 `pnpm install`、不改 `dependencies`，所以可以反复安装与移除。
+
+安装完成后：
+
+- QQ 消息在 dsh 进程内处理（复用模型选择、MCP、工具），不再每条起子进程
+- 插件启动时会调 `POST /api/downstreams/register` 自注册，Bridge 侧无需手工新增实例
+- 插件离线时自动回落到 headless，服务挂了也不会没人回消息
+
+### 插件协议
+
+插件与 Bridge 用一套统一的下游协议：
+
+| 方向 | 消息 |
+|---|---|
+| 插件 → Bridge | `hello`（带 `kind`/`downstreamId`/`token`）、`downstream_reply`、`downstream_error`、`ping` |
+| Bridge → 插件 | `hello_ack`、`downstream_ask`、`downstream_reset`、`pong` |
+
 ### 会话级切换（dsh / 酒馆角色对话）
 
 全局后端只是默认值。想按人区分时，到 **会话** 页，每个 QQ 会话都有一条「回复后端」下拉：

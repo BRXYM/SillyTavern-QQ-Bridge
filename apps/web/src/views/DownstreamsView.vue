@@ -194,7 +194,7 @@ async function serviceAction(action: 'start' | 'stop' | 'restart') {
         const r = await dshApi.serviceAction(action);
         const label = action === 'start' ? '已启动' : action === 'stop' ? '已停止' : '已重启';
         if (r.ok) toast.success(`dsh 服务${label}`, `${r.host}:${r.port}`);
-        else toast.error('操作失败', r.error ?? r.result?.error ?? '未知错误');
+        else toast.error('操作失败', r.error ?? '未知错误');
         await load({ silent: true });
     } catch (e) {
         toast.error('操作失败', e instanceof Error ? e.message : String(e));
@@ -204,24 +204,27 @@ async function serviceAction(action: 'start' | 'stop' | 'restart') {
     }
 }
 
-async function injectPlugin() {
-    working.value = 'inject';
+async function installPlugin() {
+    working.value = 'install';
     try {
-        const r = await dshApi.pluginInject({ verify: true, restart: true });
-        if (!r.inject.ok) {
-            toast.error('注入失败', r.inject.error || '未知错误');
+        const r = await dshApi.installPlugin({ verify: true, restart: true, waitOnline: true });
+
+        if (!r.ok) {
+            toast.error('安装失败', r.error || '未知错误');
             return;
         }
-        if (r.verified && !r.verified.ok) {
-            toast.warning('已注入但校验未通过', r.verified.error);
-        } else if (r.restart && !r.restart.ok) {
-            toast.warning('已注入，重启失败', r.restart.error ?? '请手动重启');
+
+        // stage 直接说明走到哪一步，比单看 ok 更有信息量
+        if (r.online) {
+            toast.success('安装完成', r.message ?? '插件已连接，消息将直接进入 dsh');
+        } else if (r.stage === 'restart-failed') {
+            toast.warning('已安装但重启失败', r.restart?.error ?? '请手动重启服务');
         } else {
-            toast.success('连接插件已注入', '服务已重启，等待插件上线');
+            toast.warning('已安装', r.message ?? '插件尚未上线，见服务日志');
         }
         await load({ silent: true });
     } catch (e) {
-        toast.error('注入失败', e instanceof Error ? e.message : String(e));
+        toast.error('安装失败', e instanceof Error ? e.message : String(e));
     } finally {
         working.value = '';
     }
@@ -230,7 +233,7 @@ async function injectPlugin() {
 async function removePlugin() {
     working.value = 'remove-plugin';
     try {
-        const r = await dshApi.pluginRemove({ restart: true });
+        const r = await dshApi.removePlugin({ restart: true });
         if (!r.remove.ok) {
             toast.error('移除失败', r.remove.error || '未知错误');
             return;
@@ -513,10 +516,10 @@ onMounted(() => void load({ silent: true }));
                                     </UiBadge>
                                 </div>
                                 <div class="flex flex-wrap items-center gap-1.5">
-                                    <UiButton size="sm" :disabled="working !== '' || !dsh?.installed" @click="injectPlugin">
-                                        <Loader2 v-if="working === 'inject'" class="size-3.5 animate-spin" />
+                                    <UiButton size="sm" :disabled="working !== '' || !dsh?.installed" @click="installPlugin">
+                                        <Loader2 v-if="working === 'install'" class="size-3.5 animate-spin" />
                                         <PlugZap v-else class="size-3.5" />
-                                        {{ pluginInjected ? '重新注入' : '注入并重启' }}
+                                        {{ pluginInjected ? '重新安装' : '一键安装插件' }}
                                     </UiButton>
                                     <UiButton
                                         v-if="pluginInjected"

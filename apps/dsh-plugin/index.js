@@ -100,6 +100,61 @@ export function apply(ctx, config = {}) {
     let closed = false;
     let retryMs = RECONNECT_MIN_MS;
     let pingTimer = null;
+    /** 自注册是否已成功（只需成功一次） */
+    let registered = false;
+
+    /**
+     * 向 Bridge 自注册。
+     *
+     * 为什么需要：插件装进 dsh 后，Bridge 侧可能还没有这个下游实例
+     * （尤其是用户手动装的插件，或 Bridge 配置被重置）。
+     * 这里主动登记一次，Bridge 就会把它写进 downstreams 并启用，
+     * 不需要用户再去控制台手工新增。
+     *
+     * 失败不阻塞连接：注册是「让 Bridge 认得我」，
+     * 握手是「建立连接」，后者用得到前者但不强依赖。
+     */
+    async function registerSelf() {
+        if (registered || !token) return;
+
+        // 从 ws://127.0.0.1:9500 推出 http://127.0.0.1:<consolePort>
+        // 控制台端口默认 9510，允许用环境变量或配置覆盖
+        const consolePort = String(config.consolePort || process.env.SNOWLUMA_BRIDGE_CONSOLE_PORT || '9510');
+        let origin;
+        try {
+            const u = new URL(url);
+            origin = `http://${u.hostname}:${consolePort}`;
+        } catch {
+            return;
+        }
+
+        const body = JSON.stringify({
+            token,
+            id: downstreamId,
+            kind: 'dsh-plugin',
+            name: `dsh（${process.env.DSH_PROFILE || 'web'}）`,
+            settings: { fallbackHeadless: true },
+        });
+
+        try {
+            const res = await fetch(`${origin}/api/downstreams/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body,
+                signal: AbortSignal.timeout(8000),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) {
+                registered = true;
+                log(`已向 Bridge 注册为下游「${data.id || downstreamId}」`);
+            } else {
+                log(`自注册被拒绝（HTTP ${res.status}）：${data.error || '未知原因'}`);
+            }
+        } catch (e) {
+            // Bridge 未启动时很常见，不当作错误刷日志
+            log(`自注册暂不可用（${e instanceof Error ? e.message : String(e)}），稍后重试`);
+        }
+    }
 
     // ---- 系统提示：QQ 场景约束（profile 级，一次注册） ----
     ctx.inject(['systemPrompt'], (promptCtx) => {
@@ -160,7 +215,7 @@ export function apply(ctx, config = {}) {
         const st = states.get(key);
         if (st?.busy) {
             log(`⚠ 上一条还在处理，忽略 [${key}] 的新消息`);
-            reply({ type: 'dsh_error', error: '上一条消息仍在处理中，请稍后再发', elapsedMs: 0 });
+            reply({ type: 'downstream_error', error: '上一条消息仍在处理中，请稍后再发', elapsedMs: 0 });
             return;
         }
 
@@ -188,17 +243,17 @@ export function apply(ctx, config = {}) {
 
             if (!out) {
                 log(`⚠ dsh 未产出文本 [${key}]`);
-                reply({ type: 'dsh_error', error: 'dsh 未产出文本', elapsedMs });
+                reply({ type: 'downstream_error', error: 'dsh 未产出文本', elapsedMs });
                 return;
             }
             log(`回复 [${key}] ${out.slice(0, 60)}（${(elapsedMs / 1000).toFixed(1)}s）`);
-            reply({ type: 'dsh_reply', text: out, elapsedMs });
+            reply({ type: 'downstream_reply', text: out, elapsedMs });
         } catch (e) {
             const state = states.get(key);
             if (state) state.busy = false;
             const error = e instanceof Error ? e.message : String(e);
             log(`处理失败 [${key}]：${error}`);
-            reply({ type: 'dsh_error', error, elapsedMs: Date.now() - t0 });
+            reply({ type: 'downstream_error', error, elapsedMs: Date.now() - t0 });
         }
     }
 
@@ -242,22 +297,22 @@ export function apply(ctx, config = {}) {
             case 'ping':
                 send({ type: 'pong', at: Date.now() });
                 return;
-            case 'dsh_hello_ack':
-                log(`Bridge 已确认连接（server=${msg.server || '?'}）`);
+            case 'hello_ack':
+                log(`Bridge 已确认连接（downstream=${msg.downstreamId || '?'}）`);
                 return;
-            case 'dsh_ask':
+            case 'downstream_ask':
                 void handleAsk(msg);
                 return;
-            case 'dsh_reset': {
+            case 'downstream_reset': {
                 const key = String(msg.sessionKey || '');
                 if (!key) return;
                 const existed = await disposeSession(key, { removeDir: msg.removeWorkDir === true });
-                send({ type: 'dsh_reset_ack', requestId: msg.requestId, sessionKey: key, existed });
+                send({ type: 'downstream_reset_ack', requestId: msg.requestId, sessionKey: key, existed });
                 return;
             }
-            case 'dsh_status_req':
+            case 'downstream_status_req':
                 send({
-                    type: 'dsh_status',
+                    type: 'downstream_status',
                     requestId: msg.requestId,
                     sessions: [...states.entries()].map(([k, s]) => ({
                         sessionKey: k,
@@ -285,6 +340,9 @@ export function apply(ctx, config = {}) {
     async function connect() {
         if (closed) return;
         try {
+            // 先注册再握手：Bridge 认得这个下游，握手时才能路由到正确实例
+            await registerSelf();
+
             const client = await createSocketClient(url, { log });
             socket = client;
 

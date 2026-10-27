@@ -186,7 +186,16 @@ export class InboundServer {
         this.metas.set(socket, meta);
 
         if (typeof msg.pid === 'number') {
-            (socket as WebSocket & { dshPid?: number }).dshPid = msg.pid;
+            const holder = socket as WebSocket & {
+                dshPid?: number;
+                dshProfile?: string;
+                dshVersion?: string;
+                connectedAt?: number;
+            };
+            holder.dshPid = msg.pid;
+            holder.dshProfile = String(msg.profile ?? '');
+            holder.dshVersion = String(msg.version ?? '');
+            holder.connectedAt = Date.now();
         }
 
         adapter.attach(socket);

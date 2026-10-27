@@ -221,10 +221,17 @@ const ollamaDaemon = new OllamaDaemon({
 
 // ================= 6. dsh 常驻服务 =================
 /** 从下游配置里读 dsh 实例的 settings */
-function dshSettings(): DshSettings & { serviceProfile: string; servicePort: number; serviceLogFile: string } {
+function dshSettings(): DshSettings & {
+    serviceProfile: string;
+    servicePort: number;
+    serviceLogFile: string;
+    /** 目标下游实例 id：插件注册与消息路由都用它 */
+    downstreamId: string;
+} {
     const ds = cfg.downstreams.find((d) => d.kind === 'dsh-plugin' || d.kind === 'dsh-headless');
     const s = (ds?.settings ?? {}) as Record<string, unknown>;
     return {
+        downstreamId: ds?.id ?? 'dsh',
         fallbackHeadless: s.fallbackHeadless !== false,
         exePath: String(s.exePath ?? ''),
         profile: String(s.profile ?? 'headless'),

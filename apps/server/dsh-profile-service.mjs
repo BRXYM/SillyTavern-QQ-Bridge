@@ -111,7 +111,7 @@ function copyPlugin(sourceDir, targetDir) {
 }
 
 /** 极简 YAML 片段：只有我们需要的那一行（避免引 yaml 依赖） */
-function renderPatchBlock({ url, token, cwdRoot }) {
+function renderPatchBlock({ url, token, cwdRoot, downstreamId = 'dsh', consolePort = 9510 }) {
     const q = (v) => `'${String(v).replace(/'/g, "''")}'`;
     const lines = [
         `- id: ${PLUGIN_ROW_ID}`,
@@ -119,6 +119,9 @@ function renderPatchBlock({ url, token, cwdRoot }) {
         `    url: ${q(url)}`,
         `    token: ${q(token)}`,
         `    cwdRoot: ${q(cwdRoot)}`,
+        // 插件用这两个自注册：连哪个实例、控制台在哪
+        `    downstreamId: ${q(downstreamId)}`,
+        `    consolePort: ${Number(consolePort) || 9510}`,
     ];
     return lines.join('\n');
 }
@@ -228,7 +231,16 @@ export function probeInjection({ profile, home = dshHome() } = {}) {
  * @param {string} [opts.cwdRoot]   会话工作目录根
  * @param {string} [opts.home]      DSH_HOME 覆盖
  */
-export function injectPlugin({ profile, sourceDir, url, token = '', cwdRoot = '', home = dshHome() } = {}) {
+export function injectPlugin({
+    profile,
+    sourceDir,
+    url,
+    token = '',
+    cwdRoot = '',
+    downstreamId = 'dsh',
+    consolePort = 9510,
+    home = dshHome(),
+} = {}) {
     const out = { ok: false, action: '', target: '', profileDir: '', files: 0, error: '', injection: null };
     try {
         if (!sourceDir || !fs.existsSync(path.join(sourceDir, 'package.json'))) {
@@ -255,7 +267,7 @@ export function injectPlugin({ profile, sourceDir, url, token = '', cwdRoot = ''
         manifest.dsh.profile.bundles = bundles;
         writeManifest(dir, manifest);
 
-        upsertPatchRow(dir, { url, token, cwdRoot });
+        upsertPatchRow(dir, { url, token, cwdRoot, downstreamId, consolePort });
 
         out.ok = true;
         out.injection = probeInjection({ profile, home });
