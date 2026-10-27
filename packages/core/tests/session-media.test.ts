@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { sessionKeyOf, chatNameOf, parseSessionKey } from '../src/session.js';
-import { buildOutgoingPayload, findMediaMarks } from '../src/media.js';
+import {
+    buildOutgoingPayload,
+    findMediaMarks,
+    splitMediaTags,
+    MAX_IMAGES_PER_MESSAGE,
+} from '../src/media.js';
 
 describe('sessionKeyOf', () => {
     it('私聊', () => {
@@ -138,3 +143,60 @@ describe('表情标签解析（[表情:标签]）', () => {
         }
     });
 });
+
+describe('多标签与上限（生产实现的关键行为）', () => {
+    it('多标签不会被空白截断成半截', () => {
+        const marks = findMediaMarks('[表情:无语,委屈]');
+        expect(marks).toHaveLength(1);
+        expect(marks[0]!.value).toBe('无语,委屈');
+    });
+
+    it('支持空格分隔的多标签', () => {
+        const marks = findMediaMarks('[表情:无语 委屈]');
+        expect(marks[0]!.value).toBe('无语 委屈');
+    });
+
+    it('splitMediaTags 拆分中英文逗号、顿号、空格、斜杠', () => {
+        expect(splitMediaTags('无语,委屈')).toEqual(['无语', '委屈']);
+        expect(splitMediaTags('无语，委屈、尴尬')).toEqual(['无语', '委屈', '尴尬']);
+        expect(splitMediaTags('无语 委屈/尴尬|无奈')).toEqual(['无语', '委屈', '尴尬', '无奈']);
+    });
+
+    it('splitMediaTags 最多取 4 个', () => {
+        expect(splitMediaTags('a,b,c,d,e,f')).toHaveLength(4);
+    });
+
+    it('多标签整体交给解析器（解析器内部再打分）', () => {
+        const seen: string[] = [];
+        buildOutgoingPayload('[表情:无语,委屈]', (tag) => {
+            seen.push(tag);
+            return 'https://cdn/x.jpg';
+        });
+        expect(seen).toEqual(['无语,委屈']);
+    });
+
+    it('单条超过上限的图片被丢弃，文本仍保留', () => {
+        const r = buildOutgoingPayload(
+            '[图片:https://a/1.png][图片:https://a/2.png][图片:https://a/3.png][图片:https://a/4.png]尾巴',
+            undefined,
+        );
+        expect(Array.isArray(r)).toBe(true);
+        if (Array.isArray(r)) {
+            const images = r.filter((s) => s.type === 'image');
+            expect(images).toHaveLength(MAX_IMAGES_PER_MESSAGE);
+            expect(r.some((s) => s.type === 'text' && s.data.text === '尾巴')).toBe(true);
+        }
+    });
+
+    it('上限可覆盖', () => {
+        const r = buildOutgoingPayload(
+            '[图片:https://a/1.png][图片:https://a/2.png]',
+            undefined,
+            { maxImages: 1 },
+        );
+        if (Array.isArray(r)) {
+            expect(r.filter((s) => s.type === 'image')).toHaveLength(1);
+        }
+    });
+});
+

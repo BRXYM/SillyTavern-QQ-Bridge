@@ -3,7 +3,9 @@
         "target": "ES2022",
         "module": "ESNext",
         "moduleResolution": "Bundler",
-        "lib": ["ES2023"],
+        "lib": [
+            "ES2023"
+        ],
         "strict": true,
         "noUncheckedIndexedAccess": true,
         "noImplicitOverride": true,
@@ -16,6 +18,8 @@
         "verbatimModuleSyntax": true,
         "declaration": true,
         "declarationMap": true,
-        "sourceMap": true
+        "sourceMap": true,
+        "allowImportingTsExtensions": true,
+        "noEmit": true
     }
 }

@@ -9,10 +9,12 @@
         ".": "./src/index.ts"
     },
     "dependencies": {
+        "@bridge/core": "workspace:*",
         "@bridge/shared": "workspace:*",
         "ws": "^8.18.0"
     },
     "devDependencies": {
+        "@types/node": "^22.20.5",
         "@types/ws": "^8.5.13",
         "vitest": "^3.2.4"
     },
