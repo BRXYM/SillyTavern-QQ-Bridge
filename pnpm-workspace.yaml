@@ -1,6 +1,9 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+  # dsh 连接插件是独立分发的包（会被拷进 dsh 的 profiles/node_modules），
+  # 不参与本仓库的 workspace 安装
+  - '!apps/dsh-plugin'
 
 # 允许执行构建脚本的依赖（esbuild 需要下载二进制）
 allowBuilds:

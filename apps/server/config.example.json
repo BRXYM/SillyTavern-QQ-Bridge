@@ -15,6 +15,16 @@
         "character": "雪乃",
         "world": "雪之镇设定"
     },
+    "backend": "taver",
+    "dshExePath": "",
+    "dshProfile": "headless",
+    "dshWorkRoot": "",
+    "dshTimeoutMs": 180000,
+    "dshHistoryTurns": 6,
+    "dshSystemPrompt": "",
+    "dshErrorReply": "",
+    "dshPersistHistory": true,
+    "dshConcurrency": 1,
     "stDataDir": "",
     "segmentation": {
         "enabled": true,

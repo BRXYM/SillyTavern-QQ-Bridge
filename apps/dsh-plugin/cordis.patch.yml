@@ -1,0 +1,7 @@
+# SnowLuma 连接插件的 profile 补丁层。
+#
+# 由 `dsh plugin --profile <name> add <本目录>` 安装后自动出现在
+# package.json 的 dsh.profile.bundles 里，从下一轮启动开始生效。
+- insert:
+    - id: snowluma-bridge-connector
+      name: '@snowluma/dsh-bridge-connector'

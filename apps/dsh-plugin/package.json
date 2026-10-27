@@ -1,0 +1,20 @@
+{
+    "name": "@snowluma/dsh-bridge-connector",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Connect a running dsh web service back to the SnowLuma QQ bridge",
+    "type": "module",
+    "main": "index.js",
+    "files": [
+        "index.js",
+        "ws-client.js",
+        "cordis.patch.yml",
+        "README.md"
+    ],
+    "dsh": {
+        "bundle": {
+            "patch": "./cordis.patch.yml"
+        }
+    },
+    "license": "MIT"
+}
