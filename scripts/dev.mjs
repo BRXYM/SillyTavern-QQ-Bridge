@@ -24,7 +24,7 @@ const WEB_PORT = Number(process.env.WEB_PORT ?? 5178);
 const API_PORT = Number(process.env.API_PORT ?? 9510);
 /** 后端与前端同属一个 monorepo，无需外部路径 */
 const SERVER_DIR = path.join(ROOT, 'apps', 'server');
-const SERVER_ENTRY = path.join(SERVER_DIR, 'snowluma-bridge.mjs');
+const SERVER_ENTRY = path.join(SERVER_DIR, 'src', 'index.ts');
 const WEB_DIR = path.join(ROOT, 'apps', 'web');
 const VITE_BIN = path.join(WEB_DIR, 'node_modules', 'vite', 'bin', 'vite.js');
 

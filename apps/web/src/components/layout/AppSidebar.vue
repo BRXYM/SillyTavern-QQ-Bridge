@@ -3,7 +3,7 @@ import { computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
     LayoutDashboard, Server, Users, Scissors, Image, Terminal, SlidersHorizontal,
-    BrainCircuit, PanelLeftClose, PanelLeftOpen,
+    BrainCircuit, PanelLeftClose, PanelLeftOpen, Boxes,
 } from 'lucide-vue-next';
 import { cn } from '@/lib/utils';
 import type { NavMeta } from '@/router';
@@ -18,7 +18,7 @@ const route = useRoute();
 const router = useRouter();
 
 const iconMap: Record<string, unknown> = {
-    LayoutDashboard, Server, Users, Scissors, Image, Terminal, SlidersHorizontal, BrainCircuit,
+    LayoutDashboard, Server, Users, Scissors, Image, Terminal, SlidersHorizontal, BrainCircuit, Boxes,
 };
 
 /** 按 group 聚合，保留出现顺序 */

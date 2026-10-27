@@ -64,11 +64,21 @@ cp apps/server/config.example.json apps/server/config.json
 
 ```jsonc
 {
-    "onebotUrl": "ws://127.0.0.1:3001",
-    "onebotToken": "你的 SnowLuma Access Token",
-    "stDataDir": ""   // 留空则自动探测，或填写 <SillyTavern>/data/default-user
+    "configVersion": 2,
+    "upstream": {
+        "url": "ws://127.0.0.1:3001",
+        "token": "你的 SnowLuma Access Token"
+    },
+    "downstreams": [
+        { "id": "dsh", "kind": "dsh-plugin", "enabled": true, "settings": {} },
+        { "id": "tavern", "kind": "sillytavern", "enabled": false, "settings": {} }
+    ],
+    "defaultDownstreamId": "dsh"
 }
 ```
+
+> 从旧版升级不必手改：旧的一层平铺配置会在启动时自动迁移成新结构。
+> `registrationToken` 首次运行自动生成，供 dsh 插件自注册使用。
 
 ### 启动
 
@@ -81,8 +91,8 @@ pnpm dev
 ```
 SillyTavern QQ Bridge
 [dev] 模式：前后端一体
-[dev] 启动后端 .../apps/server/snowluma-bridge.mjs
-[api] 酒馆扩展 WS 服务已启动: ws://127.0.0.1:9500
+[dev] 启动后端 .../apps/server/src/index.ts
+[api] 下游入站 WS 服务已启动: ws://127.0.0.1:9500
 [api] API 服务已启动: http://127.0.0.1:9510/api/status
 [dev] 后端就绪 → http://127.0.0.1:9510
 [web] VITE v7.3.7  ready in 790 ms
@@ -204,25 +214,32 @@ SillyTavern-QQ-Bridge/
 ├── apps/
 │   ├── web/                  # Vue 3 控制台
 │   │   └── src/
-│   │       ├── views/        # 8 个页面（含 dsh 接入）
+│   │       ├── views/        # 9 个页面（含下游管理与 dsh 接入）
 │   │       ├── components/
 │   │       │   ├── layout/   # 侧栏 / 顶栏 / 布局
 │   │       │   └── ui/       # 手写组件（Card/Button/Badge/…）+ ToastHost
 │   │       ├── stores/       # Pinia：status / theme / toast
 │   │       ├── api/          # 后端 API 客户端
 │   │       └── style.css     # 设计 token（oklch）
-│   ├── server/               # 桥接后端
-│   │   ├── snowluma-bridge.mjs    # OneBot 连接 + 扩展 WS + Web API
-│   │   ├── dsh-service.mjs        # DeepSeek Harness 探测 / 调用 / 上下文
-│   │   ├── st-headless.mjs        # 酒馆无头驱动（playwright-core）
-│   │   ├── config.example.json    # 配置模板
-│   │   └── test-console-runtime.mjs
+│   ├── server/               # 桥接后端（TypeScript，分层）
+│   │   ├── src/
+│   │   │   ├── index.ts           # 装配与生命周期
+│   │   │   ├── config/            # 配置模型 + 旧版迁移
+│   │   │   ├── core/              # 日志 / 会话 / 派发 / 发送
+│   │   │   ├── upstream/          # OneBot v11 客户端（唯一上行源）
+│   │   │   ├── downstream/        # 下游适配器（dsh / 酒馆）+ 入站 WS
+│   │   │   └── api/routes/        # 状态 / 下游 / 会话 / 配置 / dsh / 本体
+│   │   ├── dsh-service.mjs        # dsh headless 调用与上下文
+│   │   ├── dsh-profile-service.mjs # profile 插件注入 + 常驻服务
+│   │   ├── ARCHITECTURE.md        # 分层说明与数据流
+│   │   └── config.example.json    # 配置模板
+│   └── dsh-plugin/           # dsh 连接插件（注入到 dsh profile）
 │   └── extension/            # 酒馆前端扩展（安装到 third-party）
 │       ├── index.js
 │       ├── manifest.json
 │       └── style.css
 ├── packages/
-│   ├── core/                 # 纯逻辑，无 IO，66 个测试
+│   ├── core/                 # 纯逻辑，无 IO，73 个测试（后端唯一实现）
 │   │   ├── segmentation.ts   # 回复分段算法
 │   │   ├── pipeline.ts       # 回复处理管道 + 三层策略
 │   │   ├── session.ts        # sessionKey ↔ chatName 映射
@@ -273,26 +290,42 @@ SillyTavern-QQ-Bridge/
 ## 架构
 
 ```
-QQ 用户
-   │  OneBot v11
-   ▼
-SnowLuma (:3001)
-   │  WebSocket
-   ▼
-apps/server 桥接后端 (:9500 扩展 WS / :9510 控制台 API)
-   │                    ▲
-   │  WebSocket         │  HTTP /api
-   ▼                    │
-apps/extension        apps/web 控制台 (:5178)
-（装在酒馆内）           │
-                        └── Vite proxy → :9510
+                        ┌──────────────┐
+   QQ 用户 ──OneBot v11──▶│   SnowLuma   │ :3001
+                        └──────┬───────┘
+                               │ WebSocket（唯一上游）
+                               ▼
+                    ┌──────────────────────┐
+                    │  apps/server 后端     │
+                    │  upstream/onebot.ts  │
+                    │         │            │
+                    │  core/dispatch.ts    │  触发规则 / 选下游 / 组装 prompt
+                    │         │            │
+                    │  downstream/*.ts     │  dsh / 酒馆（可多实例）
+                    │         │            │
+                    │  core/sending.ts     │  分段 / 表情 / 管道
+                    └──────┬────────┬──────┘
+                           │        │ HTTP /api
+              WS 入站 :9500│        ▼
+                           │   apps/web 控制台 :5178
+                    ┌──────┴───────┐
+                    │  下游（连入） │
+                    │ dsh 插件      │
+                    │ 酒馆扩展      │
+                    └──────────────┘
 ```
 
-**数据流**：QQ 消息 → SnowLuma → 桥接后端按 `sessionKey` 广播 → 酒馆扩展触发回复 → 扩展回传 `sessionKey` → 后端分段 + 处理管道 → SnowLuma → QQ。
+**核心约束**：上游唯一（只有 `upstream/onebot.ts` 收发 QQ），下游可扩展（新增一种后端 = 实现一个接口 + 注册一行）。
 
-**dsh 数据流**：QQ 消息 → SnowLuma → 桥接后端（触发规则）→ `dsh --profile headless` → 处理管道 → 分段 / 表情解析 → SnowLuma → QQ。上下文按 `sessionKey` 维护在工作目录中，可落盘。
+**数据流**：QQ 消息 → SnowLuma → 触发规则过滤 → 按会话选下游 → 下游返回最终文本 → 回复处理管道 → 分段 / 表情解析 → SnowLuma → QQ。
 
-**会话隔离**：`sessionKey` 格式为 `private_<userId>` 或 `group_<groupId>_<userId>`，据此映射到酒馆的独立 chat 文件。
+**下游两种传输**：
+- **dsh**：插件在线时在 dsh 进程内跑（复用模型选择 / MCP / 工具），离线回落到 `dsh --profile headless` 子进程
+- **酒馆**：扩展主动连回 Bridge，走角色卡与世界书
+
+**会话隔离**：`sessionKey` 为 `private_<userId>` 或 `group_<groupId>_<userId>`，每个会话独立选择下游、角色、世界书。
+
+分层的完整说明见 [apps/server/ARCHITECTURE.md](apps/server/ARCHITECTURE.md)。
 
 ---
 
@@ -304,17 +337,28 @@ apps/extension        apps/web 控制台 (:5178)
 
 | 端点 | 用途 |
 |---|---|
-| `GET /api/status` | 连接状态、会话统计、清单、日志、配置 |
-| `POST /api/config` | 更新全局配置 |
-| `POST /api/session-choice` | 更新会话级角色 / 世界书 / 管道 |
-| `POST /api/catalog/refresh` | 刷新角色与世界书清单 |
+| `GET /api/status` | 连接状态、下游状态、会话统计、日志、配置 |
+| `GET /api/logs` | 只取日志（轮询更轻） |
+| `GET /api/health` | 健康检查 |
+| `POST /api/config` | 更新全局配置（上游 / 分段 / 管道 / 图片表情） |
+| `GET /api/downstreams` | 下游实例列表 + 运行态 + 可选类型 |
+| `POST /api/downstreams` | 新增或更新下游实例 |
+| `DELETE /api/downstreams/:id` | 删除下游实例 |
+| `POST /api/downstreams/default` | 设置全局默认下游 |
+| `POST /api/downstreams/:id/test` | 用一句话验证某下游连通性 |
+| `POST /api/downstreams/:id/reset` | 清空某下游的会话上下文 |
+| `POST /api/downstreams/register` | **插件自注册**（需 token，仅本机） |
+| `GET /api/sessions` | 会话列表（含实际生效的下游） |
+| `POST /api/sessions/:key` | 更新会话级下游 / 角色 / 世界书 |
+| `POST /api/trigger` | 更新触发规则与消息长度上限 |
+| `GET /api/dsh/status` | dsh 安装探测与配置 |
+| `POST /api/dsh/service/{start,stop,restart}` | dsh 常驻服务管理 |
+| `POST /api/dsh/plugin/inject` | 把连接插件注入 dsh profile |
+| `GET /api/snowluma/discover` | 探测 SnowLuma 安装目录 |
+| `POST /api/snowluma/apply` | 一键对齐 SnowLuma 的 OneBot 配置 |
+| `POST /api/sillytavern/install` | 安装酒馆扩展 |
 | `POST /api/test-segments` | 预览分段结果 |
 | `POST /api/test-pipeline` | 预览管道处理结果 |
-| `GET /api/dsh/status` | dsh 安装探测、配置、会话上下文 |
-| `POST /api/dsh/test` | 用独立 `_test` 会话试调用 dsh |
-| `POST /api/dsh/backend` | 切换 `taver` / `dsh` 后端 |
-| `POST /api/dsh/config` | 更新 dsh 调用参数 |
-| `POST /api/dsh/reset` | 清空某会话 / 全部 dsh 上下文 |
 
 如果你没有 v2 后端，前端仍可启动，但各页面会显示「后端连接失败」，此时需要自行实现 `apps/server`。
 

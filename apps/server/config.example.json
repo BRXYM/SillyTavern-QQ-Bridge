@@ -1,10 +1,46 @@
 {
-    "onebotUrl": "ws://127.0.0.1:3001",
-    "onebotToken": "<YOUR_ONEBOT_TOKEN>",
-    "stExtPort": 9500,
+    "configVersion": 2,
     "consolePort": 9510,
+    "extPort": 9500,
+    "upstream": {
+        "url": "ws://127.0.0.1:3001",
+        "token": "<YOUR_ONEBOT_TOKEN>",
+        "reconnectMs": 5000,
+        "actionTimeoutMs": 15000
+    },
+    "downstreams": [
+        {
+            "id": "dsh",
+            "kind": "dsh-plugin",
+            "name": "dsh（DeepSeek Harness）",
+            "enabled": true,
+            "settings": {
+                "fallbackHeadless": true,
+                "exePath": "",
+                "profile": "headless",
+                "workRoot": "",
+                "timeoutMs": 180000,
+                "historyTurns": 6,
+                "persistHistory": true,
+                "concurrency": 1,
+                "systemPrompt": "",
+                "errorReply": "",
+                "serviceProfile": "web",
+                "servicePort": 3080,
+                "serviceLogFile": ""
+            }
+        },
+        {
+            "id": "tavern",
+            "kind": "sillytavern",
+            "name": "酒馆（SillyTavern）",
+            "enabled": false,
+            "settings": {}
+        }
+    ],
+    "defaultDownstreamId": "dsh",
     "trigger": {
-        "atOnly": false,
+        "atOnly": true,
         "privateReply": true,
         "allowedUsers": [],
         "allowedGroups": []
@@ -12,20 +48,9 @@
     "maxMessageLength": 2000,
     "replyProcessors": [],
     "defaults": {
-        "character": "雪乃",
-        "world": "雪之镇设定"
+        "character": "",
+        "world": ""
     },
-    "backend": "taver",
-    "dshExePath": "",
-    "dshProfile": "headless",
-    "dshWorkRoot": "",
-    "dshTimeoutMs": 180000,
-    "dshHistoryTurns": 6,
-    "dshSystemPrompt": "",
-    "dshErrorReply": "",
-    "dshPersistHistory": true,
-    "dshConcurrency": 1,
-    "stDataDir": "",
     "segmentation": {
         "enabled": true,
         "maxLen": 200,
@@ -34,33 +59,28 @@
         "hardChars": "。！？!?…",
         "softChars": "，,；;",
         "pairChars": [
-            [
-                "动作",
-                "*"
-            ],
-            [
-                "台词",
-                "\""
-            ],
-            [
-                "中文台词",
-                "“”"
-            ],
-            [
-                "括号动作",
-                "（）"
-            ]
+            ["动作", "*"],
+            ["台词", "\""],
+            ["中文台词", "“”"],
+            ["括号动作", "（）"]
         ],
         "splitStrings": [],
         "splitOnPairs": true,
-        "delayMs": [
-            300,
-            900
-        ]
+        "pairMinLen": 3,
+        "convertActionMarkers": true,
+        "delayMs": [300, 900]
     },
     "imageReplies": {
         "enabled": true,
         "instruction": true,
         "baseUrl": ""
-    }
+    },
+    "stDataDir": "",
+    "faces": {
+        "dataDir": "",
+        "ollamaBaseUrl": "http://127.0.0.1:11434",
+        "ollamaVisionModel": "qwen2.5vl:3b",
+        "ollamaTextModel": ""
+    },
+    "registrationToken": ""
 }

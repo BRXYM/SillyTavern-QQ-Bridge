@@ -3,17 +3,23 @@
     "version": "3.0.0",
     "private": true,
     "type": "module",
-    "description": "桥接后端：OneBot v11 连接器 + 酒馆扩展 WS 服务 + HTTP API（无内置网页）",
-    "main": "snowluma-bridge.mjs",
+    "description": "桥接后端：OneBot v11 上游 + 可配置下游适配器 + HTTP API",
+    "main": "src/index.ts",
     "scripts": {
-        "dev": "node snowluma-bridge.mjs",
-        "start": "node snowluma-bridge.mjs",
+        "dev": "node src/index.ts",
+        "start": "node src/index.ts",
+        "typecheck": "tsc --noEmit",
         "headless": "node st-headless.mjs"
     },
     "dependencies": {
+        "@bridge/core": "workspace:*",
+        "@bridge/shared": "workspace:*",
         "ws": "^8.18.0"
     },
     "devDependencies": {
-        "playwright-core": "^1.49.0"
+        "@types/node": "^22.10.2",
+        "@types/ws": "^8.18.2",
+        "playwright-core": "^1.49.0",
+        "typescript": "~5.9.3"
     }
 }

@@ -28,6 +28,12 @@ const routes = [
         meta: { title: '服务管理', desc: '协议端与酒馆', icon: 'Server', group: '服务' } satisfies NavMeta,
     },
     {
+        path: '/downstreams',
+        name: 'downstreams',
+        component: () => import('@/views/DownstreamsView.vue'),
+        meta: { title: '下游管理', desc: '谁来回这条消息', icon: 'Boxes', group: '服务' } satisfies NavMeta,
+    },
+    {
         path: '/dsh',
         name: 'dsh',
         component: () => import('@/views/DshView.vue'),

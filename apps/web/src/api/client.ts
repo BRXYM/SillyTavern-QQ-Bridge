@@ -1,6 +1,8 @@
 /**
- * 后端 API 客户端。
- * 开发时通过 Vite 代理访问 :9510；生产时同源。
+ * API 客户端。
+ *
+ * 与后端的契约以 apps/server/src/api/routes/*.ts 为准。
+ * 状态由后端组装好，这里只做类型声明，不推断业务。
  */
 
 export interface SessionStat {
@@ -9,7 +11,6 @@ export interface SessionStat {
     last: number;
 }
 
-/** 上游（SnowLuma / OneBot）连接详情 */
 export interface UpstreamStatus {
     connected: boolean;
     endpoint: string;
@@ -27,60 +28,29 @@ export interface UpstreamStatus {
     lastErrorAt: number | null;
 }
 
-/** 下游（酒馆扩展）连接详情 */
-export interface ExtensionClient {
-    id: number;
-    ext: string;
-    version: string;
-    connectedAt: number | null;
-    connectedForSec: number;
-    lastPingAt: number | null;
-}
-
-export interface ExtensionStatus {
-    port: number;
-    clientCount: number;
-    clients: ExtensionClient[];
-}
-
-export interface RuntimeMetrics {
-    sessionCount: number;
-    totalIn: number;
-    totalOut: number;
-    lastActiveAt: number | null;
-    characterCount: number;
-    worldCount: number;
-}
-
-export interface ProcessInfo {
-    pid: number;
-    nodeVersion: string;
-    platform: string;
-    arch: string;
-    uptimeSec: number;
-    startedAt: number;
-    rssMb: number;
-    heapUsedMb: number;
-    heapTotalMb: number;
-    externalMb: number;
-    /** 后端源码版本：改动代码后如果这个值没变，说明进程还是旧的 */
-    codeVersion?: string;
-    /** 后端入口文件最后修改时间（秒级） */
-    codeMtime?: number;
+/** 下游实例运行态 */
+export interface DownstreamStatusDto {
+    id: string;
+    kind: string;
+    name: string;
+    enabled: boolean;
+    available: boolean;
+    reason?: string;
+    detail?: Record<string, string | number | boolean>;
 }
 
 export interface SessionChoiceDto {
     character?: string;
     world?: string;
     replyProcessors?: unknown[];
-    /** 会话级后端；缺失 = 继承全局 cfg.backend */
-    backend?: 'taver' | 'dsh';
+    /** 会话级下游实例 id；缺失 = 继承全局 defaultDownstreamId */
+    backendId?: string;
     createdAt?: string;
     updatedAt?: string;
 }
 
-/** 会话实际生效的后端（含继承信息） */
-export type SessionBackendDto = 'taver' | 'dsh';
+/** 会话实际生效的下游实例 id */
+export type SessionBackendDto = string;
 
 export interface CatalogDto {
     characters: string[];
@@ -94,16 +64,48 @@ export interface StatusDto {
     selfId: string;
     sessions: Record<string, SessionStat>;
     sessionChoices: Record<string, SessionChoiceDto>;
-    /** 每个会话实际生效的后端：{ key: { backend, inherited } } */
-    sessionBackends?: Record<string, { backend: SessionBackendDto; inherited: boolean }>;
+    /** 每个会话实际生效的下游：{ key: { backendId, inherited } } */
+    sessionBackends?: Record<string, { backendId: SessionBackendDto; inherited: boolean }>;
+    /** 下游实例与状态 */
+    downstreams?: DownstreamStatusDto[];
+    defaultDownstreamId?: string;
     catalogs: CatalogDto;
     config: Record<string, unknown>;
-    // 新增详细状态（后端可能先于前端升级，故设为可选）
     generatedAt?: number;
     upstream?: UpstreamStatus;
-    extension?: ExtensionStatus;
-    metrics?: RuntimeMetrics;
-    process?: ProcessInfo;
+    metrics?: {
+        sessionCount: number;
+        totalIn: number;
+        totalOut: number;
+        lastActiveAt: number | null;
+    };
+    process?: {
+        pid: number;
+        nodeVersion: string;
+        platform: string;
+        arch: string;
+        uptimeSec: number;
+        startedAt: number;
+        rssMb: number;
+        heapUsedMb: number;
+        heapTotalMb: number;
+        externalMb?: number;
+        codeVersion?: string;
+    };
+    /** 酒馆扩展连接摘要 */
+    extension?: {
+        port: number;
+        clientCount: number;
+        clients: Array<{
+            id: number;
+            ext: string;
+            version: string;
+            connectedAt: number | null;
+            connectedForSec: number;
+            lastPingAt: number | null;
+        }>;
+    };
+    logs?: string[];
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -111,58 +113,225 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
         ...init,
     });
-    if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`${res.status} ${res.statusText}${text ? `: ${text}` : ''}`);
+    const text = await res.text();
+    let body: unknown;
+    try {
+        body = JSON.parse(text);
+    } catch {
+        body = text;
     }
-    const ct = res.headers.get('content-type') ?? '';
-    return ct.includes('application/json')
-        ? ((await res.json()) as T)
-        : ((await res.text()) as unknown as T);
+    if (!res.ok) {
+        const msg =
+            typeof body === 'object' && body && 'error' in body
+                ? String((body as { error: unknown }).error)
+                : `${res.status} ${res.statusText}`;
+        throw new Error(msg);
+    }
+    return body as T;
+}
+
+
+// ---------------- SnowLuma（上游本体管理） ----------------
+export interface SnowLumaProbe {
+    ok: boolean;
+    dir: string;
+    configDir: string;
+    dataDir: string;
+    mode: 'release' | 'source' | 'flat' | '';
+    reason: string;
+    version: string;
+    hasConfig: boolean;
+    error: string;
+    accounts: Array<{ uin: string; hasIdentityDb: boolean; updatedAt: string | null }>;
+    /** 同目录下的其他可用配置（旧版前端用到，保留兼容） */
+    alternatives?: Array<{
+        configDir: string;
+        dataDir: string;
+        mode: string;
+        version: string;
+    }>;
+    onebotPortListening: boolean;
+    onebotPort: number;
+}
+
+export interface SnowLumaDiscoverResult {
+    found: boolean;
+    dir: string;
+    source: string;
+    candidates: Array<{
+        dir: string;
+        source: string;
+        ok?: boolean;
+        version?: string;
+        mode?: string;
+        accounts?: string[];
+    }>;
+    tried: string[];
+    error?: string;
+}
+
+export interface SnowLumaApplyResult {
+    ok: boolean;
+    changed: boolean;
+    created: boolean;
+    path: string;
+    token: string;
+    endpoint: string;
+    configDir: string;
+    dataDir: string;
+    mode: string;
+    version: string;
+    needRestart: boolean;
+    error?: string;
+}
+
+// ---------------- SillyTavern（酒馆本体管理） ----------------
+export interface SillyTavernProbe {
+    ok: boolean;
+    dir: string;
+    extDir: string;
+    installed: boolean;
+    installedVersion: string;
+    version: string;
+    files: string[];
+    error: string;
+    port: number;
+    endpoint: string;
+    running: boolean;
+    extConnected: boolean;
+    extPort: number;
+}
+
+export interface SillyTavernDiscoverResult {
+    found: boolean;
+    dir: string;
+    source: string;
+    candidates: Array<{
+        dir: string;
+        source: string;
+        ok?: boolean;
+        version?: string;
+        mode?: string;
+        installed?: boolean;
+        installedVersion?: string;
+        extDir?: string;
+    }>;
+    tried: string[];
+    error?: string;
+}
+
+export interface ExtensionInstallResult {
+    ok: boolean;
+    action: string;
+    target: string;
+    version: string;
+    files: string[];
+    needRefresh: boolean;
+    error: string;
 }
 
 export const api = {
     status: () => request<StatusDto>('/status'),
 
+    logs: (limit = 200) => request<{ ok: boolean; logs: string[] }>(`/logs?limit=${limit}`),
+
     updateConfig: (patch: Record<string, unknown>) =>
-        request<{ ok: boolean }>('/config', {
+        request<{ ok: boolean; config: Record<string, unknown> }>('/config', {
             method: 'POST',
             body: JSON.stringify(patch),
         }),
+
+    // ---------------- 会话 ----------------
+    sessions: () =>
+        request<{
+            ok: boolean;
+            sessions: Array<{
+                sessionKey: string;
+                choice: SessionChoiceDto | null;
+                stat: SessionStat;
+                resolved: { backendId: string; inherited: boolean; character: string; world: string };
+            }>;
+        }>('/sessions'),
 
     updateSession: (payload: {
         sessionKey: string;
         character?: string;
         world?: string;
         replyProcessors?: unknown[];
-        /** 'taver' / 'dsh' = 会话级；'' = 清除会话级设置，继承全局 */
-        backend?: SessionBackendDto | '';
-        reset?: boolean | 'pipeline';
+        /** 下游实例 id；'' = 清除会话级设置，继承全局 */
+        backendId?: SessionBackendDto | '';
+        reset?: boolean;
     }) =>
-        request<{
-            ok: boolean;
-            sessions: Record<string, SessionChoiceDto>;
-            sessionBackends?: Record<string, { backend: SessionBackendDto; inherited: boolean }>;
-        }>('/session-choice', {
+        request<{ ok: boolean; sessionKey: string; resolved?: { backendId: string; inherited: boolean } }>(
+            `/sessions/${encodeURIComponent(payload.sessionKey)}`,
+            { method: 'POST', body: JSON.stringify(payload) },
+        ),
+
+    // ---------------- 触发规则 ----------------
+    trigger: () => request<{ ok: boolean; trigger: Record<string, unknown>; maxMessageLength: number }>('/trigger'),
+
+    updateTrigger: (payload: { trigger?: Record<string, unknown>; maxMessageLength?: number }) =>
+        request<{ ok: boolean; trigger: Record<string, unknown> }>('/trigger', {
             method: 'POST',
             body: JSON.stringify(payload),
         }),
 
-    refreshCatalog: () => request<{ ok: boolean; catalogs: CatalogDto }>('/catalog/refresh'),
+    // ---------------- 下游 ----------------
+    downstreams: () =>
+        request<{
+            ok: boolean;
+            defaultDownstreamId: string;
+            registered: Array<{ id: string; kind: string; name: string; enabled: boolean; settings: Record<string, unknown> }>;
+            status: DownstreamStatusDto[];
+            kinds: Array<{ kind: string; label: string; description: string }>;
+        }>('/downstreams'),
 
-    testSegmentation: (text: string, config: Record<string, unknown>) =>
-        request<{ ok: boolean; segments: Array<{ text: string; delayMs: number }> }>(
-            '/test-segments',
-            { method: 'POST', body: JSON.stringify({ text, config }) },
+    saveDownstream: (payload: {
+        id: string;
+        kind: string;
+        name?: string;
+        enabled?: boolean;
+        settings?: Record<string, unknown>;
+    }) =>
+        request<{ ok: boolean; error?: string; downstream: unknown; status: DownstreamStatusDto[] }>('/downstreams', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        }),
+
+    deleteDownstream: (id: string) =>
+        request<{ ok: boolean; error?: string }>(`/downstreams/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+    setDefaultDownstream: (id: string) =>
+        request<{ ok: boolean; defaultDownstreamId: string }>('/downstreams/default', {
+            method: 'POST',
+            body: JSON.stringify({ id }),
+        }),
+
+    testDownstream: (id: string, payload: { text?: string; sessionKey?: string } = {}) =>
+        request<{ ok: boolean; text: string; elapsedMs: number; error?: string; sessionKey: string }>(
+            `/downstreams/${encodeURIComponent(id)}/test`,
+            { method: 'POST', body: JSON.stringify(payload) },
         ),
 
+    resetDownstream: (id: string, payload: { sessionKey?: string; all?: boolean; removeWorkDir?: boolean } = {}) =>
+        request<{ ok: boolean; cleared?: number; existed?: boolean }>(
+            `/downstreams/${encodeURIComponent(id)}/reset`,
+            { method: 'POST', body: JSON.stringify(payload) },
+        ),
+
+    // ---------------- 预览 ----------------
+    testSegmentation: (text: string, config: Record<string, unknown>) =>
+        request<{ ok: boolean; segments: Array<{ text: string; delayMs: number }> }>('/test-segments', {
+            method: 'POST',
+            body: JSON.stringify({ text, config }),
+        }),
+
     testPipeline: (text: string, rules: unknown[]) =>
-        request<{ result: string }>('/test-pipeline', {
+        request<{ ok: boolean; input: string; output: string }>('/test-pipeline', {
             method: 'POST',
             body: JSON.stringify({ text, rules }),
         }),
-
-    // ---- SnowLuma 服务集成 ----
+    // ---------------- 上游本体管理 ----------------
     discoverSnowLuma: (known?: string) =>
         request<SnowLumaDiscoverResult>(
             '/snowluma/discover' + (known ? '?known=' + encodeURIComponent(known) : ''),
@@ -170,8 +339,7 @@ export const api = {
 
     probeSnowLuma: (dir: string, webuiPort?: number) =>
         request<SnowLumaProbe>(
-            '/snowluma/probe?dir=' + encodeURIComponent(dir) +
-                (webuiPort ? '&port=' + webuiPort : ''),
+            '/snowluma/probe?dir=' + encodeURIComponent(dir) + (webuiPort ? '&port=' + webuiPort : ''),
         ),
 
     applySnowLuma: (payload: {
@@ -189,11 +357,10 @@ export const api = {
 
     readSnowLumaConfig: (uin: string, dir?: string) =>
         request<{ ok: boolean; exists: boolean; path: string; config: unknown }>(
-            '/snowluma/config?uin=' + encodeURIComponent(uin) +
-                (dir ? '&dir=' + encodeURIComponent(dir) : ''),
+            '/snowluma/config?uin=' + encodeURIComponent(uin) + (dir ? '&dir=' + encodeURIComponent(dir) : ''),
         ),
 
-    // ---- SillyTavern 服务集成 ----
+    // ---------------- 下游本体管理 ----------------
     discoverSillyTavern: (known?: string) =>
         request<SillyTavernDiscoverResult>(
             '/sillytavern/discover' + (known ? '?known=' + encodeURIComponent(known) : ''),
@@ -201,118 +368,21 @@ export const api = {
 
     probeSillyTavern: (dir: string, port?: number) =>
         request<SillyTavernProbe>(
-            '/sillytavern/probe?dir=' + encodeURIComponent(dir) +
-                (port ? '&port=' + port : ''),
+            '/sillytavern/probe?dir=' + encodeURIComponent(dir) + (port ? '&port=' + port : ''),
         ),
 
     installSillyTavernExtension: (payload: { dir: string; force?: boolean }) =>
-        request<{
-            ok: boolean;
-            action: 'installed' | 'updated' | 'unchanged';
-            target: string;
-            version: string;
-            files: string[];
-            needRefresh: boolean;
-            sourceDir: string;
-            error?: string;
-        }>('/sillytavern/install', {
+        request<ExtensionInstallResult>('/sillytavern/install', {
             method: 'POST',
             body: JSON.stringify(payload),
         }),
 
     uninstallSillyTavernExtension: (dir: string) =>
-        request<{ ok: boolean; action: string; needRefresh: boolean; error?: string }>(
-            '/sillytavern/uninstall',
-            { method: 'POST', body: JSON.stringify({ dir }) },
-        ),
+        request<ExtensionInstallResult>('/sillytavern/uninstall', {
+            method: 'POST',
+            body: JSON.stringify({ dir }),
+        }),
+
+    refreshCatalog: () =>
+        request<{ ok: boolean; catalogs: CatalogDto }>('/catalog/refresh'),
 };
-
-/** 自动发现结果 */
-export interface SnowLumaDiscoverResult {
-    found: boolean;
-    dir: string;
-    source: string;
-    candidates: Array<{
-        dir: string;
-        source: string;
-        ok: boolean;
-        version: string;
-        mode: string;
-        accounts: string[];
-    }>;
-    tried: string[];
-    error?: string;
-}
-
-/** SnowLuma 目录探测结果 */
-export interface SnowLumaProbe {
-    ok: boolean;
-    dir: string;
-    configDir: string;
-    dataDir: string;
-    mode: 'release' | 'source' | 'flat' | '';
-    reason: string;
-    version: string;
-    hasConfig: boolean;
-    error: string;
-    accounts: Array<{ uin: string; hasIdentityDb: boolean; updatedAt: string | null }>;
-    onebotPortListening: boolean;
-    onebotPort: number;
-    alternatives: Array<{
-        mode: string;
-        configDir: string;
-        dataDir: string;
-        onebotFiles: number;
-        accounts: number;
-    }>;
-}
-
-/** 一键配置结果 */
-export interface SnowLumaApplyResult {
-    ok: boolean;
-    changed: boolean;
-    created: boolean;
-    path: string;
-    token: string;
-    endpoint: string;
-    configDir: string;
-    dataDir: string;
-    mode: string;
-    version: string;
-    needRestart: boolean;
-    error?: string;
-}
-
-/** 酒馆自动发现结果 */
-export interface SillyTavernDiscoverResult {
-    found: boolean;
-    dir: string;
-    source: string;
-    candidates: Array<{
-        dir: string;
-        source: string;
-        ok: boolean;
-        installed: boolean;
-        installedVersion: string;
-    }>;
-    tried: string[];
-    error?: string;
-}
-
-/** 酒馆探测结果 */
-export interface SillyTavernProbe {
-    ok: boolean;
-    dir: string;
-    extDir: string;
-    installed: boolean;
-    installedVersion: string;
-    /** 酒馆主程序版本 */
-    version: string;
-    files: string[];
-    error: string;
-    port: number;
-    endpoint: string;
-    running: boolean;
-    extConnected: boolean;
-    extPort: number;
-}

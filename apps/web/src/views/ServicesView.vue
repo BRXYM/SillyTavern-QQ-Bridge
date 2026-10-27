@@ -56,8 +56,8 @@ async function doDiscover(opts: { silent?: boolean } = {}) {
 
         if (best) {
             snowDir.value = best.dir;
-            if (best.accounts.length > 0 && !snowUin.value) {
-                snowUin.value = best.accounts[0]!;
+            if ((best.accounts ?? []).length > 0 && !snowUin.value) {
+                snowUin.value = (best.accounts ?? [])[0]!;
             }
             // 进入页面时的自动检测不弹通知
             if (!opts.silent) {
@@ -517,15 +517,15 @@ onMounted(async () => {
                                     v-for="c in discoverResult.candidates"
                                     :key="c.dir"
                                     class="flex w-full items-center gap-2 rounded-md border border-border/50 bg-card px-2.5 py-2 text-left transition-colors hover:border-primary/40 hover:bg-accent/30"
-                                    @click="useCandidate(c.dir, c.accounts)"
+                                    @click="useCandidate(c.dir, c.accounts ?? [])"
                                 >
                                     <div class="min-w-0 flex-1">
                                         <p class="truncate font-mono text-[11px]">{{ c.dir }}</p>
                                         <p class="mt-0.5 truncate text-[11px] text-muted-foreground">
                                             {{ c.source }}
                                             <span v-if="c.version" class="ml-1">· v{{ c.version }}</span>
-                                            <span v-if="c.accounts.length" class="ml-1 text-primary">
-                                                · {{ c.accounts.join(', ') }}
+                                            <span v-if="(c.accounts ?? []).length" class="ml-1 text-primary">
+                                                · {{ (c.accounts ?? []).join(', ') }}
                                             </span>
                                         </p>
                                     </div>

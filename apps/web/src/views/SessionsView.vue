@@ -190,17 +190,21 @@ async function setWorld(key: string, value: string) {
     }
 }
 
-/** 会话级后端：'taver' / 'dsh' / ''（继承全局） */
-async function setBackend(key: string, value: 'taver' | 'dsh' | '') {
+/**
+ * 会话级下游。
+ *
+ * 下游是「实例」而不是固定枚举：后端配置里可以有多个（dsh、dsh-e2e、酒馆…），
+ * 这里直接把它们列出来。value='' 表示继承全局默认。
+ */
+async function setDownstream(key: string, value: string) {
     try {
-        await api.updateSession({ sessionKey: key, backend: value });
+        await api.updateSession({ sessionKey: key, backendId: value });
         await store.refresh();
         if (value === '') {
-            toast.info('已改为继承全局', `${key} → ${globalBackendLabel.value}`);
-        } else if (value === 'dsh') {
-            toast.success('该会话切换为 dsh', `${key} 的消息不再经过酒馆角色卡`);
+            toast.info('已改为继承全局', `${key} → ${globalDownstreamLabel.value}`);
         } else {
-            toast.success('该会话切换为酒馆', `${key} 的消息由酒馆角色对话接管`);
+            const name = downstreamName(value);
+            toast.success('该会话已切换下游', `${key} → ${name}`);
         }
     } catch (e) {
         toast.error('切换失败', e instanceof Error ? e.message : String(e));
@@ -225,28 +229,48 @@ function effective(key: string, field: 'character' | 'world'): { value: string; 
     return { value: d, inherited: true };
 }
 
-// ---------------- 会话级后端 ----------------
-/** 全局后端（cfg.backend），会话未单独指定时使用 */
-const globalBackend = computed<'taver' | 'dsh'>(
-    () => (store.status?.config['backend'] === 'dsh' ? 'dsh' : 'taver'),
-);
+// ---------------- 会话级下游 ----------------
 
-const globalBackendLabel = computed(() => (globalBackend.value === 'dsh' ? 'dsh' : '酒馆'));
+/** 可选的下游实例（来自后端状态） */
+const downstreamList = computed(() => store.status?.downstreams ?? []);
 
-const backendOptions = [
-    { value: '', label: '继承全局' },
-    { value: 'taver', label: '酒馆（角色对话）' },
-    { value: 'dsh', label: 'dsh（DeepSeek Harness）' },
-];
+/** 全局默认下游 id */
+const globalDownstreamId = computed(() => store.status?.defaultDownstreamId ?? '');
 
-/** 该会话实际生效的后端（后端已算好则直接用，避免前端重复推断） */
-function effectiveBackend(key: string): { backend: 'taver' | 'dsh'; inherited: boolean } {
+/** 全局默认下游的显示名 */
+const globalDownstreamLabel = computed(() => downstreamName(globalDownstreamId.value));
+
+/** 某 id 的显示名（找不到时原样显示 id） */
+function downstreamName(id: string): string {
+    if (!id) return '(未设置)';
+    const hit = downstreamList.value.find((d) => d.id === id);
+    return hit ? hit.name || hit.id : id;
+}
+
+/** 下拉选项：继承 + 所有已注册实例 */
+const downstreamOptions = computed(() => [
+    { value: '', label: `继承全局（${globalDownstreamLabel.value}）` },
+    ...downstreamList.value.map((d) => ({
+        value: d.id,
+        label: `${d.name || d.id}${d.available ? '' : '（离线）'}`,
+    })),
+]);
+
+/** 该会话实际生效的下游（后端已算好则直接用） */
+function effectiveDownstream(key: string): { backendId: string; inherited: boolean } {
     const fromServer = store.status?.sessionBackends?.[key];
     if (fromServer) return fromServer;
-    const own = store.status?.sessionChoices[key]?.backend;
-    if (own === 'dsh' || own === 'taver') return { backend: own, inherited: false };
-    return { backend: globalBackend.value, inherited: true };
+    const own = store.status?.sessionChoices[key]?.backendId;
+    if (own) return { backendId: own, inherited: false };
+    return { backendId: globalDownstreamId.value, inherited: true };
 }
+
+/** 该下游是否是 dsh（用于配色与文案） */
+function isDsh(id: string): boolean {
+    const hit = downstreamList.value.find((d) => d.id === id);
+    return hit ? hit.kind.startsWith('dsh') : id.startsWith('dsh');
+}
+
 </script>
 
 <template>
@@ -393,7 +417,7 @@ function effectiveBackend(key: string): { backend: 'taver' | 'dsh'; inherited: b
                     </p>
                 </div>
                 <UiBadge tone="outline" class="text-micro">
-                    全局后端：{{ globalBackendLabel }}
+                    全局默认：{{ globalDownstreamLabel }}
                 </UiBadge>
             </div>
 
@@ -410,12 +434,12 @@ function effectiveBackend(key: string): { backend: 'taver' | 'dsh'; inherited: b
                             <UiBadge tone="outline" class="font-mono text-micro">{{ key }}</UiBadge>
                             <UiBadge v-if="!store.status?.sessionChoices[key]" tone="success">新</UiBadge>
                             <UiBadge
-                                :tone="effectiveBackend(key).backend === 'dsh' ? 'info' : 'success'"
+                                :tone="isDsh(effectiveDownstream(key).backendId) ? 'info' : 'success'"
                                 dot
                                 class="text-micro"
                             >
-                                {{ effectiveBackend(key).backend === 'dsh' ? 'dsh' : '酒馆' }}
-                                <span v-if="effectiveBackend(key).inherited" class="opacity-70">（继承）</span>
+                                {{ downstreamName(effectiveDownstream(key).backendId) }}
+                                <span v-if="effectiveDownstream(key).inherited" class="opacity-70">（继承）</span>
                             </UiBadge>
                         </div>
                         <button
@@ -428,15 +452,15 @@ function effectiveBackend(key: string): { backend: 'taver' | 'dsh'; inherited: b
 
                     <!-- 回复后端：dsh / 酒馆角色对话 -->
                     <div class="mb-3">
-                        <label class="text-xs font-medium text-muted-foreground">回复后端</label>
+                        <label class="text-xs font-medium text-muted-foreground">回复下游</label>
                         <UiSelect
-                            :model-value="store.status?.sessionChoices[key]?.backend ?? ''"
-                            :options="backendOptions"
+                            :model-value="store.status?.sessionChoices[key]?.backendId ?? ''"
+                            :options="downstreamOptions"
                             class="mt-1"
-                            @update:model-value="(v: string) => setBackend(key, v as 'taver' | 'dsh' | '')"
+                            @update:model-value="(v: string) => setDownstream(key, v)"
                         />
                         <p class="mt-1 text-[11px] text-muted-foreground/70">
-                            <template v-if="effectiveBackend(key).backend === 'dsh'">
+                            <template v-if="isDsh(effectiveDownstream(key).backendId)">
                                 该会话交给 dsh 直接回答，不使用下方角色卡；群聊 @ / 私聊开关与白名单仍然生效
                             </template>
                             <template v-else>
@@ -447,7 +471,7 @@ function effectiveBackend(key: string): { backend: 'taver' | 'dsh'; inherited: b
 
                     <div
                         class="grid gap-3 sm:grid-cols-2"
-                        :class="effectiveBackend(key).backend === 'dsh' ? 'opacity-60' : ''"
+                        :class="isDsh(effectiveDownstream(key).backendId) ? 'opacity-60' : ''"
                     >
                         <div>
                             <div class="flex items-center justify-between">
@@ -486,7 +510,7 @@ function effectiveBackend(key: string): { backend: 'taver' | 'dsh'; inherited: b
                     </div>
 
                     <p class="mt-2 text-[11px] text-muted-foreground/70">
-                        <template v-if="effectiveBackend(key).backend === 'dsh'">
+                        <template v-if="isDsh(effectiveDownstream(key).backendId)">
                             dsh 会以所选角色作为人设提示，但不加载酒馆世界书全文
                         </template>
                         <template v-else>

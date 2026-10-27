@@ -84,6 +84,12 @@ export function apply(ctx, config = {}) {
     const url = String(config.url || process.env.SNOWLUMA_BRIDGE_URL || DEFAULT_URL).trim();
     const token = String(config.token || process.env.SNOWLUMA_BRIDGE_TOKEN || '').trim();
     const cwdRoot = String(config.cwdRoot || '').trim();
+    /**
+     * 注册成哪个下游实例 id。
+     * 留空由 Bridge 按类型分配；指定时必须是 Bridge 里已存在的 id，
+     * 否则会退化成按类型兜底。
+     */
+    const downstreamId = String(config.downstreamId || 'dsh').trim();
 
     const log = (msg) => console.log(`[snowluma] ${msg}`);
 
@@ -286,7 +292,11 @@ export function apply(ctx, config = {}) {
                 retryMs = RECONNECT_MIN_MS;
                 log(`已连接 Bridge：${url}`);
                 client.send({
-                    type: 'dsh_hello',
+                    type: 'hello',
+                    // 下游统一协议字段
+                    kind: 'dsh-plugin',
+                    // 指定注册到哪个实例；空则由 Bridge 按类型分配
+                    downstreamId: downstreamId,
                     token,
                     mode: 'plugin',
                     version: PLUGIN_VERSION,
