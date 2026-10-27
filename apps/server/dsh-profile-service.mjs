@@ -27,6 +27,35 @@ export function dshHome() {
     return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
 }
 
+/**
+ * 判断当前 home 是否像「以系统身份运行」导致的错误目录。
+ *
+ * Bridge 被注册成 Windows 服务、或用管理员/SYSTEM 身份启动时，
+ * os.homedir() 会返回 systemprofile，于是去操作一个空的 .dsh ——
+ * 表现为「安装成功但用户自己的 dsh 没有变化」，极难排查。
+ *
+ * 这里只做**检测与提示**，不擅自改路径：用户可能真的用 DSH_HOME 指定了位置。
+ */
+export function detectHomeMismatch(home = dshHome()) {
+    const normalized = String(home).replace(/\//g, '\\').toLowerCase();
+    const suspicious = [
+        '\\windows\\system32\\config\\systemprofile',
+        '\\windows\\syswow64\\config\\systemprofile',
+        '/var/root',
+    ];
+    const hit = suspicious.find((s) => normalized.includes(s));
+    if (!hit) return null;
+
+    return {
+        home,
+        reason: '当前进程以系统身份运行，HOME 指向系统账户目录',
+        hint: '请在与你登录桌面同一个用户下启动 Bridge，或显式设置 DSH_HOME 指向你的 ~/.dsh',
+        actualDshDirs: process.env.USERPROFILE && process.env.USERPROFILE !== home
+            ? [path.join(process.env.USERPROFILE, '.dsh')]
+            : [],
+    };
+}
+
 export function profilesRoot(home = dshHome()) {
     return path.join(home, 'profiles');
 }
@@ -130,6 +159,20 @@ const PATCH_BEGIN = `# >>> snowluma-bridge-connector（由 SnowLuma Bridge 自�
 const PATCH_END = `# <<< snowluma-bridge-connector`;
 
 /** 把插件的 patch 行写进 profile 的 cordis.patch.yml（保留用户其它内容） */
+/**
+ * 把插件的 patch 行写进 profile 的 cordis.patch.yml（保留用户其它内容）。
+ *
+ * YAML 约束（曾经踩过的坑）：
+ *   dsh 新建的 profile 里 cordis.patch.yml 内容是 `[]` —— 一个**完整的空列表文档**。
+ *   直接在后面追加 `- id: xxx` 会变成两个文档连在一起，缺少 `---` 分隔符，
+ *   解析器会报 "end of the stream or a document separator is expected"。
+ *
+ *   所以必须先判断文件的实际形态：
+ *     - 空文件 / 只有注释        → 直接写条目
+ *     - 仅一个 `[]`              → 用条目替换掉它
+ *     - 已有条目（`- id:` 开头） → 追加
+ *     - 其它复杂结构              → 用 `---` 另起一个文档，绝不破坏原内容
+ */
 function upsertPatchRow(profileDir, config) {
     const file = path.join(profileDir, 'cordis.patch.yml');
     let raw = '';
@@ -140,15 +183,55 @@ function upsertPatchRow(profileDir, config) {
     }
     const block = `${PATCH_BEGIN}\n${renderPatchBlock(config)}\n${PATCH_END}\n`;
 
+    // 已有本插件的块：原地替换（幂等）
     const begin = raw.indexOf(PATCH_BEGIN);
     if (begin >= 0) {
         const endIdx = raw.indexOf(PATCH_END, begin);
         const after = endIdx >= 0 ? raw.slice(endIdx + PATCH_END.length).replace(/^\r?\n/, '') : '';
         raw = raw.slice(0, begin) + block + after;
-    } else {
-        raw = `${raw.trimEnd()}\n\n${block}`;
+        fs.writeFileSync(file, raw, 'utf8');
+        return;
     }
-    fs.writeFileSync(file, raw, 'utf8');
+
+    const body = stripComments(raw).trim();
+
+    // 空文件（或只剩注释/空白）：直接写条目
+    if (body === '') {
+        fs.writeFileSync(file, block, 'utf8');
+        return;
+    }
+
+    // 只有一个空列表 `[]`：用它替换，而不是追加
+    if (body === '[]') {
+        // 保留原文件里的注释行（dsh 的模板注释对用户有说明价值）
+        const comments = raw
+            .split(/\r?\n/)
+            .filter((l) => l.trim().startsWith('#'))
+            .join('\n');
+        const head = comments ? `${comments}\n` : '';
+        fs.writeFileSync(file, `${head}${block}`, 'utf8');
+        return;
+    }
+
+    // 已经是「顶层列表」：直接追加，语义正确
+    if (body.startsWith('- ') || body.startsWith('-\n') || body === '-') {
+        fs.writeFileSync(file, `${raw.trimEnd()}\n\n${block}`, 'utf8');
+        return;
+    }
+
+    // 其它结构（顶层映射、多文档等）：用文档分隔符另起一段，绝不破坏原内容
+    fs.writeFileSync(file, `${raw.trimEnd()}\n\n---\n${block}`, 'utf8');
+}
+
+/** 去掉 YAML 注释与空行，只留结构本体，用于判断文件形态 */
+function stripComments(raw) {
+    return raw
+        .split(/\r?\n/)
+        .filter((l) => {
+            const t = l.trim();
+            return t !== '' && !t.startsWith('#');
+        })
+        .join('\n');
 }
 
 /** 从 cordis.patch.yml 里摘掉插件的 patch 行 */

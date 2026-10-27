@@ -81,6 +81,12 @@ declare module '*dsh-profile-service.mjs' {
     export function profilesRoot(home?: string): string;
     export function resolveProfileDir(profile: string, home?: string): string;
     export function pluginTargetDir(home?: string): string;
+    export function detectHomeMismatch(home?: string): {
+        home: string;
+        reason: string;
+        hint: string;
+        actualDshDirs: string[];
+    } | null;
 
     export interface ProfileInfo {
         profile: string;

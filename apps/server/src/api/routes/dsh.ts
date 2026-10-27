@@ -23,6 +23,7 @@ import {
     removePlugin,
     verifyInjection,
     dshHome,
+    detectHomeMismatch,
 } from '../../../dsh-profile-service.mjs';
 import { findDsh, listProfiles, invalidateDshProbe } from '../../../dsh-service.mjs';
 import { log } from '../../core/logger.ts';
@@ -184,6 +185,20 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
             return;
         }
 
+        // ---- 2.5) 检查 HOME 是否指向系统账户目录 ----
+        // 以系统身份运行时这里会操作一个空的 .dsh，用户自己的 dsh 不会有任何变化
+        const mismatch = detectHomeMismatch(dshHome());
+        if (mismatch) {
+            json(res, 400, {
+                ok: false,
+                stage: 'precheck',
+                error: `dsh 目录异常：${mismatch.reason}`,
+                homeCheck: mismatch,
+                message: `${mismatch.hint}（当前：${mismatch.home}）`,
+            });
+            return;
+        }
+
         // ---- 3) 注入（复制文件 + 写 bundles + 写 patch 配置）----
         const inject = injectPlugin({
             profile,
@@ -204,14 +219,37 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
         log(`dsh：连接插件已${inject.action === 'injected' ? '安装' : '更新'}到 profile ${profile}`);
 
         // ---- 4) 校验组合结果（--dump-config 里必须出现插件行）----
+        // 校验不通过说明 patch/bundles 写坏了，此时**绝不能重启**——
+        // 否则会把本来在跑的服务打成起不来（真实踩过的坑）。
         let verified: { ok: boolean; error: string } | null = null;
         if (body.verify !== false) {
             const v = verifyInjection({ exePath: settings.exePath, profile, home: dshHome() });
             verified = v;
             log(v.ok ? 'dsh：插件已进入 profile 组合结果' : `dsh：插件校验未通过 —— ${v.error}`);
+
+            if (!v.ok) {
+                // 回滚：撤掉刚写入的配置，让 profile 回到可用状态
+                const rollback = removePlugin({ profile, home: dshHome() });
+                log(rollback.ok
+                    ? `dsh：已回滚插件注入（profile ${profile}）`
+                    : `dsh：回滚失败 —— ${rollback.error}`);
+
+                json(res, 400, {
+                    ok: false,
+                    stage: 'verify',
+                    error: `插件校验失败，已回滚：${v.error}`,
+                    verified,
+                    inject,
+                    rolledBack: rollback.ok,
+                    restart: null,
+                    online: false,
+                    message: '配置写入后 dsh 无法解析，已撤回改动；服务未重启。',
+                });
+                return;
+            }
         }
 
-        // ---- 5) 重启服务让插件生效 ----
+        // ---- 5) 重启服务让插件生效（仅在校验通过时）----
         let restart: { ok: boolean; error?: string; pid?: number } | null = null;
         if (body.restart !== false) {
             const r = await app.dshService().restart();
