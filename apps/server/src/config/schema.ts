@@ -23,6 +23,28 @@ export interface TriggerConfig {
 }
 
 /**
+ * 会话准入（黑白名单）。
+ *
+ * 与 trigger 的区别：trigger 决定"要不要处理这条消息"，
+ * 会话准入决定"这个对象是否有资格和机器人互动"。
+ * 前者是行为开关，后者是身份门槛 —— 分开配置避免互相牵制。
+ */
+export interface SessionAccessConfig {
+    /** 黑名单：这些 QQ 号永远拒绝（优先级最高） */
+    denyUsers: number[];
+    /** 黑名单：这些群永远拒绝 */
+    denyGroups: number[];
+    /** 白名单：非空时只允许这些 QQ 号（含新会话） */
+    allowUsers: number[];
+    /** 白名单：非空时只允许这些群 */
+    allowGroups: number[];
+    /** 新会话（无配置且不在任何名单里）的策略 */
+    unknownPolicy: 'allow' | 'deny';
+    /** 拒绝时回给 QQ 的一句话；空 = 静默 */
+    denyReply: string;
+}
+
+/**
  * 分段配置：与 shared 一致，但 delayMs 用元组表达范围。
  * shared 里已声明为 [min, max]，这里直接别名。
  */
@@ -87,6 +109,8 @@ export interface BridgeConfig {
     /** 会话未指定时使用的下游 id；空 = 用列表里第一个启用的 */
     defaultDownstreamId: string;
     trigger: TriggerConfig;
+    /** 会话准入：身份门槛（黑白名单） */
+    sessionAccess: SessionAccessConfig;
     maxMessageLength: number;
     replyProcessors: ProcessorRule[];
     defaults: DefaultsConfig;
@@ -182,6 +206,14 @@ export const DEFAULT_CONFIG: BridgeConfig = {
         privateReply: true,
         allowedUsers: [],
         allowedGroups: [],
+    },
+    sessionAccess: {
+        denyUsers: [],
+        denyGroups: [],
+        allowUsers: [],
+        allowGroups: [],
+        unknownPolicy: 'allow',
+        denyReply: '',
     },
     maxMessageLength: 2000,
     replyProcessors: [],

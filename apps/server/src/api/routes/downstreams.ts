@@ -242,9 +242,6 @@ function parseDownstreamBody(
         return { error: 'settings 必须是对象' };
     }
 
-    // 准入名单：两个数组，元素转成数字 QQ 号
-    const access = parseAccess(body.access);
-
     return {
         value: {
             id,
@@ -252,23 +249,7 @@ function parseDownstreamBody(
             name: String(body.name ?? id).trim() || id,
             enabled: body.enabled === undefined ? true : body.enabled !== false,
             settings: (settings as Record<string, unknown>) ?? {},
-            ...(access ? { access } : {}),
         },
     };
 }
 
-/** 解析准入名单；非法元素直接丢弃，避免一个坏值让整份配置存不进去 */
-function parseAccess(raw: unknown): { allow: number[]; deny: number[] } | undefined {
-    if (raw === undefined) return undefined;
-    if (raw === null || typeof raw !== 'object') return { allow: [], deny: [] };
-
-    const obj = raw as Record<string, unknown>;
-    const toIds = (v: unknown): number[] => {
-        if (!Array.isArray(v)) return [];
-        return v
-            .map((x) => Number(x))
-            .filter((n) => Number.isFinite(n) && n > 0);
-    };
-
-    return { allow: toIds(obj.allow), deny: toIds(obj.deny) };
-}

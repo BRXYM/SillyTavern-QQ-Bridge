@@ -48,9 +48,15 @@
     "defaultDownstreamId": "dsh",
     "trigger": {
         "atOnly": true,
-        "privateReply": true,
-        "allowedUsers": [],
-        "allowedGroups": []
+        "privateReply": true
+    },
+    "sessionAccess": {
+        "denyUsers": [],
+        "denyGroups": [],
+        "allowUsers": [],
+        "allowGroups": [],
+        "unknownPolicy": "allow",
+        "denyReply": ""
     },
     "maxMessageLength": 2000,
     "replyProcessors": [],

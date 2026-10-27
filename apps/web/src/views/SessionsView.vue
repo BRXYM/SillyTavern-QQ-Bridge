@@ -88,21 +88,13 @@ function resetDefaults() {
 // ---------------- 触发规则 / 消息限制（原系统设置页迁入） ----------------
 const atOnly = ref(false);
 const privateReply = ref(true);
-const allowedUsers = ref('');
-const allowedGroups = ref('');
 const maxMessageLength = ref(2000);
 const savingRules = ref(false);
 const rulesSnapshot = ref('');
 
 /** 规则表单序列化，用于脏状态判断 */
 function rulesSignature(): string {
-    return [
-        atOnly.value,
-        privateReply.value,
-        allowedUsers.value,
-        allowedGroups.value,
-        maxMessageLength.value,
-    ].join('\u0000');
+    return [atOnly.value, privateReply.value, maxMessageLength.value].join('\u0000');
 }
 
 const rulesDirty = computed(() => rulesSignature() !== rulesSnapshot.value);
@@ -111,16 +103,9 @@ function syncRulesFromStore() {
     const c = store.status?.config as Record<string, unknown> | undefined;
     if (!c) return;
 
-    const tr = (c['trigger'] ?? {}) as {
-        atOnly?: boolean;
-        privateReply?: boolean;
-        allowedUsers?: number[];
-        allowedGroups?: number[];
-    };
+    const tr = (c['trigger'] ?? {}) as { atOnly?: boolean; privateReply?: boolean };
     atOnly.value = tr.atOnly ?? false;
     privateReply.value = tr.privateReply ?? true;
-    allowedUsers.value = (tr.allowedUsers ?? []).join(',');
-    allowedGroups.value = (tr.allowedGroups ?? []).join(',');
 
     // 后端使用扁平字段 maxMessageLength
     if (typeof c['maxMessageLength'] === 'number') {
@@ -141,8 +126,6 @@ async function saveRules() {
             trigger: {
                 atOnly: atOnly.value,
                 privateReply: privateReply.value,
-                allowedUsers: parseList(allowedUsers.value),
-                allowedGroups: parseList(allowedGroups.value),
             },
             maxMessageLength: maxMessageLength.value,
         });
@@ -161,11 +144,122 @@ function resetRules() {
     toast.info('已还原为当前保存值');
 }
 
+// ---------------- 会话准入（黑白名单） ----------------
+const denyUsers = ref('');
+const denyGroups = ref('');
+const allowUsers = ref('');
+const allowGroups = ref('');
+const unknownPolicy = ref<'allow' | 'deny'>('allow');
+const denyReply = ref('');
+const savingAccess = ref(false);
+const accessSnapshot = ref('');
+/** 被拒的新会话（控制台可一键加白） */
+const pendingList = ref<Array<{ key: string; userId: number; senderName: string; lastAt: string }>>([]);
+
+function accessSignature(): string {
+    return [
+        denyUsers.value,
+        denyGroups.value,
+        allowUsers.value,
+        allowGroups.value,
+        unknownPolicy.value,
+        denyReply.value,
+    ].join('\u0000');
+}
+
+const accessDirty = computed(() => accessSignature() !== accessSnapshot.value);
+
+function syncAccessFromStore() {
+    const c = store.status?.config as Record<string, unknown> | undefined;
+    const sa = (c?.['sessionAccess'] ?? {}) as {
+        denyUsers?: number[];
+        denyGroups?: number[];
+        allowUsers?: number[];
+        allowGroups?: number[];
+        unknownPolicy?: 'allow' | 'deny';
+        denyReply?: string;
+    };
+    denyUsers.value = (sa.denyUsers ?? []).join(',');
+    denyGroups.value = (sa.denyGroups ?? []).join(',');
+    allowUsers.value = (sa.allowUsers ?? []).join(',');
+    allowGroups.value = (sa.allowGroups ?? []).join(',');
+    unknownPolicy.value = sa.unknownPolicy === 'deny' ? 'deny' : 'allow';
+    denyReply.value = sa.denyReply ?? '';
+    accessSnapshot.value = accessSignature();
+}
+
+async function saveAccess() {
+    savingAccess.value = true;
+    try {
+        await api.updateSessionAccess({
+            access: {
+                denyUsers: parseList(denyUsers.value),
+                denyGroups: parseList(denyGroups.value),
+                allowUsers: parseList(allowUsers.value),
+                allowGroups: parseList(allowGroups.value),
+                unknownPolicy: unknownPolicy.value,
+                denyReply: denyReply.value,
+            },
+        });
+        await store.refresh();
+        await loadPending();
+        syncAccessFromStore();
+        toast.success('会话准入已保存', '黑白名单立即生效');
+    } catch (e) {
+        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        savingAccess.value = false;
+    }
+}
+
+function resetAccess() {
+    syncAccessFromStore();
+    toast.info('已还原为当前保存值');
+}
+
+/** 拉取被拒的新会话 */
+async function loadPending() {
+    try {
+        const r = await api.sessionAccess();
+        const p = (r.pending ?? {}) as Record<string, {
+            userId: number;
+            senderName: string;
+            lastAt: string;
+        }>;
+        pendingList.value = Object.entries(p).map(([key, v]) => ({
+            key,
+            userId: v.userId,
+            senderName: v.senderName,
+            lastAt: v.lastAt,
+        }));
+    } catch {
+        pendingList.value = [];
+    }
+}
+
+/** 把某个被拒的用户加入白名单 */
+async function approvePending(userId: number) {
+    const list = parseList(allowUsers.value);
+    if (!list.includes(userId)) list.push(userId);
+    allowUsers.value = list.join(',');
+    await saveAccess();
+}
+
+function formatTime(iso: string): string {
+    try {
+        return new Date(iso).toLocaleString();
+    } catch {
+        return iso;
+    }
+}
+
 /** 首次加载 / 刷新后同步表单 */
 onMounted(() => {
     void store.refresh().then(() => {
         syncDefaultsFromStore();
         syncRulesFromStore();
+        syncAccessFromStore();
+        void loadPending();
     });
 });
 
@@ -369,29 +463,16 @@ function isDsh(id: string): boolean {
 
             <div class="grid gap-4 border-t border-border/40 px-5 py-4 sm:grid-cols-2">
                 <div>
-                    <label class="text-xs font-medium text-muted-foreground">用户白名单（逗号分隔 QQ 号）</label>
-                    <UiInput v-model="allowedUsers" class="mt-1.5" mono placeholder="留空 = 不限制" />
+                    <label class="text-xs font-medium text-muted-foreground">单条消息长度上限</label>
+                    <UiInput v-model.number="maxMessageLength" type="number" class="mt-1.5" />
+                    <p class="mt-1 text-[11px] text-muted-foreground/70">
+                        超出会截断并追加省略号；分段规则见「回复分段」
+                    </p>
                 </div>
-                <div>
-                    <label class="text-xs font-medium text-muted-foreground">群白名单（逗号分隔群号）</label>
-                    <UiInput v-model="allowedGroups" class="mt-1.5" mono placeholder="留空 = 不限制" />
-                </div>
-            </div>
-
-            <!-- 消息限制 -->
-            <div class="border-t border-border/40 px-5 py-4">
-                <div class="mb-3 flex items-center gap-2">
-                    <ShieldCheck class="size-3.5 text-muted-foreground" />
-                    <p class="text-xs font-medium text-muted-foreground">消息限制</p>
-                </div>
-                <div class="grid gap-4 sm:grid-cols-2">
-                    <div>
-                        <label class="text-xs font-medium text-muted-foreground">单条消息长度上限</label>
-                        <UiInput v-model.number="maxMessageLength" type="number" class="mt-1.5" />
-                        <p class="mt-1 text-[11px] text-muted-foreground/70">
-                            超出会截断并追加省略号；分段规则见「回复分段」
-                        </p>
-                    </div>
+                <div class="flex items-end">
+                    <p class="text-[11px] text-muted-foreground/70">
+                        用户 / 群的黑白名单已移到上方「会话准入」
+                    </p>
                 </div>
             </div>
 
@@ -401,6 +482,114 @@ function isDsh(id: string): boolean {
                     {{ savingRules ? '保存中…' : '保存规则' }}
                 </UiButton>
                 <UiButton variant="outline" size="sm" :disabled="!rulesDirty" @click="resetRules">
+                    <RotateCcw class="size-4" />
+                    还原
+                </UiButton>
+            </div>
+        </UiCard>
+
+        <!-- ============ 会话准入（黑白名单） ============ -->
+        <UiCard>
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
+                <div class="flex items-center gap-3">
+                    <div class="flex size-10 items-center justify-center rounded-xl bg-warning/15 text-warning">
+                        <ShieldCheck class="size-5" />
+                    </div>
+                    <div>
+                        <h2 class="text-sm font-semibold tracking-tight">会话准入</h2>
+                        <p class="text-xs text-muted-foreground">
+                            决定谁有资格和机器人互动。黑名单优先，白名单留空表示不限
+                        </p>
+                    </div>
+                </div>
+                <UiBadge v-if="accessDirty" tone="warning" class="text-micro">未保存</UiBadge>
+            </div>
+
+            <div class="grid gap-4 px-5 py-4 sm:grid-cols-2">
+                <div>
+                    <label class="text-xs font-medium text-muted-foreground">用户黑名单</label>
+                    <UiInput v-model="denyUsers" class="mt-1.5" mono placeholder="逗号分隔 QQ 号，永远拒绝" />
+                </div>
+                <div>
+                    <label class="text-xs font-medium text-muted-foreground">群黑名单</label>
+                    <UiInput v-model="denyGroups" class="mt-1.5" mono placeholder="逗号分隔群号，永远拒绝" />
+                </div>
+                <div>
+                    <label class="text-xs font-medium text-muted-foreground">用户白名单</label>
+                    <UiInput v-model="allowUsers" class="mt-1.5" mono placeholder="留空 = 不限制" />
+                </div>
+                <div>
+                    <label class="text-xs font-medium text-muted-foreground">群白名单</label>
+                    <UiInput v-model="allowGroups" class="mt-1.5" mono placeholder="留空 = 不限制" />
+                </div>
+            </div>
+
+            <!-- 新会话策略 -->
+            <div class="border-t border-border/40 px-5 py-4">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div class="min-w-0">
+                        <p class="text-sm">新会话（未配置过的对象）</p>
+                        <p class="text-xs text-muted-foreground">
+                            白名单非空时，第一次来的陌生人怎么处理
+                        </p>
+                    </div>
+                    <UiSelect
+                        v-model="unknownPolicy"
+                        :options="[
+                            { value: 'allow', label: '允许（照常回复）' },
+                            { value: 'deny', label: '拒绝（回提示）' },
+                        ]"
+                        class="w-48 shrink-0"
+                    />
+                </div>
+
+                <div v-if="unknownPolicy === 'deny'" class="mt-3">
+                    <label class="text-xs font-medium text-muted-foreground">拒绝时回的话</label>
+                    <UiInput
+                        v-model="denyReply"
+                        class="mt-1.5"
+                        placeholder="留空 = 静默不回，只写日志"
+                    />
+                    <p class="mt-1 text-[11px] text-muted-foreground/70">
+                        例如「请先联系管理员授权」；留空则完全不回复
+                    </p>
+                </div>
+            </div>
+
+            <!-- 被拒记录 -->
+            <div v-if="pendingList.length > 0" class="border-t border-border/40 px-5 py-4">
+                <div class="mb-2 flex items-center gap-2">
+                    <p class="text-xs font-medium text-muted-foreground">待处理（被拒的新会话）</p>
+                    <UiBadge tone="warning" class="text-micro">{{ pendingList.length }}</UiBadge>
+                </div>
+                <div class="space-y-1">
+                    <div
+                        v-for="p in pendingList"
+                        :key="p.key"
+                        class="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/50 px-2.5 py-1.5"
+                    >
+                        <div class="min-w-0 text-[11px]">
+                            <span class="font-mono">{{ p.key }}</span>
+                            <span class="ml-2 text-muted-foreground">{{ p.senderName }}</span>
+                            <span class="ml-2 text-muted-foreground/60">{{ formatTime(p.lastAt) }}</span>
+                        </div>
+                        <UiButton
+                            variant="ghost"
+                            size="sm"
+                            @click="approvePending(p.userId)"
+                        >
+                            加入白名单
+                        </UiButton>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 border-t border-border/60 px-5 py-3">
+                <UiButton size="sm" :disabled="savingAccess || !accessDirty" @click="saveAccess">
+                    <Save class="size-4" />
+                    {{ savingAccess ? '保存中…' : '保存准入' }}
+                </UiButton>
+                <UiButton variant="outline" size="sm" :disabled="!accessDirty" @click="resetAccess">
                     <RotateCcw class="size-4" />
                     还原
                 </UiButton>

@@ -118,45 +118,4 @@ export interface DownstreamConfig {
     enabled: boolean;
     /** 各类型自己的参数，由适配器工厂校验 */
     settings: Record<string, unknown>;
-    /** 会话准入：只允许这些 QQ 会话使用本下游 */
-    access?: DownstreamAccess;
-}
-
-/**
- * 下游准入规则（按 QQ 号，不是 sessionKey）。
- *
- * 语义与触发规则一致：
- *   - 两个列表都为空 → 不限制
- *   - 命中黑名单 → 拒绝
- *   - 白名单非空 → 必须在白名单里
- */
-export interface DownstreamAccess {
-    /** 黑名单：这些 QQ 号不能用本下游（优先级高于白名单） */
-    deny: number[];
-    /** 白名单：非空时只有这些 QQ 号可以用 */
-    allow: number[];
-}
-
-export const DEFAULT_ACCESS: DownstreamAccess = { deny: [], allow: [] };
-
-/**
- * 判断某 QQ 号能否使用该下游。
- * @returns allowed=false 时带上原因，供日志与前端展示
- */
-export function checkAccess(
-    access: DownstreamAccess | undefined,
-    userId: number,
-): { allowed: boolean; reason?: string } {
-    if (!access) return { allowed: true };
-    const deny = Array.isArray(access.deny) ? access.deny : [];
-    const allow = Array.isArray(access.allow) ? access.allow : [];
-    const id = Number(userId);
-
-    if (deny.some((u) => Number(u) === id)) {
-        return { allowed: false, reason: '该 QQ 在这个下游的黑名单里' };
-    }
-    if (allow.length > 0 && !allow.some((u) => Number(u) === id)) {
-        return { allowed: false, reason: '该 QQ 不在这个下游的白名单里' };
-    }
-    return { allowed: true };
 }

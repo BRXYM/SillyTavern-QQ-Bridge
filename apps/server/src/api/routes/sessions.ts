@@ -78,6 +78,36 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
         json(res, 200, { ok: true, sessionKey: key, resolved });
     });
 
+    // ---------------- 会话准入（黑白名单） ----------------
+    router.get('/api/session-access', ({ res }) => {
+        const cfg = app.config();
+        json(res, 200, {
+            ok: true,
+            access: cfg.sessionAccess,
+            /** 被拒的新会话记录，供控制台查看"谁在敲门" */
+            pending: app.sessions.pendingSnapshot(),
+        });
+    });
+
+    router.post('/api/session-access', ({ res, body }) => {
+        app.updateConfig((c) => {
+            const a = (body.access ?? {}) as Record<string, unknown>;
+            const ids = (v: unknown): number[] =>
+                Array.isArray(v) ? v.map(Number).filter((n) => Number.isFinite(n) && n > 0) : [];
+
+            if (a.denyUsers !== undefined) c.sessionAccess.denyUsers = ids(a.denyUsers);
+            if (a.denyGroups !== undefined) c.sessionAccess.denyGroups = ids(a.denyGroups);
+            if (a.allowUsers !== undefined) c.sessionAccess.allowUsers = ids(a.allowUsers);
+            if (a.allowGroups !== undefined) c.sessionAccess.allowGroups = ids(a.allowGroups);
+            if (a.unknownPolicy !== undefined) {
+                c.sessionAccess.unknownPolicy = a.unknownPolicy === 'deny' ? 'deny' : 'allow';
+            }
+            if (a.denyReply !== undefined) c.sessionAccess.denyReply = String(a.denyReply);
+        });
+        log('会话准入规则已更新');
+        json(res, 200, { ok: true, access: app.config().sessionAccess });
+    });
+
     // ---------------- 触发规则 ----------------
     router.get('/api/trigger', ({ res }) => {
         json(res, 200, { ok: true, trigger: app.config().trigger, maxMessageLength: app.config().maxMessageLength });

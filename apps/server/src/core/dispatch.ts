@@ -18,7 +18,6 @@ import type { OneBotEvent } from '../upstream/onebot.ts';
 import type { SessionStore, SessionRoute } from './sessions.ts';
 import { sessionKeyOf } from './sessions.ts';
 import type { DownstreamAdapter, DownstreamConfig, ProgressEvent } from '../downstream/types.ts';
-import { checkAccess } from '../downstream/types.ts';
 import type { BridgeConfig, ProcessorRule } from '../config/schema.ts';
 import { log } from './logger.ts';
 import { sendReply, type SendContext } from './sending.ts';
@@ -87,18 +86,135 @@ export function checkTrigger(
     atMe: boolean,
 ): string | null {
     const t = config.trigger;
-    const allowedGroups = Array.isArray(t.allowedGroups) ? t.allowedGroups : [];
-    const allowedUsers = Array.isArray(t.allowedUsers) ? t.allowedUsers : [];
-
-    if (messageType === 'group' && allowedGroups.length > 0) {
-        if (!allowedGroups.some((g) => String(g) === String(groupId))) return '群不在白名单';
-    }
-    if (allowedUsers.length > 0) {
-        if (!allowedUsers.some((u) => String(u) === String(userId))) return '用户不在白名单';
-    }
+    // 黑白名单已迁到「会话准入」（checkSessionAccess），这里只管行为开关
     if (messageType === 'private' && t.privateReply === false) return '私聊回复已关闭';
     if (messageType === 'group' && t.atOnly && !atMe) return '群里未 @ 机器人';
+    // 保留参数以兼容调用点：名单不再参与此判定
+    void groupId;
+    void userId;
     return null;
+}
+
+/**
+ * 会话准入（在触发规则之前执行）。
+ *
+ * 语义：
+ *   - 命中黑名单 → 拒绝
+ *   - 白名单非空且未命中 → 拒绝（含"新会话"）
+ *   - 两个都空 → 放行
+ *
+ * `unknownPolicy` 决定「既不在白名单也不在黑名单」的新会话怎么办：
+ *   - 'allow'（默认）：照常处理
+ *   - 'deny'：拒绝，并可按 `denyReply` 回一句自定义提示
+ * 注意：白名单为空时所有会话都属于"已知"，不会触发 unknown 策略。
+ */
+export interface SessionAccess {
+    /** 黑名单：这些 QQ/群永远拒绝（优先级最高） */
+    denyUsers: number[];
+    denyGroups: number[];
+    /** 白名单：非空时只允许这些（用户与群分别判断） */
+    allowUsers: number[];
+    allowGroups: number[];
+    /** 新会话（未配置且不在任何名单里）的策略 */
+    unknownPolicy: 'allow' | 'deny';
+    /** 拒绝时回给 QQ 的一句话；空 = 静默 */
+    denyReply: string;
+}
+
+export const DEFAULT_SESSION_ACCESS: SessionAccess = {
+    denyUsers: [],
+    denyGroups: [],
+    allowUsers: [],
+    allowGroups: [],
+    unknownPolicy: 'allow',
+    denyReply: '',
+};
+
+export interface AccessVerdict {
+    allowed: boolean;
+    /** 拒绝原因，写日志用 */
+    reason?: string;
+    /** 回给 QQ 的提示（可能为空 = 静默） */
+    reply?: string;
+    /** 是否属于"新会话未配置"这一情形 */
+    unknown?: boolean;
+}
+
+const sameId = (a: unknown, b: unknown): boolean => String(a) === String(b);
+
+/**
+ * 判断一条消息是否允许进入处理流程。
+ *
+ * @param access   会话准入配置
+ * @param ids      本条消息归属的用户与群
+ * @param configured 该会话是否已有配置（决定"新会话"策略是否生效）
+ */
+export function checkSessionAccess(
+    access: SessionAccess | undefined,
+    ids: { userId: number; groupId: number | null },
+    configured: boolean,
+): AccessVerdict {
+    const a = access ?? DEFAULT_SESSION_ACCESS;
+
+    const denyUsers = Array.isArray(a.denyUsers) ? a.denyUsers : [];
+    const denyGroups = Array.isArray(a.denyGroups) ? a.denyGroups : [];
+    const allowUsers = Array.isArray(a.allowUsers) ? a.allowUsers : [];
+    const allowGroups = Array.isArray(a.allowGroups) ? a.allowGroups : [];
+
+    // 黑名单优先：任一命中即拒
+    if (denyUsers.some((u) => sameId(u, ids.userId))) {
+        return {
+            allowed: false,
+            reason: `用户 ${ids.userId} 在会话黑名单里`,
+            reply: String(a.denyReply ?? '').trim(),
+        };
+    }
+    if (ids.groupId !== null && denyGroups.some((g) => sameId(g, ids.groupId))) {
+        return {
+            allowed: false,
+            reason: `群 ${ids.groupId} 在会话黑名单里`,
+            reply: String(a.denyReply ?? '').trim(),
+        };
+    }
+
+    // 白名单：非空时必须命中
+    const userListed = allowUsers.length > 0
+        ? allowUsers.some((u) => sameId(u, ids.userId))
+        : true;
+    const groupListed = allowGroups.length > 0 && ids.groupId !== null
+        ? allowGroups.some((g) => sameId(g, ids.groupId))
+        : true;
+
+    if (!userListed) {
+        // 不在白名单：区分"新会话"和"已知但被禁"
+        if (!configured) {
+            if (a.unknownPolicy === 'deny') {
+                return {
+                    allowed: false,
+                    unknown: true,
+                    reason: `新会话用户 ${ids.userId} 未在白名单，且策略为拒绝`,
+                    reply: String(a.denyReply ?? '').trim(),
+                };
+            }
+            // 未配置但策略放行 → 继续
+        } else {
+            return {
+                allowed: false,
+                reason: `用户 ${ids.userId} 不在会话白名单里`,
+                reply: String(a.denyReply ?? '').trim(),
+            };
+        }
+    }
+
+    if (!groupListed) {
+        return {
+            allowed: false,
+            reason: `群 ${ids.groupId} 不在会话白名单里`,
+            reply: String(a.denyReply ?? '').trim(),
+        };
+    }
+
+    return { allowed: true };
 }
 
 /** 组装下发给下游的系统设定 */
@@ -191,6 +307,26 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     const sessionKey = sessionKeyOf(messageType, groupId, userId);
     const senderName = String(event.sender?.card || event.sender?.nickname || userId);
 
+    // ---- 会话准入（QQ 黑白名单）----
+    // 必须在建档之前判断：一旦 ensure() 建了档，"新会话"就不存在了，
+    // unknownPolicy 也就永远不会生效。
+    const configured = Boolean(deps.sessions.get(sessionKey));
+    const verdict = checkSessionAccess(config.sessionAccess, { userId, groupId }, configured);
+    if (!verdict.allowed) {
+        log(`⛔ 会话 [${sessionKey}] 被拒：${verdict.reason}`);
+        if (verdict.reply) {
+            await sendReply(
+                deps.sending,
+                { messageType, groupId, userId, sessionKey },
+                verdict.reply,
+            );
+        }
+        if (verdict.unknown) {
+            deps.sessions.notePending?.(sessionKey, { userId, groupId, messageType, senderName });
+        }
+        return;
+    }
+
     const route: SessionRoute = { sessionKey, messageType, groupId, userId };
     deps.sessions.rememberRoute(route);
     deps.sessions.bumpIn(sessionKey);
@@ -204,28 +340,13 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
         return;
     }
 
-    // ---- 下游准入（QQ 黑白名单）----
-    const downstreamCfg = config.downstreams.find((d) => d.id === resolved.backendId);
-    const access = checkAccess(downstreamCfg?.access, userId);
-    if (!access.allowed) {
-        log(
-            `⛔ 下游 ${adapter.name} 拒绝了 [${sessionKey}]：${access.reason}`
-            + `（QQ ${userId}）`,
-        );
-        // 可选：回一句说明。默认静默，避免把内部策略暴露给用户
-        const notice = progressNotice(config, adapter.id, 'denied');
-        if (notice) {
-            await sendReply(deps.sending, { messageType, groupId, userId, sessionKey }, notice);
-        }
-        return;
-    }
-
     log(
         `QQ消息 → ${adapter.name} [${sessionKey}]: [${senderName}] ${parsed.text}`
         + (resolved.inherited ? '（继承全局下游）' : '（会话级下游）'),
     );
 
     // ---- 进度摘要转发 ----
+    const downstreamCfg = config.downstreams.find((d) => d.id === resolved.backendId);
     // 只在需要时挂回调，避免无谓的对象创建与判断
     const progressCfg = progressSettings(downstreamCfg);
     const onProgress = progressCfg.enabled

@@ -267,6 +267,43 @@ export const api = {
             { method: 'POST', body: JSON.stringify(payload) },
         ),
 
+    // ---------------- 会话准入（黑白名单） ----------------
+    sessionAccess: () =>
+        request<{
+            ok: boolean;
+            access: {
+                denyUsers: number[];
+                denyGroups: number[];
+                allowUsers: number[];
+                allowGroups: number[];
+                unknownPolicy: 'allow' | 'deny';
+                denyReply: string;
+            };
+            /** 被拒的新会话记录 */
+            pending: Record<string, {
+                userId: number;
+                groupId: number | null;
+                messageType: string;
+                senderName: string;
+                lastAt: string;
+            }>;
+        }>('/session-access'),
+
+    updateSessionAccess: (payload: {
+        access: {
+            denyUsers?: number[];
+            denyGroups?: number[];
+            allowUsers?: number[];
+            allowGroups?: number[];
+            unknownPolicy?: 'allow' | 'deny';
+            denyReply?: string;
+        };
+    }) =>
+        request<{ ok: boolean; access: Record<string, unknown> }>('/session-access', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        }),
+
     // ---------------- 触发规则 ----------------
     trigger: () => request<{ ok: boolean; trigger: Record<string, unknown>; maxMessageLength: number }>('/trigger'),
 
@@ -292,8 +329,6 @@ export const api = {
         name?: string;
         enabled?: boolean;
         settings?: Record<string, unknown>;
-        /** 准入名单：控制哪些 QQ 可用 */
-        access?: { allow: number[]; deny: number[] };
     }) =>
         request<{ ok: boolean; error?: string; downstream: unknown; status: DownstreamStatusDto[] }>('/downstreams', {
             method: 'POST',

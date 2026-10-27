@@ -51,6 +51,14 @@ export interface ResolvedSession {
 export class SessionStore extends EventEmitter {
     /** 会话级配置 */
     private choices: Record<string, SessionChoice> = {};
+    /** 被拒的新会话（不落盘主体，随 flush 一起写） */
+    private pending: Record<string, {
+        userId: number;
+        groupId: number | null;
+        messageType: string;
+        senderName: string;
+        lastAt: string;
+    }> = {};
     /** 运行时路由（不落盘，重启后由第一条消息重建） */
     private readonly routes = new Map<string, SessionRoute>();
     /** 收发计数 */
@@ -77,6 +85,7 @@ export class SessionStore extends EventEmitter {
             const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, SessionChoice>;
             // 兼容旧版字段名 backend（'taver' | 'dsh'）
             for (const [key, value] of Object.entries(raw)) {
+                if (key === '__pending') continue;
                 if (!value || typeof value !== 'object') continue;
                 const legacy = value as SessionChoice & { backend?: string };
                 if (legacy.backendId === undefined && typeof legacy.backend === 'string') {
@@ -87,6 +96,24 @@ export class SessionStore extends EventEmitter {
             }
         } catch {
             this.choices = {};
+        }
+
+        // pending 存在单独的键里，避免与会话配置混淆
+        try {
+            const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as {
+                __pending?: Record<string, {
+                    userId: number;
+                    groupId: number | null;
+                    messageType: string;
+                    senderName: string;
+                    lastAt: string;
+                }>;
+            };
+            if (raw?.__pending && typeof raw.__pending === 'object') {
+                this.pending = raw.__pending;
+            }
+        } catch {
+            /* 忽略 */
         }
     }
 
@@ -103,7 +130,12 @@ export class SessionStore extends EventEmitter {
     flush(): void {
         try {
             fs.mkdirSync(path.dirname(this.file), { recursive: true });
-            fs.writeFileSync(this.file, `${JSON.stringify(this.choices, null, 4)}\n`, 'utf8');
+            // __pending 与会话配置共存于同一文件：一个文件便于备份与迁移
+            const payload = {
+                ...this.choices,
+                ...(Object.keys(this.pending).length > 0 ? { __pending: this.pending } : {}),
+            };
+            fs.writeFileSync(this.file, `${JSON.stringify(payload, null, 4)}\n`, 'utf8');
         } catch (e) {
             this.emit('error', e);
         }
@@ -203,6 +235,36 @@ export class SessionStore extends EventEmitter {
             character: own.character || def.character,
             world: own.world || def.world,
         };
+    }
+
+    /** 会话被拒时的记录（新会话被拦下时留痕，便于控制台看到"有人在敲门"） */
+    notePending(
+        sessionKey: string,
+        info: { userId: number; groupId: number | null; messageType: string; senderName: string },
+    ): void {
+        if (!this.pending) this.pending = {};
+        this.pending[sessionKey] = {
+            ...info,
+            lastAt: new Date().toISOString(),
+        };
+        // 只保留最近 50 条，避免无限增长
+        const keys = Object.keys(this.pending);
+        if (keys.length > 50) {
+            for (const k of keys.slice(0, keys.length - 50)) delete this.pending[k];
+        }
+        this.scheduleSave();
+    }
+
+    /** 读取被拒记录 */
+    pendingSnapshot(): Record<string, { userId: number; groupId: number | null; messageType: string; senderName: string; lastAt: string }> {
+        return this.pending ?? {};
+    }
+
+    /** 清除某条被拒记录（例如管理员批准后） */
+    clearPending(sessionKey: string): void {
+        if (!this.pending?.[sessionKey]) return;
+        delete this.pending[sessionKey];
+        this.scheduleSave();
     }
 
     /** 全部会话配置（供 /api/status） */

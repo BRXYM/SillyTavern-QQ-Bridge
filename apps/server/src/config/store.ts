@@ -63,12 +63,30 @@ export function migrateLegacy(raw: Raw): { config: BridgeConfig; notes: string[]
 
     // ---- 全局设置 ----
     const trigger = (raw.trigger ?? {}) as Raw;
+    // 旧版把名单放在 trigger 里；新版名单属于「会话准入」，这里迁过去
+    const legacyAllowedUsers = numArray(trigger.allowedUsers);
+    const legacyAllowedGroups = numArray(trigger.allowedGroups);
     base.trigger = {
         atOnly: bool(trigger.atOnly, base.trigger.atOnly),
         privateReply: bool(trigger.privateReply, base.trigger.privateReply),
-        allowedUsers: numArray(trigger.allowedUsers),
-        allowedGroups: numArray(trigger.allowedGroups),
+        // 保留字段以兼容旧前端，但不再参与判定
+        allowedUsers: [],
+        allowedGroups: [],
     };
+    base.sessionAccess = {
+        denyUsers: [],
+        denyGroups: [],
+        allowUsers: legacyAllowedUsers,
+        allowGroups: legacyAllowedGroups,
+        unknownPolicy: 'allow',
+        denyReply: '',
+    };
+    if (legacyAllowedUsers.length > 0 || legacyAllowedGroups.length > 0) {
+        notes.push(
+            `旧配置的白名单已迁到「会话准入」`
+            + `（用户 ${legacyAllowedUsers.length} 个 / 群 ${legacyAllowedGroups.length} 个）`,
+        );
+    }
     base.maxMessageLength = num(raw.maxMessageLength, base.maxMessageLength);
     base.replyProcessors = Array.isArray(raw.replyProcessors)
         ? (raw.replyProcessors as ProcessorRule[])
@@ -273,8 +291,25 @@ function normalizeV2(raw: Raw): { config: BridgeConfig; notes: string[] } {
     base.trigger = {
         atOnly: bool(t.atOnly, base.trigger.atOnly),
         privateReply: bool(t.privateReply, base.trigger.privateReply),
-        allowedUsers: numArray(t.allowedUsers),
-        allowedGroups: numArray(t.allowedGroups),
+        allowedUsers: [],
+        allowedGroups: [],
+    };
+
+    // 会话准入：读新结构；旧结构里的名单作为回落
+    const sa = (raw.sessionAccess ?? {}) as Raw;
+    const legacyUsers = numArray(t.allowedUsers);
+    const legacyGroups = numArray(t.allowedGroups);
+    base.sessionAccess = {
+        denyUsers: numArray(sa.denyUsers),
+        denyGroups: numArray(sa.denyGroups),
+        allowUsers: numArray(sa.allowUsers).length > 0 || sa.allowUsers !== undefined
+            ? numArray(sa.allowUsers)
+            : legacyUsers,
+        allowGroups: numArray(sa.allowGroups).length > 0 || sa.allowGroups !== undefined
+            ? numArray(sa.allowGroups)
+            : legacyGroups,
+        unknownPolicy: sa.unknownPolicy === 'deny' ? 'deny' : 'allow',
+        denyReply: str(sa.denyReply, ''),
     };
 
     base.replyProcessors = Array.isArray(raw.replyProcessors)
