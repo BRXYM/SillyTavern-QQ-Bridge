@@ -16,7 +16,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 let worldNamesCache = null;
 
 const extensionName = 'SnowLuma-Bridge';
-const version = '4.9.0';
+const version = '4.10.0';
 const defaultSettings = {
     bridgeUrl: 'ws://127.0.0.1:9500',
     autoConnect: true,
@@ -126,8 +126,9 @@ function injectImageInstruction() {
     ].join('\n');
 
     try {
-        // position: 1 = IN_PROMPT（并入提示词），depth: 4
-        ctx.setExtensionPrompt(IMAGE_PROMPT_KEY, instruction, 1, 4, false);
+        // position 用 IN_PROMPT(0)，理由同表情提示：
+        // 用 IN_CHAT(1) 会被当成聊天消息，不是系统指令
+        ctx.setExtensionPrompt(IMAGE_PROMPT_KEY, instruction, 0, 0, false);
         log('已注入图片回复提示');
     } catch (e) {
         log('图片提示注入失败:', e.message);
@@ -237,14 +238,26 @@ function injectFaceInstruction() {
     ].join('\n');
 
     try {
-        ctx.setExtensionPrompt(FACE_PROMPT_KEY, instruction, 1, 4, false);
+        // 关键：position 必须用 IN_PROMPT(0)，不能用 IN_CHAT(1)
+        //
+        // 酒馆的 extension_prompt_types：
+        //   NONE: -1 / IN_PROMPT: 0 / IN_CHAT: 1 / BEFORE_PROMPT: 2
+        //
+        // 之前用 1（IN_CHAT）会把提示词当成"聊天消息"插进对话历史，
+        // AI 看起来像是我方或角色说过的话，不会当成指令执行，
+        // 所以一直不肯按格式输出表情标记。
+        // 改成 0（IN_PROMPT）后作为系统指令并入提示词，约束力正常。
+        ctx.setExtensionPrompt(FACE_PROMPT_KEY, instruction, 0, 0, false);
         const total = manifest.total ?? 0;
         const labeled = manifest.labeled ?? 0;
         log(
             `已注入表情词表（${Object.values(vocab).flat().length} 个词，库内 ${total} 个表情 / 已标注 ${labeled} 个）`,
         );
+        // 把完整提示词上报到后端，便于排查"AI 为什么不发"
+        httpLog(`[FACE_PROMPT] len=${instruction.length} pos=IN_PROMPT\n${instruction}`);
     } catch (e) {
         log('表情提示注入失败:', e.message);
+        httpLog(`[FACE_PROMPT] 注入失败: ${e.message}`);
     }
 }
 
