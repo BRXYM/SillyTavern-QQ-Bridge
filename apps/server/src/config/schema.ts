@@ -65,6 +65,14 @@ export interface FacesConfig {
     ollamaTextModel: string;
 }
 
+/** SnowLuma（上游软件本体）的安装信息 */
+export interface SnowLumaConfig {
+    /** 安装目录；探测成功后会写回这里 */
+    dir: string;
+    /** WebUI 端口，用于判定实际生效的配置目录 */
+    webuiPort: number;
+}
+
 export interface BridgeConfig {
     /** HTTP API 端口（控制台） */
     consolePort: number;
@@ -72,6 +80,8 @@ export interface BridgeConfig {
     extPort: number;
     /** 上游 OneBot */
     upstream: UpstreamConfig;
+    /** 上游软件本体的安装信息 */
+    snowluma: SnowLumaConfig;
     /** 下游实例列表 */
     downstreams: DownstreamConfig[];
     /** 会话未指定时使用的下游 id；空 = 用列表里第一个启用的 */
@@ -82,6 +92,7 @@ export interface BridgeConfig {
     defaults: DefaultsConfig;
     segmentation: SegmentationConfig;
     imageReplies: ImageReplyConfig;
+    /** 酒馆数据目录（酒馆作为下游时才用） */
     stDataDir: string;
     faces: FacesConfig;
     /** 下游注册接口的 token；空 = 关闭自注册 */
@@ -116,6 +127,10 @@ export const DEFAULT_CONFIG: BridgeConfig = {
         token: '',
         reconnectMs: 5000,
         actionTimeoutMs: 15000,
+    },
+    snowluma: {
+        dir: '',
+        webuiPort: 5099,
     },
     // 默认接入 dsh：开箱即用，没有酒馆也能跑
     downstreams: [

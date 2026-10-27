@@ -31,10 +31,10 @@ function fmt(v: unknown, fallback = '—'): string {
                         业务配置已按功能拆分到对应页面：
                     </p>
                     <ul class="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
-                        <li>• <strong class="text-foreground">OneBot 连接</strong> → 服务管理 → SnowLuma</li>
+                        <li>• <strong class="text-foreground">OneBot 连接 / 上游配置</strong> → SnowLuma 接入</li>
                         <li>• <strong class="text-foreground">默认角色 / 世界书</strong> → 会话</li>
                         <li>• <strong class="text-foreground">触发规则 / 消息限制</strong> → 会话（酒馆与 dsh 共用）</li>
-                        <li>• <strong class="text-foreground">回复后端 / dsh 参数</strong> → dsh 接入</li>
+                        <li>• <strong class="text-foreground">下游实例 / dsh 服务与插件</strong> → 下游管理</li>
                         <li>• <strong class="text-foreground">回复分段 / 图片表情</strong> → 对应页面</li>
                     </ul>
                 </div>

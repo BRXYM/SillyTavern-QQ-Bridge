@@ -13,11 +13,11 @@ const logBox = ref<HTMLElement | null>(null);
 const search = ref('');
 
 onMounted(() => {
-    store.startPolling();
+    // 状态轮询由 AppLayout 统一管理
 });
 
 onUnmounted(() => {
-    store.stopPolling();
+    
 });
 
 const logs = computed(() => {
@@ -103,7 +103,6 @@ async function runPreview() {
         previewLoading.value = false;
     }
 }
-
 
 const levelClass = (lvl: string) =>
     ({

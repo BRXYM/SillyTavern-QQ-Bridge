@@ -22,6 +22,7 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { logger, log } from './core/logger.ts';
+import { handleEventStream, publishStatus } from './api/events.ts';
 import { SessionStore } from './core/sessions.ts';
 import { OneBotClient, type OneBotEvent } from './upstream/onebot.ts';
 import { DownstreamManager } from './downstream/manager.ts';
@@ -114,6 +115,9 @@ const sessions = new SessionStore(SESSIONS_PATH, () => ({
 }));
 sessions.load();
 sessions.on('error', (e: unknown) => log(`✗ 会话持久化失败：${String(e)}`));
+sessions.on('changed', (key: string) => publishStatus('session', { sessionKey: key }));
+sessions.on('created', (key: string) => publishStatus('session', { sessionKey: key }));
+sessions.on('removed', (key: string) => publishStatus('session', { sessionKey: key }));
 
 // ================= 3. 上游 =================
 const onebot = new OneBotClient({
@@ -305,6 +309,11 @@ const dispatchDeps: DispatchDeps = {
     selfId: () => onebot.stats.selfId,
 };
 
+// 上游状态变化：连上/断开/重连/报错都立即推给前端，不等下一次轮询
+onebot.on('connected', () => publishStatus('upstream', { connected: true }));
+onebot.on('disconnected', () => publishStatus('upstream', { connected: false }));
+onebot.on('upstream-error', (message: string) => publishStatus('upstream', { connected: false, error: message }));
+
 onebot.on('event', (event: OneBotEvent) => {
     void dispatchEvent(dispatchDeps, event).catch((e) => {
         log(`✗ 派发异常：${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
@@ -388,6 +397,12 @@ registerHostRoutes(router, app, {
 });
 
 const consoleServer = http.createServer((req, res) => {
+    // SSE 长连接：不走 router，否则会被统一的 JSON 处理包住
+    if (req.method === 'GET' && (req.url ?? '').split('?')[0] === '/api/events') {
+        handleEventStream(req, res);
+        return;
+    }
+
     void router.handle(req, res).then((handled) => {
         if (!handled) json(res, 404, { ok: false, error: `未知接口：${req.method} ${req.url}` });
     }).catch((e) => {

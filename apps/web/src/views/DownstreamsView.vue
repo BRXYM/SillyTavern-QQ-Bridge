@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import {
     Boxes, RefreshCw, Plus, Trash2, Play, Loader2, CheckCircle2,
-    AlertTriangle, Server, Star, Info, Power,
+    AlertTriangle, Server, Star, Info, Power, RotateCw, Plug, PlugZap,
+    Terminal, FileText, ChevronDown, ChevronRight,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -11,6 +12,7 @@ import UiInput from '@/components/ui/UiInput.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
 import UiSwitch from '@/components/ui/UiSwitch.vue';
 import { api, type DownstreamStatusDto } from '@/api/client';
+import { dshApi, type DshStatus } from '@/api/dsh';
 import { useStatusStore } from '@/stores/status';
 import { useToastStore } from '@/stores/toast';
 
@@ -21,7 +23,11 @@ const loading = ref(false);
 const saving = ref(false);
 const testing = ref('');
 const removing = ref('');
+const working = ref('');
 const testResults = ref<Record<string, { ok: boolean; text: string; elapsedMs: number; error?: string }>>({});
+
+/** 展开的实例（按 id） */
+const expanded = reactive<Record<string, boolean>>({});
 
 /** 后端注册的所有下游实例 */
 const registered = ref<Array<{
@@ -32,12 +38,12 @@ const registered = ref<Array<{
     settings: Record<string, unknown>;
 }>>([]);
 
-/** 运行态 */
 const statuses = computed<DownstreamStatusDto[]>(() => store.status?.downstreams ?? []);
 const defaultId = computed(() => store.status?.defaultDownstreamId ?? '');
-
-/** 可选类型 */
 const kinds = ref<Array<{ kind: string; label: string; description: string }>>([]);
+
+/** dsh 环境信息（只有存在 dsh 实例时才拉） */
+const dsh = ref<DshStatus | null>(null);
 
 /** 新增表单 */
 const showForm = ref(false);
@@ -51,6 +57,14 @@ function kindLabel(kind: string): string {
     return kinds.value.find((k) => k.kind === kind)?.label ?? kind;
 }
 
+function isDshKind(kind: string): boolean {
+    return kind.startsWith('dsh');
+}
+
+function toggle(id: string): void {
+    expanded[id] = !expanded[id];
+}
+
 async function load(opts: { silent?: boolean } = {}) {
     loading.value = true;
     try {
@@ -58,6 +72,11 @@ async function load(opts: { silent?: boolean } = {}) {
         registered.value = r.registered;
         kinds.value = r.kinds;
         await store.refresh();
+
+        // 有 dsh 实例时才查 dsh 详情，避免无谓的子进程探测
+        if (r.registered.some((d) => isDshKind(d.kind))) {
+            dsh.value = await dshApi.status().catch(() => null);
+        }
     } catch (e) {
         if (!opts.silent) {
             toast.error('读取下游失败', e instanceof Error ? e.message : String(e));
@@ -80,7 +99,10 @@ async function setDefault(id: string) {
     }
 }
 
-async function toggleEnabled(item: { id: string; enabled: boolean; kind: string; name: string; settings: Record<string, unknown> }, next: boolean) {
+async function toggleEnabled(
+    item: { id: string; enabled: boolean; kind: string; name: string; settings: Record<string, unknown> },
+    next: boolean,
+) {
     saving.value = true;
     try {
         await api.saveDownstream({
@@ -145,7 +167,7 @@ async function create() {
             kind: form.value.kind,
             name: form.value.name.trim() || id,
             enabled: true,
-            settings: form.value.kind.startsWith('dsh')
+            settings: isDshKind(form.value.kind)
                 ? { timeoutMs: Number(form.value.timeoutMs) || 180000 }
                 : {},
         });
@@ -157,6 +179,68 @@ async function create() {
         toast.error('新增失败', e instanceof Error ? e.message : String(e));
     } finally {
         saving.value = false;
+    }
+}
+
+// ---------------- dsh 专属：常驻服务 + 连接插件 ----------------
+
+const serviceRunning = computed(() => dsh.value?.service?.running === true);
+const pluginOnline = computed(() => (dsh.value?.plugin?.clients?.length ?? 0) > 0);
+const pluginInjected = computed(() => dsh.value?.plugin?.injection?.inBundles === true);
+
+async function serviceAction(action: 'start' | 'stop' | 'restart') {
+    working.value = `service:${action}`;
+    try {
+        const r = await dshApi.serviceAction(action);
+        const label = action === 'start' ? '已启动' : action === 'stop' ? '已停止' : '已重启';
+        if (r.ok) toast.success(`dsh 服务${label}`, `${r.host}:${r.port}`);
+        else toast.error('操作失败', r.error ?? r.result?.error ?? '未知错误');
+        await load({ silent: true });
+    } catch (e) {
+        toast.error('操作失败', e instanceof Error ? e.message : String(e));
+        await load({ silent: true });
+    } finally {
+        working.value = '';
+    }
+}
+
+async function injectPlugin() {
+    working.value = 'inject';
+    try {
+        const r = await dshApi.pluginInject({ verify: true, restart: true });
+        if (!r.inject.ok) {
+            toast.error('注入失败', r.inject.error || '未知错误');
+            return;
+        }
+        if (r.verified && !r.verified.ok) {
+            toast.warning('已注入但校验未通过', r.verified.error);
+        } else if (r.restart && !r.restart.ok) {
+            toast.warning('已注入，重启失败', r.restart.error ?? '请手动重启');
+        } else {
+            toast.success('连接插件已注入', '服务已重启，等待插件上线');
+        }
+        await load({ silent: true });
+    } catch (e) {
+        toast.error('注入失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        working.value = '';
+    }
+}
+
+async function removePlugin() {
+    working.value = 'remove-plugin';
+    try {
+        const r = await dshApi.pluginRemove({ restart: true });
+        if (!r.remove.ok) {
+            toast.error('移除失败', r.remove.error || '未知错误');
+            return;
+        }
+        toast.success('连接插件已移除', '已重启服务');
+        await load({ silent: true });
+    } catch (e) {
+        toast.error('移除失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        working.value = '';
     }
 }
 
@@ -187,6 +271,9 @@ onMounted(() => void load({ silent: true }));
                     <Boxes class="size-4 text-muted-foreground" />
                     <h3 class="text-sm font-semibold tracking-tight">下游实例</h3>
                     <UiBadge tone="outline" class="text-micro">{{ registered.length }} 个</UiBadge>
+                    <UiBadge :tone="store.live ? 'success' : 'secondary'" dot class="text-micro">
+                        {{ store.live ? '实时' : '轮询' }}
+                    </UiBadge>
                 </div>
                 <div class="flex flex-wrap items-center gap-2">
                     <UiButton size="sm" :disabled="saving" @click="showForm = !showForm">
@@ -221,7 +308,7 @@ onMounted(() => void load({ silent: true }));
                         <label class="text-xs font-medium">显示名称</label>
                         <UiInput v-model="form.name" placeholder="留空用 id" />
                     </div>
-                    <div v-if="form.kind.startsWith('dsh')" class="flex flex-col gap-1.5">
+                    <div v-if="isDshKind(form.kind)" class="flex flex-col gap-1.5">
                         <label class="text-xs font-medium">超时（毫秒）</label>
                         <UiInput v-model.number="form.timeoutMs" type="number" mono />
                     </div>
@@ -241,98 +328,242 @@ onMounted(() => void load({ silent: true }));
             </div>
 
             <div v-else class="divide-y divide-border/50">
-                <div v-for="item in registered" :key="item.id" class="px-5 py-4">
-                    <div class="flex flex-wrap items-center justify-between gap-2">
-                        <div class="flex flex-wrap items-center gap-2">
-                            <span class="font-mono text-xs">{{ item.id }}</span>
-                            <UiBadge tone="outline" class="text-micro">{{ kindLabel(item.kind) }}</UiBadge>
-                            <UiBadge v-if="defaultId === item.id" tone="info" class="text-micro">
-                                <Star class="mr-0.5 size-2.5" />
-                                默认
-                            </UiBadge>
-                            <UiBadge
-                                :tone="statusOf(item.id)?.available ? 'success' : 'warning'"
-                                dot
-                                class="text-micro"
-                            >
-                                {{ statusOf(item.id)?.available ? '可用' : '离线' }}
-                            </UiBadge>
-                            <UiBadge v-if="!item.enabled" tone="outline" class="text-micro">已停用</UiBadge>
+                <div v-for="item in registered" :key="item.id">
+                    <!-- 实例主行 -->
+                    <div class="px-5 py-3.5">
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <button
+                                    v-if="isDshKind(item.kind)"
+                                    class="text-muted-foreground transition-colors hover:text-foreground"
+                                    @click="toggle(item.id)"
+                                >
+                                    <component :is="expanded[item.id] ? ChevronDown : ChevronRight" class="size-3.5" />
+                                </button>
+                                <span class="font-mono text-xs">{{ item.id }}</span>
+                                <UiBadge tone="outline" class="text-micro">{{ kindLabel(item.kind) }}</UiBadge>
+                                <UiBadge v-if="defaultId === item.id" tone="info" class="text-micro">
+                                    <Star class="mr-0.5 size-2.5" />
+                                    默认
+                                </UiBadge>
+                                <UiBadge
+                                    :tone="statusOf(item.id)?.available ? 'success' : 'warning'"
+                                    dot
+                                    class="text-micro"
+                                >
+                                    {{ statusOf(item.id)?.available ? '可用' : '离线' }}
+                                </UiBadge>
+                                <UiBadge v-if="!item.enabled" tone="outline" class="text-micro">已停用</UiBadge>
+                            </div>
+                            <div class="flex flex-wrap items-center gap-1.5">
+                                <UiButton
+                                    v-if="defaultId !== item.id"
+                                    variant="ghost"
+                                    size="sm"
+                                    :disabled="saving || !item.enabled"
+                                    @click="setDefault(item.id)"
+                                >
+                                    <Star class="size-3.5" />
+                                    设为默认
+                                </UiButton>
+                                <UiButton
+                                    variant="ghost"
+                                    size="sm"
+                                    :disabled="testing !== '' || !item.enabled"
+                                    @click="runTest(item.id)"
+                                >
+                                    <Loader2 v-if="testing === item.id" class="size-3.5 animate-spin" />
+                                    <Play v-else class="size-3.5" />
+                                    测试
+                                </UiButton>
+                                <UiButton
+                                    variant="ghost"
+                                    size="sm"
+                                    :disabled="removing !== ''"
+                                    @click="remove(item.id)"
+                                >
+                                    <Loader2 v-if="removing === item.id" class="size-3.5 animate-spin" />
+                                    <Trash2 v-else class="size-3.5" />
+                                </UiButton>
+                            </div>
                         </div>
-                        <div class="flex flex-wrap items-center gap-1.5">
-                            <UiButton
-                                v-if="defaultId !== item.id"
-                                variant="ghost"
-                                size="sm"
-                                :disabled="saving || !item.enabled"
-                                @click="setDefault(item.id)"
-                            >
-                                <Star class="size-3.5" />
-                                设为默认
-                            </UiButton>
-                            <UiButton
-                                variant="ghost"
-                                size="sm"
-                                :disabled="testing !== '' || !item.enabled"
-                                @click="runTest(item.id)"
-                            >
-                                <Loader2 v-if="testing === item.id" class="size-3.5 animate-spin" />
-                                <Play v-else class="size-3.5" />
-                                测试
-                            </UiButton>
-                            <UiButton
-                                variant="ghost"
-                                size="sm"
-                                :disabled="removing !== ''"
-                                @click="remove(item.id)"
-                            >
-                                <Loader2 v-if="removing === item.id" class="size-3.5 animate-spin" />
-                                <Trash2 v-else class="size-3.5" />
-                            </UiButton>
-                        </div>
-                    </div>
 
-                    <p class="mt-1 text-[11px] text-muted-foreground">
-                        {{ item.name }}
-                        <span v-if="statusOf(item.id)?.reason" class="ml-1 opacity-80">
-                            · {{ statusOf(item.id)!.reason }}
-                        </span>
-                    </p>
-
-                    <div
-                        v-if="testResults[item.id]"
-                        class="mt-2 rounded-md border px-2.5 py-1.5"
-                        :class="testResults[item.id]!.ok
-                            ? 'border-success/40 bg-success/5'
-                            : 'border-destructive/40 bg-destructive/5'"
-                    >
-                        <p class="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                            <component
-                                :is="testResults[item.id]!.ok ? CheckCircle2 : AlertTriangle"
-                                class="size-3"
-                                :class="testResults[item.id]!.ok ? 'text-success' : 'text-destructive'"
-                            />
-                            <span v-if="testResults[item.id]!.ok">
-                                {{ (testResults[item.id]!.elapsedMs / 1000).toFixed(1) }}s
+                        <p class="mt-1 text-[11px] text-muted-foreground">
+                            {{ item.name }}
+                            <span v-if="statusOf(item.id)?.reason" class="ml-1 opacity-80">
+                                · {{ statusOf(item.id)!.reason }}
                             </span>
-                            <span v-else>{{ testResults[item.id]!.error }}</span>
                         </p>
-                        <p v-if="testResults[item.id]!.text" class="mt-1 whitespace-pre-wrap break-words text-xs">
-                            {{ testResults[item.id]!.text }}
-                        </p>
+
+                        <div class="mt-2 flex items-center justify-between rounded-md border border-border/50 px-2.5 py-1.5">
+                            <div class="min-w-0">
+                                <p class="text-[11px] font-medium">启用</p>
+                                <p class="text-[10px] text-muted-foreground">
+                                    停用后不再接收新消息（会话引用它的会报错）
+                                </p>
+                            </div>
+                            <UiSwitch
+                                :model-value="item.enabled"
+                                :disabled="saving"
+                                class="shrink-0"
+                                @update:model-value="(v: boolean) => toggleEnabled(item, v)"
+                            />
+                        </div>
+
+                        <div
+                            v-if="testResults[item.id]"
+                            class="mt-2 rounded-md border px-2.5 py-1.5"
+                            :class="testResults[item.id]!.ok
+                                ? 'border-success/40 bg-success/5'
+                                : 'border-destructive/40 bg-destructive/5'"
+                        >
+                            <p class="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                                <component
+                                    :is="testResults[item.id]!.ok ? CheckCircle2 : AlertTriangle"
+                                    class="size-3"
+                                    :class="testResults[item.id]!.ok ? 'text-success' : 'text-destructive'"
+                                />
+                                <span v-if="testResults[item.id]!.ok">
+                                    {{ (testResults[item.id]!.elapsedMs / 1000).toFixed(1) }}s
+                                </span>
+                                <span v-else>{{ testResults[item.id]!.error }}</span>
+                            </p>
+                            <p v-if="testResults[item.id]!.text" class="mt-1 whitespace-pre-wrap break-words text-xs">
+                                {{ testResults[item.id]!.text }}
+                            </p>
+                        </div>
                     </div>
 
-                    <div class="mt-2 flex items-center justify-between rounded-md border border-border/50 px-2.5 py-1.5">
-                        <div class="min-w-0">
-                            <p class="text-[11px] font-medium">启用</p>
-                            <p class="text-[10px] text-muted-foreground">停用后不再接收新消息（会话引用它的会报错）</p>
+                    <!-- dsh 实例展开：常驻服务 + 连接插件 -->
+                    <div
+                        v-if="isDshKind(item.kind) && expanded[item.id]"
+                        class="border-t border-border/40 bg-accent/10 px-5 py-3.5"
+                    >
+                        <!-- 环境 -->
+                        <div class="mb-3 grid gap-x-6 gap-y-1.5 text-[11px] sm:grid-cols-2">
+                            <div class="flex items-center gap-1.5">
+                                <span class="text-muted-foreground">dsh 安装</span>
+                                <span :class="dsh?.installed ? 'text-success' : 'text-warning'">
+                                    {{ dsh?.installed ? `已安装 ${dsh.version}` : '未找到' }}
+                                </span>
+                            </div>
+                            <div class="flex min-w-0 items-center gap-1.5">
+                                <span class="shrink-0 text-muted-foreground">DSH_HOME</span>
+                                <span class="truncate font-mono">{{ dsh?.home || '—' }}</span>
+                            </div>
                         </div>
-                        <UiSwitch
-                            :model-value="item.enabled"
-                            :disabled="saving"
-                            class="shrink-0"
-                            @update:model-value="(v: boolean) => toggleEnabled(item, v)"
-                        />
+
+                        <!-- 常驻服务 -->
+                        <div class="rounded-md border border-border/60 bg-card/40 p-3">
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <div class="flex items-center gap-2">
+                                    <Power class="size-3.5 text-muted-foreground" />
+                                    <span class="text-xs font-medium">dsh 常驻服务</span>
+                                    <UiBadge :tone="serviceRunning ? 'success' : 'outline'" dot class="text-micro">
+                                        {{ serviceRunning ? '运行中' : '未运行' }}
+                                    </UiBadge>
+                                    <UiBadge v-if="dsh?.service?.pid" tone="outline" class="text-micro">
+                                        pid {{ dsh.service.pid }}
+                                    </UiBadge>
+                                </div>
+                                <div class="flex flex-wrap items-center gap-1.5">
+                                    <UiButton
+                                        variant="outline"
+                                        size="sm"
+                                        :disabled="working !== '' || !dsh?.installed"
+                                        @click="serviceAction(serviceRunning ? 'stop' : 'start')"
+                                    >
+                                        <Loader2 v-if="working.startsWith('service:')" class="size-3.5 animate-spin" />
+                                        <Power v-else class="size-3.5" />
+                                        {{ serviceRunning ? '停止' : '启动' }}
+                                    </UiButton>
+                                    <UiButton
+                                        variant="outline"
+                                        size="sm"
+                                        :disabled="working !== '' || !dsh?.installed"
+                                        @click="serviceAction('restart')"
+                                    >
+                                        <Loader2 v-if="working === 'service:restart'" class="size-3.5 animate-spin" />
+                                        <RotateCw v-else class="size-3.5" />
+                                        重启
+                                    </UiButton>
+                                </div>
+                            </div>
+                            <p class="mt-1.5 text-[10px] text-muted-foreground">
+                                分离进程：Bridge 退出也不会带走它。
+                                <span class="font-mono">{{ dsh?.service?.url || '' }}</span>
+                            </p>
+                            <div v-if="dsh?.service?.lastError" class="mt-1.5 text-[10px] text-destructive">
+                                {{ dsh.service.lastError }}
+                            </div>
+                        </div>
+
+                        <!-- 连接插件 -->
+                        <div class="mt-2 rounded-md border border-border/60 bg-card/40 p-3">
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <div class="flex items-center gap-2">
+                                    <component :is="pluginOnline ? PlugZap : Plug" class="size-3.5 text-muted-foreground" />
+                                    <span class="text-xs font-medium">连接插件</span>
+                                    <UiBadge
+                                        :tone="pluginOnline ? 'success' : pluginInjected ? 'warning' : 'outline'"
+                                        dot
+                                        class="text-micro"
+                                    >
+                                        {{ pluginOnline ? '已连接' : pluginInjected ? '已注入·待重启' : '未注入' }}
+                                    </UiBadge>
+                                </div>
+                                <div class="flex flex-wrap items-center gap-1.5">
+                                    <UiButton size="sm" :disabled="working !== '' || !dsh?.installed" @click="injectPlugin">
+                                        <Loader2 v-if="working === 'inject'" class="size-3.5 animate-spin" />
+                                        <PlugZap v-else class="size-3.5" />
+                                        {{ pluginInjected ? '重新注入' : '注入并重启' }}
+                                    </UiButton>
+                                    <UiButton
+                                        v-if="pluginInjected"
+                                        variant="outline"
+                                        size="sm"
+                                        :disabled="working !== ''"
+                                        @click="removePlugin"
+                                    >
+                                        <Loader2 v-if="working === 'remove-plugin'" class="size-3.5 animate-spin" />
+                                        <Trash2 v-else class="size-3.5" />
+                                        移除
+                                    </UiButton>
+                                </div>
+                            </div>
+                            <div class="mt-2 grid gap-x-6 gap-y-1.5 text-[10px] text-muted-foreground sm:grid-cols-2">
+                                <div class="flex items-center gap-1">
+                                    <span>插件包</span>
+                                    <span class="truncate font-mono text-foreground">{{ dsh?.plugin?.pluginName }}</span>
+                                </div>
+                                <div class="flex items-center gap-1">
+                                    <span>bundles</span>
+                                    <span :class="pluginInjected ? 'text-success' : 'text-warning'">
+                                        {{ pluginInjected ? '已登记' : '未登记' }}
+                                    </span>
+                                </div>
+                                <div v-if="dsh?.plugin?.clients?.length" class="flex items-center gap-1 sm:col-span-2">
+                                    <span>在线</span>
+                                    <span class="truncate font-mono text-foreground">
+                                        {{ dsh.plugin.clients.map((c) => `pid ${c.pid}`).join('、') }}
+                                    </span>
+                                </div>
+                            </div>
+                            <p class="mt-1.5 text-[10px] text-muted-foreground">
+                                插件在线时消息在 dsh 进程内处理；离线自动回落到 headless 子进程。
+                            </p>
+                        </div>
+
+                        <!-- 服务日志 -->
+                        <div v-if="(dsh?.service?.logTail?.length ?? 0) > 0" class="mt-2">
+                            <p class="mb-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                                <FileText class="size-3" />
+                                服务日志尾部
+                            </p>
+                            <pre
+                                class="max-h-32 overflow-auto rounded-md bg-muted/40 px-2.5 py-2 font-mono text-[10px] leading-relaxed text-muted-foreground"
+                            >{{ (dsh?.service?.logTail ?? []).slice(-12).join('\n') }}</pre>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -347,13 +578,13 @@ onMounted(() => void load({ silent: true }));
                     <p class="mt-1">
                         dsh 连接插件启动时会调用
                         <code class="font-mono">POST /api/downstreams/register</code>
-                        把自己登记成下游，无需手工配置。该接口需要 Bearer 凭据
+                        把自己登记成下游，无需手工配置。该接口需要凭据
                         （配置里的 <code class="font-mono">registrationToken</code>，首次运行自动生成），
                         且只接受本机连接。
                     </p>
                     <p class="mt-1.5 flex items-center gap-1.5">
-                        <Power class="size-3" />
-                        dsh 插件注入与常驻服务管理在「dsh 接入」页。
+                        <Terminal class="size-3" />
+                        上游 SnowLuma 的探测与配置在「SnowLuma 接入」页。
                     </p>
                 </div>
             </div>

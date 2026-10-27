@@ -11,6 +11,7 @@ import type { DownstreamAdapter } from './types.ts';
 import { buildAdapters, collectStatus, type AdapterDeps } from './registry.ts';
 import type { DownstreamRuntime } from '../api/context.ts';
 import { log } from '../core/logger.ts';
+import { publishStatus } from '../api/events.ts';
 
 export interface RuntimeOptions {
     /** 读当前配置 */
@@ -32,6 +33,17 @@ export class DownstreamManager implements DownstreamRuntime {
     async start(): Promise<void> {
         const cfg = this.options.config();
         this.adapters = await buildAdapters(cfg.downstreams, this.options.deps);
+
+        // 每个适配器可用性变化时，立即广播给前端（插件上下线不必等轮询）
+        for (const adapter of this.adapters.values()) {
+            adapter.onChange?.(() => {
+                publishStatus('downstream', {
+                    id: adapter.id,
+                    available: adapter.status().available,
+                });
+            });
+        }
+
         log(`下游已启动：${[...this.adapters.keys()].join(', ') || '(无)'}`);
     }
 
@@ -64,6 +76,7 @@ export class DownstreamManager implements DownstreamRuntime {
                 }
             }
             await this.start();
+            publishStatus('downstream', { reloaded: true });
             return { ok: true };
         } catch (e) {
             const error = e instanceof Error ? e.message : String(e);
@@ -124,6 +137,7 @@ export class DownstreamManager implements DownstreamRuntime {
         });
 
         log(`下游自注册：已新增 ${created.id}（${created.kind}），正在加载…`);
+        publishStatus('downstream', { id: created.id, registered: true });
 
         // 立刻构建，让注册后的实例马上可用
         const reload = await this.reload();

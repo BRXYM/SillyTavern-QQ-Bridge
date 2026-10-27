@@ -48,7 +48,7 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
     // GET /api/snowluma/discover   自动发现安装目录
     router.get('/api/snowluma/discover', async ({ res, query }) => {
         try {
-            const known = query.get('known') ?? '';
+            const known = query.get('known') ?? cfg().snowluma.dir ?? '';
             const result = await discoverSnowLumaDir({
                 knownDir: known,
                 hintDirs: [process.cwd(), deps.repoRoot, path.dirname(deps.repoRoot)],
@@ -84,8 +84,8 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
 
     // GET /api/snowluma/probe?dir=...&port=...   探测版本/配置目录/账号
     router.get('/api/snowluma/probe', async ({ res, query }) => {
-        const dir = query.get('dir') ?? '';
-        const activePort = Number(query.get('port') ?? 0) || null;
+        const dir = query.get('dir') ?? cfg().snowluma.dir ?? '';
+        const activePort = Number(query.get('port') ?? cfg().snowluma.webuiPort ?? 0) || null;
         const probe = probeSnowLuma(dir, activePort);
         const accounts = probe.ok ? listAccounts(probe.dataDir) : [];
 
@@ -138,6 +138,9 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
             app.updateConfig((c) => {
                 c.upstream.url = endpoint;
                 c.upstream.token = result.token;
+                // 记住安装位置，下次探测/刷新直接用，不必再手动指定
+                c.snowluma.dir = dir;
+                if (webuiPort) c.snowluma.webuiPort = webuiPort;
             });
 
             if (urlChanged || tokenChanged) {
@@ -170,7 +173,7 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
     router.get('/api/snowluma/config', ({ res, query }) => {
         try {
             const uin = String(query.get('uin') ?? '').trim();
-            const dir = String(query.get('dir') ?? '').trim();
+            const dir = String(query.get('dir') ?? cfg().snowluma.dir ?? '').trim();
             if (!dir) throw new Error('缺少 SnowLuma 目录');
             const probe = probeSnowLuma(dir);
             if (!probe.ok) throw new Error(probe.error || 'SnowLuma 目录无效');

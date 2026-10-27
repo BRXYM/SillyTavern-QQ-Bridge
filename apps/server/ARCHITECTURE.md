@@ -9,6 +9,7 @@ apps/server/
 │   │   └── store.ts          读写、旧版迁移、原子落盘
 │   ├── core/
 │   │   ├── logger.ts         环形缓冲 + 多消费者
+│   │   ├── events.ts         状态事件总线（合并 + 无订阅者零开销）
 │   │   ├── sessions.ts       会话路由/计数/会话级选择
 │   │   ├── dispatch.ts       触发规则 → 选下游 → 组装 prompt → 管道
 │   │   └── sending.ts        分段/表情 → OneBot action
@@ -23,6 +24,7 @@ apps/server/
 │   │   └── sillytavern.ts    酒馆扩展
 │   └── api/
 │       ├── router.ts         极简路由 + JSON 包装
+│       ├── events.ts         SSE 状态流 /api/events
 │       ├── context.ts        依赖容器
 │       └── routes/
 │           ├── status.ts     状态 / 日志 / 健康
@@ -56,6 +58,32 @@ SnowLuma ──▶ upstream/onebot.ts ──▶ core/dispatch.ts
 
 **下游可扩展**：新增一种后端 = 实现 `DownstreamAdapter` + 在 `registry.ts` 注册一行，
 不需要改 dispatch、sending 或任何 api 文件。
+
+## 状态推送
+
+前端不靠固定轮询发现异常：上游断线、下游上下线、配置变更都会在**发生的那一刻**
+通过 `GET /api/events`（SSE）推给前端。
+
+```
+OneBotClient ──connected/disconnected/error──┐
+DshAdapter  ──attach/detach──────────────────┤
+SillyTavern ──attach/detach──────────────────┼─▶ statusBus ─▶ SSE ─▶ 前端精确更新
+SessionStore ─changed/created/removed────────┤
+updateConfig ────────────────────────────────┘
+```
+
+设计要点：
+
+| 点 | 做法 | 原因 |
+|---|---|---|
+| 载荷 | 只带 kind + 最小信息 | 不重复传整份快照，带宽与序列化成本都很低 |
+| 合并 | 服务端 150ms / 客户端 100ms | 抖动时不会引发连锁刷新 |
+| 空闲 | 无订阅者时直接 return | 没人看就不产生任何开销 |
+| 心跳 | 25s 注释行 | 保活且不触发前端逻辑 |
+| 兜底 | SSE 断了退回 3s 轮询 | 实时是优化，正确性仍由快照保证 |
+
+前端收到事件后**不做全量刷新**：`upstream` 只改连接字段，`downstream` 只改对应实例，
+只有会话/配置这类影响面大的变更才触发一次快照对齐。
 
 ## 关键约定
 

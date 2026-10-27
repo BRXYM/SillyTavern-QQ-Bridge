@@ -66,6 +66,43 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
         json(res, 200, { ok: true, ...st });
     });
 
+    /**
+     * POST /api/dsh/config   更新 dsh 实例的调用参数。
+     *
+     * 参数存在下游实例的 settings 里（而不是全局扁平字段），
+     * 所以写回配置后必须触发下游重建，否则运行时用的还是旧值。
+     */
+    router.post('/api/dsh/config', async ({ res, body }) => {
+        const cfg = app.config();
+        const target = cfg.downstreams.find((d) => d.kind === 'dsh-plugin' || d.kind === 'dsh-headless');
+        if (!target) {
+            json(res, 404, { ok: false, error: '没有 dsh 下游实例' });
+            return;
+        }
+
+        // 只接受白名单字段，避免把无关键写进 settings
+        const allowed = [
+            'exePath', 'profile', 'workRoot', 'timeoutMs', 'historyTurns',
+            'persistHistory', 'concurrency', 'systemPrompt', 'errorReply',
+            'fallbackHeadless', 'serviceProfile', 'servicePort', 'serviceLogFile',
+        ] as const;
+
+        app.updateConfig((c) => {
+            const ds = c.downstreams.find((d) => d.id === target.id);
+            if (!ds) return;
+            for (const key of allowed) {
+                if (body[key] !== undefined) ds.settings[key] = body[key];
+            }
+        });
+
+        const reload = await app.downstreams.reload();
+        json(res, reload.ok ? 200 : 400, {
+            ok: reload.ok,
+            error: reload.error,
+            settings: app.config().downstreams.find((d) => d.id === target.id)?.settings ?? {},
+        });
+    });
+
     for (const action of ['start', 'stop', 'restart'] as const) {
         router.post(`/api/dsh/service/${action}`, async ({ res }) => {
             const svc = app.dshService();

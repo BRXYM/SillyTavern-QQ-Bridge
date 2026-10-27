@@ -65,6 +65,13 @@ export interface DownstreamAdapter {
     readonly kind: DownstreamKind;
     readonly name: string;
 
+    /**
+     * 注册「可用性变化」回调。
+     * 适配器在连接上线/离线、启停时调用它，让上层即时推送状态，
+     * 而不是等前端下一次轮询才发现。
+     */
+    onChange?(listener: () => void): void;
+
     /** 建立连接 / 探测可用性；失败不应抛异常，用 available=false 表达 */
     init(): Promise<void>;
     /** 释放资源（关闭 WS、杀掉常驻进程等） */

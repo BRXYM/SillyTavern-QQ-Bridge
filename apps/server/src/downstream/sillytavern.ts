@@ -68,6 +68,8 @@ export class SillyTavernAdapter implements DownstreamAdapter {
     private readonly clients = new Set<WebSocket>();
     private readonly pending = new Map<string, Pending>();
     private reqSeq = 0;
+    /** 可用性变化回调 */
+    private changeListener: (() => void) | null = null;
 
     constructor(
         id: string,
@@ -126,10 +128,17 @@ export class SillyTavernAdapter implements DownstreamAdapter {
         return n;
     }
 
+    /** 注册可用性变化回调 */
+    onChange(listener: () => void): void {
+        this.changeListener = listener;
+    }
+
     /** 由入站 WS 服务在握手后调用 */
     attach(socket: WebSocket): void {
+        const before = this.onlineCount();
         this.clients.add(socket);
         log(`酒馆扩展已接入 [${this.id}]（当前 ${this.onlineCount()} 个连接）`);
+        if (before === 0) this.changeListener?.();
 
         socket.send(JSON.stringify({
             type: 'session_state',
@@ -144,6 +153,7 @@ export class SillyTavernAdapter implements DownstreamAdapter {
     detach(socket: WebSocket): void {
         if (this.clients.delete(socket)) {
             log(`酒馆扩展已断开 [${this.id}]（剩余 ${this.onlineCount()}）`);
+            if (this.onlineCount() === 0) this.changeListener?.();
         }
     }
 

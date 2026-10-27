@@ -1,17 +1,28 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import AppSidebar from './AppSidebar.vue';
 import AppTopBar from './AppTopBar.vue';
 import type { NavMeta } from '@/router';
+import { useStatusStore } from '@/stores/status';
 
 const route = useRoute();
+const status = useStatusStore();
 const collapsed = ref(false);
 
 const meta = computed(() => (route.meta ?? {}) as unknown as NavMeta);
 const pageTitle = computed(() => meta.value.title ?? 'SnowLuma Bridge');
 const pageDesc = computed(() => meta.value.desc ?? '');
 const pageIcon = computed(() => meta.value.icon ?? 'LayoutDashboard');
+
+/**
+ * 全局状态同步在这里启动一次，所有页面共享。
+ *
+ * 之前是各页面自己启停轮询，导致只有总览/日志页在刷新，
+ * 切到别的页面后连接状态就停在离开那一刻。
+ */
+onMounted(() => status.startPolling());
+onUnmounted(() => status.stopPolling());
 </script>
 
 <template>

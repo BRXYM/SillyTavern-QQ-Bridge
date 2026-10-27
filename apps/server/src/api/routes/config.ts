@@ -41,6 +41,16 @@ export function registerConfigRoutes(router: Router, app: AppContext): void {
                 }
             }
 
+            // 上游软件本体
+            if (patch.snowluma && typeof patch.snowluma === 'object') {
+                const sl = patch.snowluma as Record<string, unknown>;
+                if (sl.dir !== undefined) c.snowluma.dir = String(sl.dir);
+                if (sl.webuiPort !== undefined) {
+                    const n = Number(sl.webuiPort);
+                    if (Number.isFinite(n) && n > 0) c.snowluma.webuiPort = n;
+                }
+            }
+
             // 端口
             if (patch.extPort !== undefined) {
                 const n = Number(patch.extPort);

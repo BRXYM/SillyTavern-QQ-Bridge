@@ -22,22 +22,16 @@ const routes = [
         meta: { title: '运行日志', desc: '实时事件流', icon: 'Terminal', group: '监控' } satisfies NavMeta,
     },
     {
-        path: '/services',
-        name: 'services',
+        path: '/snowluma',
+        name: 'snowluma',
         component: () => import('@/views/ServicesView.vue'),
-        meta: { title: '服务管理', desc: '协议端与酒馆', icon: 'Server', group: '服务' } satisfies NavMeta,
+        meta: { title: 'SnowLuma 接入', desc: '上游协议端配置', icon: 'Server', group: '服务' } satisfies NavMeta,
     },
     {
         path: '/downstreams',
         name: 'downstreams',
         component: () => import('@/views/DownstreamsView.vue'),
         meta: { title: '下游管理', desc: '谁来回这条消息', icon: 'Boxes', group: '服务' } satisfies NavMeta,
-    },
-    {
-        path: '/dsh',
-        name: 'dsh',
-        component: () => import('@/views/DshView.vue'),
-        meta: { title: 'dsh 接入', desc: 'DeepSeek Harness', icon: 'Terminal', group: '服务' } satisfies NavMeta,
     },
     {
         path: '/sessions',

@@ -84,6 +84,8 @@ export class DshAdapter implements DownstreamAdapter {
     private reqSeq = 0;
     /** 由外层注入的 headless 客户端（懒建） */
     private headless: DshClient | null = null;
+    /** 可用性变化回调（连上/断开时触发） */
+    private changeListener: (() => void) | null = null;
 
     constructor(
         id: string,
@@ -162,15 +164,23 @@ export class DshAdapter implements DownstreamAdapter {
         return n;
     }
 
+    /** 注册可用性变化回调 */
+    onChange(listener: () => void): void {
+        this.changeListener = listener;
+    }
+
     /** 插件握手成功后由入站服务调用 */
     attach(socket: WebSocket): void {
+        const before = this.onlineCount();
         this.clients.add(socket);
         log(`dsh 连接插件已接入 [${this.id}]（pid ${(socket as WebSocket & { dshPid?: number }).dshPid ?? '?'}）`);
+        if (before === 0) this.changeListener?.();
     }
 
     detach(socket: WebSocket): void {
         if (this.clients.delete(socket)) {
             log(`dsh 连接插件已断开 [${this.id}]（剩余 ${this.onlineCount()}）→ 回落到 headless`);
+            if (this.onlineCount() === 0) this.changeListener?.();
         }
     }
 

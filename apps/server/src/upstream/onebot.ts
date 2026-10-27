@@ -134,6 +134,8 @@ export class OneBotClient extends EventEmitter {
             this.stats.lastError = e.message;
             this.stats.lastErrorAt = Date.now();
             log(`SnowLuma WS 错误: ${e.message}`);
+            // 让上层能即时感知异常（例如 401 token 错误），不必等下一次轮询
+            this.emit('upstream-error', e.message);
         });
     }
 

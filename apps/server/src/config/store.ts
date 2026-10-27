@@ -57,6 +57,10 @@ export function migrateLegacy(raw: Raw): { config: BridgeConfig; notes: string[]
     base.upstream.url = str(raw.onebotUrl, base.upstream.url);
     base.upstream.token = str(raw.onebotToken, '');
 
+    // 上游软件本体的安装位置：旧版是顶层扁平字段
+    base.snowluma.dir = str(raw.snowlumaDir, '');
+    base.snowluma.webuiPort = num(raw.snowlumaWebuiPort, base.snowluma.webuiPort);
+
     // ---- 全局设置 ----
     const trigger = (raw.trigger ?? {}) as Raw;
     base.trigger = {
@@ -204,6 +208,12 @@ function normalizeV2(raw: Raw): { config: BridgeConfig; notes: string[] } {
         token: str(up.token, ''),
         reconnectMs: num(up.reconnectMs, base.upstream.reconnectMs),
         actionTimeoutMs: num(up.actionTimeoutMs, base.upstream.actionTimeoutMs),
+    };
+
+    const sl = (raw.snowluma ?? {}) as Raw;
+    base.snowluma = {
+        dir: str(sl.dir, base.snowluma.dir),
+        webuiPort: num(sl.webuiPort, base.snowluma.webuiPort),
     };
 
     if (Array.isArray(raw.downstreams)) {

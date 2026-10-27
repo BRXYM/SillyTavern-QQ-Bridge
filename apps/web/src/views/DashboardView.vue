@@ -20,11 +20,11 @@ const now = ref(Date.now());
 let ticker: number | null = null;
 
 onMounted(() => {
-    store.startPolling();
+    // 轮询由 AppLayout 统一管理，这里只保留秒级时钟用于刷新"已运行时长"
     ticker = window.setInterval(() => { now.value = Date.now(); }, 1000);
 });
 onUnmounted(() => {
-    store.stopPolling();
+    
     if (ticker) window.clearInterval(ticker);
 });
 
@@ -57,11 +57,9 @@ const charCount = computed(() => status.value?.catalogs.characters.length ?? 0);
 const worldCount = computed(() => status.value?.catalogs.worlds.length ?? 0);
 
 const upstream = computed(() => status.value?.upstream);
-const extension = computed(() => status.value?.extension);
 const proc = computed(() => status.value?.process);
 
 const upOnline = computed(() => upstream.value?.connected ?? store.onebotConnected);
-const extOnline = computed(() => (extension.value?.clientCount ?? status.value?.stClients ?? 0) > 0);
 
 // ---------------- 时长格式化 ----------------
 function humanDuration(sec: number): string {
@@ -102,11 +100,20 @@ function ago(ts: number | null | undefined): string {
 // ---------------- 健康度 ----------------
 const health = computed(() => {
     let score = 0;
+    if (store.reachable) score += 20;
     if (upOnline.value) score += 40;
-    if (extOnline.value) score += 30;
-    if (sessionCount.value > 0) score += 20;
-    if (store.reachable) score += 10;
-    return score;
+
+    // 下游：按可用实例占比给分（有启用的下游才计入）
+    const enabled = store.downstreams.filter((d) => d.enabled);
+    if (enabled.length > 0) {
+        const available = enabled.filter((d) => d.available).length;
+        score += Math.round((available / enabled.length) * 30);
+    } else {
+        score += 30;
+    }
+
+    if (sessionCount.value > 0) score += 10;
+    return Math.min(100, score);
 });
 const healthLabel = computed(() =>
     health.value >= 95 ? '运行良好'
@@ -131,34 +138,44 @@ interface CheckItem {
     ok: boolean;
     detail: string;
 }
-const checks = computed<CheckItem[]>(() => [
-    {
-        label: 'SnowLuma 上游',
-        ok: upOnline.value,
-        detail: upOnline.value
-            ? `${upstream.value?.endpoint ?? '—'} · ${upstreamUptime.value}`
-            : upstream.value?.lastError || '未连接',
-    },
-    {
-        label: '酒馆扩展',
-        ok: extOnline.value,
-        detail: extOnline.value
-            ? `${extension.value?.clientCount} 个连接 · :${extension.value?.port ?? '—'}`
-            : '未接入',
-    },
-    {
-        label: 'Bridge 后端',
-        ok: store.reachable,
-        detail: store.reachable ? 'API 正常响应' : store.error || '无法访问',
-    },
-    {
+const checks = computed<CheckItem[]>(() => {
+    const list: CheckItem[] = [
+        {
+            label: 'SnowLuma 上游',
+            ok: upOnline.value,
+            detail: upOnline.value
+                ? `${upstream.value?.endpoint ?? '—'} · ${upstreamUptime.value}`
+                : upstream.value?.lastError || '未连接',
+        },
+        {
+            label: 'Bridge 后端',
+            ok: store.reachable,
+            detail: store.reachable ? 'API 正常响应' : store.error || '无法访问',
+        },
+    ];
+
+    // 下游逐个列出，异常时能直接看出是哪一个
+    for (const d of store.downstreams) {
+        if (!d.enabled) continue;
+        list.push({
+            label: d.name || d.id,
+            ok: d.available,
+            detail: d.available
+                ? `${d.kind}${d.detail?.pluginConnections ? ` · ${d.detail.pluginConnections} 个连接` : ''}`
+                : d.reason || '不可用',
+        });
+    }
+
+    list.push({
         label: '活跃会话',
         ok: sessionCount.value > 0,
         detail: sessionCount.value > 0
             ? `${sessionCount.value} 个会话在运行`
             : 'QQ 发消息后自动出现',
-    },
-]);
+    });
+
+    return list;
+});
 
 const recent = computed(() =>
     [...sessions.value].sort((a, b) => b[1].last - a[1].last).slice(0, 6),
@@ -318,46 +335,68 @@ async function retry() {
                     <div class="flex items-center gap-2">
                         <Boxes class="size-4 text-aurora" />
                         <div>
-                            <h2 class="text-[13px] font-semibold tracking-tight">酒馆扩展</h2>
-                            <p class="text-[11px] text-muted-foreground">SillyTavern 前端连接</p>
+                            <h2 class="text-[13px] font-semibold tracking-tight">下游状态</h2>
+                            <p class="text-[11px] text-muted-foreground">谁在回这条消息</p>
                         </div>
                     </div>
-                    <UiBadge :tone="extOnline ? 'success' : 'secondary'" dot :pulse="extOnline">
-                        {{ extension?.clientCount ?? 0 }} 个连接
+                    <UiBadge
+                        :tone="store.live ? 'success' : 'secondary'"
+                        dot
+                        :pulse="store.live"
+                        class="text-micro"
+                    >
+                        {{ store.live ? '实时' : '轮询' }}
                     </UiBadge>
                 </div>
 
-                <div class="grid gap-x-4 gap-y-2.5 px-5 py-3.5 sm:grid-cols-2">
-                    <div>
-                        <p class="ui-section-label">扩展端口</p>
-                        <p class="mt-0.5 font-mono text-[12px]">:{{ extension?.port ?? '—' }}</p>
-                    </div>
-                    <div>
-                        <p class="ui-section-label">连接数</p>
-                        <p class="mt-0.5 font-mono text-[12px] tabular-nums">
-                            {{ extension?.clientCount ?? 0 }}
-                        </p>
+                <div v-if="store.downstreams.length === 0" class="px-5 py-6 text-center">
+                    <p class="text-[12px] text-muted-foreground">还没有下游实例</p>
+                    <p class="mt-1 text-[11px] text-muted-foreground/70">
+                        到「下游管理」新增，或安装 dsh 连接插件自动注册
+                    </p>
+                </div>
+
+                <div v-else class="divide-y divide-border/40">
+                    <div
+                        v-for="d in store.downstreams"
+                        :key="d.id"
+                        class="flex items-center gap-2.5 px-5 py-2.5"
+                        :class="d.enabled ? '' : 'opacity-50'"
+                    >
+                        <span
+                            class="size-1.5 shrink-0 rounded-full"
+                            :class="d.available
+                                ? 'bg-success animate-pulse'
+                                : (d.enabled ? 'bg-warning' : 'bg-muted-foreground/40')"
+                        />
+                        <div class="min-w-0 flex-1">
+                            <p class="truncate text-[12px]">
+                                {{ d.name || d.id }}
+                                <span
+                                    v-if="d.id === store.defaultDownstreamId"
+                                    class="ml-1 text-[10px] text-primary"
+                                >默认</span>
+                            </p>
+                            <p class="truncate text-[11px] text-muted-foreground/80">
+                                {{ d.kind }}
+                                <span v-if="!d.available && d.reason"> · {{ d.reason }}</span>
+                            </p>
+                        </div>
+                        <UiBadge
+                            :tone="d.available ? 'success' : (d.enabled ? 'warning' : 'outline')"
+                            class="shrink-0 text-micro"
+                        >
+                            {{ d.enabled ? (d.available ? '可用' : '离线') : '停用' }}
+                        </UiBadge>
                     </div>
                 </div>
 
-                <div v-if="(extension?.clients?.length ?? 0) > 0"
-                    class="border-t border-border/40 px-5 py-3">
-                    <div v-for="c in (extension?.clients ?? [])" :key="c.id"
-                        class="flex items-center gap-2 py-1">
-                        <span class="size-1.5 shrink-0 rounded-full bg-success animate-pulse" />
-                        <span class="min-w-0 flex-1 truncate font-mono text-[11px]">
-                            {{ c.ext || 'extension' }}
-                            <span v-if="c.version" class="text-muted-foreground">v{{ c.version }}</span>
-                        </span>
-                        <span class="shrink-0 text-[11px] text-muted-foreground">
-                            {{ humanDuration(c.connectedForSec) }}
-                        </span>
-                    </div>
-                </div>
-                <div v-else class="border-t border-border/40 px-5 py-6 text-center">
-                    <p class="text-[12px] text-muted-foreground">尚未接入</p>
-                    <p class="mt-1 text-[11px] text-muted-foreground/70">
-                        在酒馆中启用 SnowLuma Bridge 扩展后自动连接
+                <div class="border-t border-border/40 px-5 py-2.5">
+                    <p class="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <Info class="size-3.5 shrink-0" />
+                        {{ store.live
+                            ? '服务变化会即时推送，无需等待轮询'
+                            : '实时通道未连接，当前按轮询刷新' }}
                     </p>
                 </div>
             </UiCard>
