@@ -337,6 +337,65 @@ export class FaceStore {
         const f = hit[Math.floor(Math.random() * hit.length)];
         return this.toDto(f);
     }
+
+    /**
+     * 按短 ID 取表情（供 [表情:#id] 精确选择）。
+     *
+     * 为什么要有这个：AI 拿到每个表情的「短 ID + 标签 + 描述」后，
+     * 可以精确挑出最贴合当前对话的那一张，而不是按标签随机撞。
+     * 短 ID 取 md5 前 6 位，足够区分且省 token。
+     *
+     * @param {string} id 短 ID，可带或不带 #
+     * @param {string} [keyword] 可选的标签/描述关键词，用于在多个同 ID 前缀中消歧
+     */
+    pickById(id, keyword = '') {
+        const want = String(id ?? '').replace(/^#/, '').trim().toLowerCase();
+        if (!want) return null;
+
+        const hit = this.data.faces.filter((f) => f.md5.toLowerCase().startsWith(want));
+        if (hit.length === 0) return null;
+
+        // 多个候选（罕见）：用关键词再筛一次
+        if (hit.length > 1 && keyword) {
+            const k = String(keyword).trim().toLowerCase();
+            const refined = hit.filter(
+                (f) =>
+                    f.aiTags.some((x) => x.toLowerCase().includes(k)) ||
+                    f.userTags.some((x) => x.toLowerCase().includes(k)) ||
+                    String(f.caption ?? '').toLowerCase().includes(k),
+            );
+            if (refined.length > 0) return this.toDto(refined[0]);
+        }
+
+        return this.toDto(hit[0]);
+    }
+
+    /**
+     * 生成给 AI 看的表情清单（带描述，便于挑选贴合对话的那张）。
+     *
+     * 相比只下发标签，多给「短 ID + 描述」能让 AI 判断这张图具体是什么，
+     * 而不是靠标签名猜。实测 11 个表情约 435 字符，成本可接受；
+     * 超过 limit 时按「标签使用频次」排序截断。
+     *
+     * @param {object} opts
+     * @param {number} opts.limit 最多返回多少个
+     */
+    manifest({ limit = 60 } = {}) {
+        const items = this.data.faces
+            .filter((f) => (f.aiTags.length > 0 || f.userTags.length > 0))
+            .map((f) => {
+                const tags = [...new Set([...f.userTags, ...f.aiTags])];
+                return {
+                    id: f.md5.slice(0, 6),
+                    tags,
+                    caption: String(f.caption ?? '').replace(/\s+/g, ' ').slice(0, 60),
+                };
+            });
+
+        // 先按「用户标签优先、标签数多优先」排，再截断
+        items.sort((a, b) => b.tags.length - a.tags.length);
+        return items.slice(0, limit);
+    }
 }
 
 export { uniqueTags, normalizeTag };

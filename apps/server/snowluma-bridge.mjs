@@ -656,11 +656,21 @@ async function sendQQ(msg) {
                 await new Promise((r) => setTimeout(r, seg.delayMs));
             }
             // 检测消息里的图片标记，转成消息段
-            // [表情:标签] 会按表情库检索出真实图片地址
-            const payload = buildOutgoingPayload(seg.text, (tag) => {
+            // [表情:#id] 按短 ID 精确取图；[表情:标签] 按标签随机取
+            const payload = buildOutgoingPayload(seg.text, (token) => {
                 try {
-                    const hit = faces?.pickByTag(tag);
-                    return hit?.imageUrl ? absoluteFaceUrl(hit.imageUrl) : null;
+                    if (!faces) return null;
+                    // # 开头视为短 ID
+                    if (token.startsWith('#')) {
+                        const hit = faces.store.pickById(token);
+                        if (!hit) return null;
+                        rememberFace(hit.md5.slice(0, 6));
+                        return hit.imageUrl ? absoluteFaceUrl(hit.imageUrl) : null;
+                    }
+                    const hit = faces.pickByTag(token);
+                    if (!hit) return null;
+                    rememberFace(hit.md5.slice(0, 6));
+                    return hit.imageUrl ? absoluteFaceUrl(hit.imageUrl) : null;
                 } catch {
                     return null;
                 }
@@ -680,25 +690,50 @@ async function sendQQ(msg) {
 }
 
 /**
+ * 最近发送过的表情（短 ID）。
+ *
+ * 用途：避免 AI 在连续几条消息里重复用同一张。
+ * AI 自己记不住上一轮发了什么，所以由 Bridge 记录再随清单下发。
+ */
+const recentFaces = [];
+const RECENT_FACES_MAX = 3;
+
+function rememberFace(id) {
+    const v = String(id ?? '').replace(/^#/, '');
+    if (!v) return;
+    const i = recentFaces.indexOf(v);
+    if (i >= 0) recentFaces.splice(i, 1);
+    recentFaces.push(v);
+    while (recentFaces.length > RECENT_FACES_MAX) recentFaces.shift();
+}
+
+/**
  * 表情库的提示词用清单。
  *
- * 只下发「标签 + 每个标签的表情数量」，不下发 URL：
- *   - 11 个表情全 URL 约 1300 token，标签清单约 100 token
- *   - AI 输出 [表情:标签] 后由 Bridge 查库换成真实 URL
+ * 为什么带描述而不只是标签：
+ *   只给标签时 AI 只能按名字猜，例如「疑惑」它并不知道图里是熊猫还是黑猫。
+ *   带上「短 ID + 标签 + 一句描述」后，AI 能挑出真正贴合当前对话的那张。
+ *   实测 11 个表情约 435 字符，100 个约 4000 字符，成本可接受。
  *
- * 数量过多时按使用频次截断，避免提示词膨胀。
+ * 超过上限时按标签丰富度截断，避免提示词无限膨胀。
  */
-function faceTagManifest(limit = 40) {
+function faceTagManifest(limit = 60) {
     try {
-        if (!faces) return { tags: [], total: 0 };
+        if (!faces) return { tags: [], items: [], total: 0 };
         const stats = faces.tagStats();
         const total = faces.stats().total;
+        const items = faces.store.manifest({ limit });
         return {
-            tags: stats.slice(0, limit).map((t) => ({ tag: t.tag, count: t.total })),
+            // 保留 tags 字段：旧版扩展仍在读它
+            tags: stats.slice(0, 40).map((t) => ({ tag: t.tag, count: t.total })),
+            // 新增：带描述的表情清单，供新版扩展做精确选择
+            items,
+            // 最近发过的表情，让 AI 避开重复
+            recent: [...recentFaces],
             total,
         };
     } catch {
-        return { tags: [], total: 0 };
+        return { tags: [], items: [], recent: [], total: 0 };
     }
 }
 
@@ -729,7 +764,11 @@ function absoluteFaceUrl(faceOrUrl) {
  *
  * 标签解析失败时静默丢弃该标记，避免把 `[表情:开心]` 原文发给用户。
  */
-function buildOutgoingPayload(text, resolveTag) {
+function buildOutgoingPayload(text, resolveFace) {
+    // 支持三种写法：
+    //   [表情:#abc123]   短 ID 精确选择（AI 主要用这个）
+    //   [表情:开心]      按标签随机取一张（兼容旧行为）
+    //   [图片:URL]       直链
     const imgRe = /\[(?:img|image|图片|表情)[:：]\s*([^\]\s]+)\s*\]/gi;
     const imgSrcRe = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
     const urlLike = /^(https?:|data:|file:|\/\/|\.\/|\/)/i;
@@ -743,7 +782,7 @@ function buildOutgoingPayload(text, resolveTag) {
             index: m.index,
             len: m[0].length,
             value,
-            kind: urlLike.test(value) ? 'url' : 'tag',
+            kind: urlLike.test(value) ? 'url' : 'face',
         });
     }
     while ((m = imgSrcRe.exec(text)) !== null) {
@@ -758,6 +797,8 @@ function buildOutgoingPayload(text, resolveTag) {
 
     const segs = [];
     let cursor = 0;
+    let faceCount = 0;
+
     for (const f of found) {
         if (f.index > cursor) {
             const t = text.slice(cursor, f.index).trim();
@@ -767,22 +808,39 @@ function buildOutgoingPayload(text, resolveTag) {
         let url = null;
         if (f.kind === 'url') {
             url = f.value;
-        } else if (typeof resolveTag === 'function') {
+        } else if (typeof resolveFace === 'function') {
             try {
-                url = resolveTag(f.value);
+                url = resolveFace(f.value);
             } catch {
                 url = null;
             }
             if (url) {
-                log(`表情标签已解析：[表情:${f.value}] → ${String(url).slice(0, 60)}…`);
+                faceCount += 1;
+                log(`表情已解析：[表情:${f.value}] → ${String(url).slice(0, 60)}…`);
             } else {
-                log(`⚠ 表情标签未命中，已丢弃：[表情:${f.value}]`);
+                log(`⚠ 表情未命中，已丢弃：[表情:${f.value}]`);
             }
         }
 
         if (url) segs.push({ type: 'image', data: { file: url } });
         cursor = f.index + f.len;
     }
+
+    // 一条消息里最多 3 张表情，超出的静默丢弃，避免刷屏
+    const images = segs.filter((s) => s.type === 'image').length;
+    if (images > 3) {
+        log(`⚠ 单条消息含 ${images} 张表情，已裁剪到 3 张`);
+        let kept = 0;
+        for (let i = 0; i < segs.length; i += 1) {
+            if (segs[i].type !== 'image') continue;
+            kept += 1;
+            if (kept > 3) {
+                segs.splice(i, 1);
+                i -= 1;
+            }
+        }
+    }
+
     const tail = text.slice(cursor).trim();
     if (tail) segs.push({ type: 'text', data: { text: tail } });
 
