@@ -73,9 +73,14 @@ export interface SessionChoiceDto {
     character?: string;
     world?: string;
     replyProcessors?: unknown[];
+    /** 会话级后端；缺失 = 继承全局 cfg.backend */
+    backend?: 'taver' | 'dsh';
     createdAt?: string;
     updatedAt?: string;
 }
+
+/** 会话实际生效的后端（含继承信息） */
+export type SessionBackendDto = 'taver' | 'dsh';
 
 export interface CatalogDto {
     characters: string[];
@@ -89,6 +94,8 @@ export interface StatusDto {
     selfId: string;
     sessions: Record<string, SessionStat>;
     sessionChoices: Record<string, SessionChoiceDto>;
+    /** 每个会话实际生效的后端：{ key: { backend, inherited } } */
+    sessionBackends?: Record<string, { backend: SessionBackendDto; inherited: boolean }>;
     catalogs: CatalogDto;
     config: Record<string, unknown>;
     // 新增详细状态（后端可能先于前端升级，故设为可选）
@@ -128,9 +135,15 @@ export const api = {
         character?: string;
         world?: string;
         replyProcessors?: unknown[];
+        /** 'taver' / 'dsh' = 会话级；'' = 清除会话级设置，继承全局 */
+        backend?: SessionBackendDto | '';
         reset?: boolean | 'pipeline';
     }) =>
-        request<{ ok: boolean }>('/session-choice', {
+        request<{
+            ok: boolean;
+            sessions: Record<string, SessionChoiceDto>;
+            sessionBackends?: Record<string, { backend: SessionBackendDto; inherited: boolean }>;
+        }>('/session-choice', {
             method: 'POST',
             body: JSON.stringify(payload),
         }),

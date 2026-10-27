@@ -24,6 +24,8 @@ const iconComp = computed(() => iconMap[props.icon] ?? LayoutDashboard);
 
 const onebotOnline = computed(() => status.onebotConnected);
 const extOnline = computed(() => (status.status?.stClients ?? 0) > 0);
+/** 当前回复后端：taver（酒馆）/ dsh */
+const backend = computed(() => status.status?.config?.backend === 'dsh' ? 'dsh' : 'taver');
 </script>
 
 <template>
@@ -59,17 +61,21 @@ const extOnline = computed(() => (status.status?.stClients ?? 0) > 0);
 
             <div
                 class="flex items-center gap-1.5 rounded-full border border-border/70 bg-card/60 px-2.5 py-1"
-                :title="extOnline ? '酒馆扩展已接入' : '酒馆扩展未接入'"
+                :title="backend === 'dsh'
+                    ? '当前走 dsh（DeepSeek Harness）'
+                    : (extOnline ? '酒馆扩展已接入' : '酒馆扩展未接入')"
             >
                 <span
                     :class="[
                         'size-1.5 rounded-full',
-                        extOnline ? 'bg-aurora animate-pulse' : 'bg-muted-foreground/50',
+                        backend === 'dsh'
+                            ? 'bg-primary animate-pulse'
+                            : (extOnline ? 'bg-aurora animate-pulse' : 'bg-muted-foreground/50'),
                     ]"
                 />
                 <Boxes class="size-3 text-muted-foreground" />
                 <span class="text-[11px] font-medium tabular-nums">
-                    酒馆 {{ status.status?.stClients ?? 0 }}
+                    {{ backend === 'dsh' ? 'dsh 后端' : `酒馆 ${status.status?.stClients ?? 0}` }}
                 </span>
             </div>
         </div>

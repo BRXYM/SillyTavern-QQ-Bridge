@@ -17,6 +17,7 @@
 //   配置热保存到 config.json（OneBot 连接参数修改后自动重连）
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
@@ -39,6 +40,18 @@ import {
 } from './sillytavern-service.mjs';
 import { FaceService } from './faces-service.mjs';
 import { TAG_VOCAB } from './faces-store.mjs';
+import { DshClient, findDsh, listProfiles, dshHome, invalidateDshProbe } from './dsh-service.mjs';
+import {
+    DshService,
+    PLUGIN_NAME,
+    PLUGIN_ROW_ID,
+    injectPlugin,
+    listProfileBundles,
+    pluginTargetDir,
+    probeInjection,
+    removePlugin,
+    verifyInjection,
+} from './dsh-profile-service.mjs';
 import { OllamaClient, OllamaDaemon, countModelsIn } from './ollama-service.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -92,7 +105,29 @@ const DEFAULT_CONFIG = {
         character: '',      // 角色名（留空=不自动选择）
         world: '',          // 世界书名（留空=不自动激活）
     },
+    // 后端选择：'taver' 走酒馆（默认） / 'dsh' 走 DeepSeek Harness
+    backend: 'taver',
+    // dsh 接入参数
+    dshExePath: '',                     // 留空自动探测
+    dshProfile: 'headless',             // headless | web | desktop
+    dshWorkRoot: '',                    // 每个会话的工作目录根，留空用系统临时目录
+    dshTimeoutMs: 180000,               // 单次超时
+    dshHistoryTurns: 6,                 // 保留几轮上下文（0 = 不保留）
+    dshSystemPrompt: '',                // 追加到内置提示词之后的人设/约束
+    dshErrorReply: '',                  // 调用失败时回给 QQ 的话；留空 = 静默
+    dshPersistHistory: true,            // 上下文落盘，重启后仍能续聊
+    dshConcurrency: 1,                  // 同时最多跑几个 dsh 进程（多人并发时排队）
+    // dsh 常驻服务（web profile）：由 Bridge 启停，进程分离不随 Bridge 退出
+    dshServiceProfile: 'web',
+    dshServicePort: 3080,
+    dshServiceLogFile: '',              // 留空写到系统临时目录
+    // dsh 连接插件：装进 profile 后由 dsh 主动连回本 Bridge
+    dshPluginEnabled: true,             // 连接插件在线时优先走插件链路
+    dshPluginToken: '',                 // 插件握手 token（留空不校验）
 };
+
+/** dsh 连接插件链路：插件在线时优先使用，避免每条消息起子进程 */
+const dshPluginClients = new Set();
 
 // ================= 会话持久化（文件存储，无需数据库） =================
 // 结构：{ "private_123456": { character: "雪乃", world: "雪之世界书", updatedAt: "..." } }
@@ -134,6 +169,20 @@ function sessionDefaults(key) {
         world: s.world || cfg.defaults?.world || '',
     };
 }
+
+/**
+ * 某会话实际使用的后端。
+ *
+ * 三层策略（与角色/世界书一致）：
+ *   sessions[key].backend = 'dsh' | 'taver'  → 该会话独立使用
+ *   sessions[key].backend 缺失 / 空           → 继承全局 cfg.backend
+ */
+function sessionBackend(key) {
+    const own = sessions[key]?.backend;
+    if (own === 'dsh' || own === 'taver') return { backend: own, inherited: false };
+    return { backend: cfg.backend === 'dsh' ? 'dsh' : 'taver', inherited: true };
+}
+
 
 
 let configFileExisted = true;
@@ -1074,12 +1123,29 @@ function handleMessage(event) {
     const group_id = event.group_id ?? null;
     const user_id = event.user_id;
 
-    if (message_type === 'group' && cfg.trigger.allowedGroups.length && !cfg.trigger.allowedGroups.includes(group_id)) return;
-    if (cfg.trigger.allowedUsers.length && !cfg.trigger.allowedUsers.includes(user_id)) return;
+    // 触发规则：群里仅 @ / 私聊开关 / 用户与群白名单
+    // 酒馆与 dsh 两条链路共用同一套规则，避免"切了后端就绕过限制"
+    const trigger = { ...DEFAULT_CONFIG.trigger, ...(cfg.trigger ?? {}) };
+    const allowedGroups = Array.isArray(trigger.allowedGroups) ? trigger.allowedGroups : [];
+    const allowedUsers = Array.isArray(trigger.allowedUsers) ? trigger.allowedUsers : [];
+    if (
+        message_type === 'group' &&
+        allowedGroups.length > 0 &&
+        !allowedGroups.some((g) => String(g) === String(group_id))
+    ) {
+        return;
+    }
+    if (
+        allowedUsers.length > 0 &&
+        !allowedUsers.some((u) => String(u) === String(user_id))
+    ) {
+        return;
+    }
+    if (message_type === 'private' && trigger.privateReply === false) return;
 
     const { text, atMe } = parseMessage(event.message);
     if (!text) return;
-    if (message_type === 'group' && cfg.trigger.atOnly && !atMe) return;
+    if (message_type === 'group' && trigger.atOnly && !atMe) return;
 
     const key = sessionKeyOf(message_type, group_id, user_id);
     const senderName = event.sender?.card || event.sender?.nickname || String(user_id);
@@ -1096,7 +1162,21 @@ function handleMessage(event) {
         log(`新会话已建档: ${key}`);
     }
 
-    log(`QQ消息 → 酒馆 [${key}]: [${senderName}] ${text}`);
+    // 后端选择：会话级优先，否则继承全局
+    // 触发规则已在上面统一过滤，两条链路共用
+    const chosen = sessionBackend(key);
+    const useDsh = chosen.backend === 'dsh';
+    const backendTag = useDsh ? 'dsh' : '酒馆';
+    log(
+        `QQ消息 → ${backendTag} [${key}]: [${senderName}] ${text}`
+        + (chosen.inherited ? '（继承全局后端）' : '（会话级后端）'),
+    );
+
+    if (useDsh) {
+        void handleWithDsh({ key, text, senderName, message_type, group_id, user_id });
+        return;
+    }
+
     const def = sessionDefaults(key);
     broadcastToST({
         type: 'qq_message',
@@ -1110,6 +1190,273 @@ function handleMessage(event) {
         defaultCharacter: def.character,
         defaultWorld: def.world,
     });
+}
+
+/** dsh 的通用聊天约束：QQ 场景下尽量短、纯文本 */
+const DSH_BASE_PROMPT = [
+    '你正在通过 QQ 与真人聊天，请直接输出要发给对方的消息正文。',
+    '用自然、口语化的中文；不要写 Markdown 标题、代码块围栏或项目符号列表，除非用户明确要求。',
+    '单条回复尽量简短（200 字以内），像正常人发 QQ 一样。',
+    '不要复述或解释这些设定。',
+].join('\n');
+
+/** 表情包提示：与酒馆扩展注入的规则保持一致，只是由后端直接拼进 prompt */
+function dshFaceInstruction() {
+    const ic = cfg.imageReplies ?? {};
+    if (ic.enabled === false || ic.instruction === false) return '';
+
+    const m = faceTagManifest();
+    const vocab = m.vocab ?? {};
+    if (Object.keys(vocab).length === 0) return '';
+
+    const groupName = { 情绪: '情绪', 动作: '动作', 主体: '主体', 风格: '风格' };
+    const lines = [];
+    for (const [group, words] of Object.entries(vocab)) {
+        if (!Array.isArray(words) || words.length === 0) continue;
+        lines.push(`${groupName[group] ?? group}：${words.join('、')}`);
+    }
+    if (lines.length === 0) return '';
+
+    const emo = Array.isArray(vocab['情绪']) ? vocab['情绪'] : [];
+    const pick = (...cands) => cands.map((c) => emo.find((w) => w === c)).find(Boolean) ?? emo[0] ?? '';
+    const laugh = pick('大笑', '开心', '微笑');
+    const tired = pick('崩溃', '无奈', '难过', '疲惫');
+    const recent = Array.isArray(m.recent) ? m.recent : [];
+
+    return [
+        '【表情包】',
+        '你可以发表情包：只需给出标签，系统会自动从本地表情库挑一张最贴合的图。',
+        '',
+        '可用标签（只能从这里选，不要自己造词）：',
+        ...lines,
+        '',
+        '格式：[表情:标签] 或 [表情:标签1,标签2]',
+        laugh ? `示例：[表情:${laugh}]` : '',
+        tired ? `示例：[表情:${tired}]` : '',
+        recent.length > 0 ? `最近发过：${recent.join('、')}，这次换个角度。` : '',
+        '情绪明显、气氛轻松时再发；大多数回复 1 个，最多 3 个；不确定就不发。',
+        '标记不会显示给用户，会被系统替换成真实图片。',
+    ].filter(Boolean).join('\n');
+}
+
+/** 图片提示：与酒馆扩展的图片注入保持一致 */
+function dshImageInstruction() {
+    const ic = cfg.imageReplies ?? {};
+    if (ic.enabled === false || ic.instruction === false) return '';
+    const base = String(ic.baseUrl ?? '').trim();
+    return [
+        '【图片】',
+        '需要配图时可以在回复里插入 [图片:公网可访问的图片URL]，客户端会渲染成图片消息。',
+        base ? `图片库根地址：${base}（可直接拼接文件名）` : '',
+        '不要编造没把握的图片链接；不确定就不配图。',
+    ].filter(Boolean).join('\n');
+}
+
+/** 每条 QQ 消息调用 dsh 时附带的系统设定 */
+function dshSystemPrompt(sessionKey) {
+    const parts = [DSH_BASE_PROMPT];
+
+    // 会话级 / 全局默认角色：给 dsh 一个身份，否则它只会用"助手"口吻
+    const def = sessionKey ? sessionDefaults(sessionKey) : { character: '', world: '' };
+    if (def.character) {
+        parts.push(
+            `【角色】你在扮演「${def.character}」，用第一人称以这个角色的口吻说话。`
+            + (def.world ? `\n背景设定：${def.world}（不需要逐条复述，自然地体现即可）。` : ''),
+        );
+    }
+
+    const extra = String(cfg.dshSystemPrompt ?? '').trim();
+    if (extra) parts.push(`【补充设定】\n${extra}`);
+    const face = dshFaceInstruction();
+    if (face) parts.push(face);
+    const img = dshImageInstruction();
+    if (img) parts.push(img);
+    return parts.join('\n\n');
+}
+
+/** 把 dsh 的最终文本走完「处理管道 → 分段/表情 → QQ」 */
+async function deliverDshReply({ key, reply, route, elapsedMs, via }) {
+    const text = String(reply ?? '').trim();
+    if (!text) {
+        log(`dsh 返回空回复 [${key}]`);
+        return;
+    }
+    log(`dsh 原始回复 [${key}]：${text.slice(0, 80)}（${(elapsedMs / 1000).toFixed(1)}s，${via}）`);
+
+    // 与酒馆回复保持一致：会话级管道优先，否则用全局管道
+    const sessionRules = sessions[key]?.replyProcessors;
+    const rules = Array.isArray(sessionRules) ? sessionRules : (cfg.replyProcessors ?? []);
+    const processed = applyReplyProcessors(text, rules);
+    if (!processed) {
+        log('dsh 回复经规则处理后为空，不发送');
+        return;
+    }
+
+    // 复用既有发送链路（分段、表情解析、图片下发、会话统计）
+    await sendQQ({ ...route, text: processed, sessionKey: key });
+}
+
+/** 当前是否有 dsh 连接插件在线（插件链路优先于 headless 子进程） */
+function dshPluginOnline() {
+    if (cfg.dshPluginEnabled === false) return false;
+    for (const s of dshPluginClients) {
+        if (s.readyState === WebSocket.OPEN) return true;
+    }
+    return false;
+}
+
+/** 取一个在线的插件连接（多开时用第一个） */
+function pickDshPlugin() {
+    for (const s of dshPluginClients) {
+        if (s.readyState === WebSocket.OPEN) return s;
+    }
+    return null;
+}
+
+/**
+ * 走 dsh 处理一条 QQ 消息。
+ *
+ * 两种传输，回复处理完全一致：
+ *   1. 连接插件在线 → 通过 WS 把消息投给 dsh 进程内的插件（常驻、无需起进程）
+ *   2. 否则 → 起一次性 `dsh --profile headless` 子进程（原有行为）
+ *
+ * 与酒馆链路共用触发规则、会话路由、回复处理管道、表情解析与分段。
+ */
+async function handleWithDsh({ key, text, senderName, message_type, group_id, user_id }) {
+    const route = sessionRoutes.get(key) ?? { message_type, group_id, user_id, sessionKey: key };
+
+    // 群聊里带一句发送者，方便模型区分是谁在说话（sessionKey 本身已按人隔离）
+    const userText = message_type === 'group' ? `[群成员 ${senderName}] ${text}` : text;
+
+    // ---------- 路径 1：连接插件 ----------
+    const plugin = pickDshPlugin();
+    if (plugin) {
+        const sent = await askDshPlugin(plugin, { sessionKey: key, text: userText });
+        if (!sent.ok) {
+            log(`dsh 插件投递失败 [${key}]：${sent.error}，回落到 headless`);
+        } else {
+            return;
+        }
+    }
+
+    // ---------- 路径 2：headless 子进程 ----------
+    if (!dsh) {
+        log(`dsh 未初始化，无法处理 [${key}]`);
+        return;
+    }
+
+    const r = await dsh.ask({ sessionKey: key, text: userText, system: dshSystemPrompt(key) });
+
+    if (!r.ok) {
+        log(`dsh 回复失败 [${key}]: ${r.error}`);
+        // 可选：失败时回一句提示，避免用户干等（默认静默，只写日志）
+        const fallback = String(cfg.dshErrorReply ?? '').trim();
+        if (fallback) {
+            await sendQQ({ ...route, text: fallback, sessionKey: key });
+        }
+        return;
+    }
+
+    await deliverDshReply({ key, reply: r.text, route, elapsedMs: r.elapsedMs, via: 'headless' });
+}
+
+/** 等待插件回包的挂起表：requestId → { resolve, timer } */
+const dshPluginPending = new Map();
+let dshPluginReqSeq = 0;
+
+/** 通过插件连接投递一条消息，并在超时前等回复 */
+function askDshPlugin(socket, { sessionKey, text }) {
+    return new Promise((resolve) => {
+        const requestId = `dsh_${++dshPluginReqSeq}`;
+        const timeoutMs = Number(cfg.dshTimeoutMs ?? 180000);
+        const timer = setTimeout(() => {
+            if (!dshPluginPending.has(requestId)) return;
+            dshPluginPending.delete(requestId);
+            resolve({ ok: false, error: `插件 ${Math.round(timeoutMs / 1000)}s 内未回复` });
+        }, timeoutMs);
+        dshPluginPending.set(requestId, { resolve, timer, socket, sessionKey });
+        try {
+            socket.send(JSON.stringify({
+                type: 'dsh_ask',
+                requestId,
+                sessionKey,
+                text,
+                // 会话级角色/世界书以系统提示形式带给插件侧 Agent
+                system: dshSystemPrompt(sessionKey),
+            }));
+        } catch (e) {
+            clearTimeout(timer);
+            dshPluginPending.delete(requestId);
+            resolve({ ok: false, error: e.message });
+        }
+    });
+}
+
+/** 处理来自 dsh 连接插件的消息 */
+function handleDshPluginMessage(socket, msg) {
+    if (msg.type === 'dsh_hello') {
+        if (cfg.dshPluginToken && String(msg.token ?? '') !== String(cfg.dshPluginToken)) {
+            log('⚠ dsh 插件握手被拒绝：token 不匹配');
+            try { socket.close(); } catch { /* 忽略 */ }
+            return;
+        }
+        socket.meta.kind = 'dsh-plugin';
+        socket.meta.dshProfile = msg.profile ?? '';
+        socket.meta.dshVersion = msg.version ?? '';
+        socket.meta.dshPid = Number(msg.pid) || 0;
+        dshPluginClients.add(socket);
+        if (cfg.dshPluginEnabled === false) {
+            log('⚠ dsh 插件已连接，但配置里关闭了插件链路（dshPluginEnabled=false），仍按 headless 处理');
+        }
+        log(
+            `dsh 连接插件已接入（pid ${msg.pid ?? '?'}${msg.profile ? `，profile=${msg.profile}` : ''}，`
+            + `已有会话 ${(msg.sessions ?? []).length} 个）→ dsh 消息改走插件链路`,
+        );
+        try {
+            socket.send(JSON.stringify({ type: 'dsh_hello_ack', server: 'snowluma-bridge' }));
+        } catch { /* 忽略 */ }
+        return;
+    }
+
+    if (msg.type === 'pong') return;
+
+    if (msg.type === 'dsh_reply' || msg.type === 'dsh_error') {
+        const record = dshPluginPending.get(msg.requestId);
+        if (!record) {
+            // 没有等待者（可能超时后才有结果）：只记日志
+            log(`dsh 插件回包无等待者（${msg.requestId ?? '无 requestId'}），已忽略`);
+            return;
+        }
+        clearTimeout(record.timer);
+        dshPluginPending.delete(msg.requestId);
+
+        if (msg.type === 'dsh_error') {
+            record.resolve({ ok: false, error: msg.error || '插件侧处理失败' });
+            log(`dsh 插件处理失败 [${msg.sessionKey}]：${msg.error}`);
+            return;
+        }
+
+        record.resolve({ ok: true, text: msg.text, elapsedMs: Number(msg.elapsedMs) || 0 });
+        // 直接在这里发回 QQ，链路与 headless 完全一致
+        const key = msg.sessionKey || record.sessionKey;
+        const route = sessionRoutes.get(key);
+        if (!route) {
+            log(`⚠ dsh 插件回复无法路由（sessionKey=${key}），已丢弃`);
+            return;
+        }
+        void deliverDshReply({
+            key,
+            reply: msg.text,
+            route,
+            elapsedMs: Number(msg.elapsedMs) || 0,
+            via: 'plugin',
+        });
+        return;
+    }
+
+    if (msg.type === 'dsh_reset_ack') {
+        log(`dsh 插件：已清空上下文 [${msg.sessionKey}]${msg.existed ? '' : '（原本为空）'}`);
+    }
 }
 
 // ================= 酒馆扩展（下游） =================
@@ -1197,6 +1544,11 @@ wss.on('connection', (socket) => {
             try { socket.send(JSON.stringify({ type: 'pong' })); } catch { /* 忽略 */ }
             return;
         }
+        // ---------- dsh 连接插件（常驻在 dsh 进程内） ----------
+        if (String(msg.type ?? '').startsWith('dsh_')) {
+            handleDshPluginMessage(socket, msg);
+            return;
+        }
         if (msg.type === 'ext_log') {        // 扩展内部日志：写入控制台便于排查
             log(msg.text ?? '[EXT] (空)');
             return;
@@ -1273,7 +1625,12 @@ wss.on('connection', (socket) => {
         }
     });
     socket.on('close', () => {
+        const wasPlugin = dshPluginClients.delete(socket);
         stClients.delete(socket);
+        if (wasPlugin) {
+            log(`dsh 连接插件已断开（剩余 ${dshPluginClients.size}）→ 无插件时自动回落到 headless`);
+            return;
+        }
         log(`酒馆扩展断开（剩余 ${stClients.size}）`);
     });
 });
@@ -1345,6 +1702,99 @@ function applyOllamaConfig() {
     });
 }
 applyOllamaConfig();
+
+// ================= dsh（DeepSeek Harness）=================
+// 延迟初始化：handleWithDsh 可能较早引用它，用 let 占位避免暂时性死区。
+let dsh = null;
+/** 上下文落盘位置：与 config.json 同目录，随仓库数据一起保留 */
+const DSH_HISTORY_PATH = path.join(__dirname, 'dsh-history.json');
+function buildDsh() {
+    return new DshClient({
+        exePath: cfg.dshExePath ?? '',
+        profile: cfg.dshProfile ?? 'headless',
+        workRoot: cfg.dshWorkRoot ?? '',
+        timeoutMs: Number(cfg.dshTimeoutMs ?? 180000),
+        historyTurns: Number(cfg.dshHistoryTurns ?? 6),
+        historyFile: cfg.dshPersistHistory === false ? '' : DSH_HISTORY_PATH,
+        concurrency: Number(cfg.dshConcurrency ?? 1),
+        log,
+    });
+}
+dsh = buildDsh();
+
+/** dsh 常驻服务 + 连接插件注入 */
+const DSH_PLUGIN_SOURCE_DIR = path.resolve(__dirname, '..', 'dsh-plugin');
+const DSH_SERVICE_LOG = path.join(os.tmpdir(), 'snowluma-dsh-service.log');
+let dshService = null;
+function buildDshService() {
+    return new DshService({
+        exePath: cfg.dshExePath ?? '',
+        profile: cfg.dshServiceProfile ?? 'web',
+        host: '127.0.0.1',
+        port: Number(cfg.dshServicePort ?? 3080),
+        logFile: cfg.dshServiceLogFile || DSH_SERVICE_LOG,
+        log,
+    });
+}
+dshService = buildDshService();
+
+/** 插件握手用的 Bridge 地址（插件跑在 dsh 进程里，连 127.0.0.1 即可） */
+function dshPluginUrl() {
+    return `ws://127.0.0.1:${cfg.stExtPort}`;
+}
+
+/** 重建 dsh 服务管理器（配置变更后） */
+function applyDshServiceConfig() {
+    dshService = buildDshService();
+    log(
+        `dsh 服务配置已生效（profile=${dshService.profile}，`
+        + `http://${dshService.host}:${dshService.port}，日志=${dshService.logFile}）`,
+    );
+}
+
+/** 连接插件的注入状态（含 profile / 插件目录 / 当前写入的连接参数） */
+function dshPluginStatus() {
+    const profile = cfg.dshServiceProfile ?? 'web';
+    return {
+        ok: true,
+        sourceDir: DSH_PLUGIN_SOURCE_DIR,
+        sourceExists: fs.existsSync(path.join(DSH_PLUGIN_SOURCE_DIR, 'package.json')),
+        pluginName: PLUGIN_NAME,
+        rowId: PLUGIN_ROW_ID,
+        targetDir: pluginTargetDir(dshHome()),
+        url: dshPluginUrl(),
+        config: {
+            url: dshPluginUrl(),
+            token: cfg.dshPluginToken ?? '',
+            cwdRoot: cfg.dshWorkRoot ?? '',
+        },
+        enabled: cfg.dshPluginEnabled !== false,
+        profiles: listProfileBundles(dshHome()),
+        injection: probeInjection({ profile, home: dshHome() }),
+        clients: [...dshPluginClients]
+            .filter((c) => c.readyState === WebSocket.OPEN)
+            .map((c) => ({
+                pid: c.meta?.dshPid ?? 0,
+                profile: c.meta?.dshProfile ?? '',
+                version: c.meta?.dshVersion ?? '',
+                connectedAt: c.meta?.connectedAt ?? null,
+            })),
+        online: dshPluginOnline(),
+    };
+}
+
+/** 配置变更后重建 dsh 客户端 */
+function applyDshConfig() {
+    dsh = buildDsh();
+    const st = dsh.status();
+    if (st.configuredMissing) {
+        log(`⚠ dsh：填写的路径不存在（${cfg.dshExePath}），已回落到 ${st.exePath || '自动探测失败'}`);
+    }
+    log(
+        `dsh 配置已生效（profile=${cfg.dshProfile ?? 'headless'}，后端=${cfg.backend ?? 'taver'}，`
+        + `并发=${dsh.concurrency}，上下文=${cfg.dshPersistHistory === false ? '仅内存' : DSH_HISTORY_PATH}）`,
+    );
+}
 
 /**
  * 找一个空闲的本地端口。
@@ -1454,6 +1904,13 @@ const consoleServer = http.createServer(async (req, res) => {
         const totalOut = statList.reduce((n, s) => n + (s.out ?? 0), 0);
         const lastActiveAt = statList.reduce((m, s) => Math.max(m, s.last ?? 0), 0);
 
+        // 每个会话实际生效的后端（会话级优先，否则继承全局）
+        const backendBySession = {};
+        for (const key of new Set([...sessionStats.keys(), ...Object.keys(sessions)])) {
+            const r = sessionBackend(key);
+            backendBySession[key] = { backend: r.backend, inherited: r.inherited };
+        }
+
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             // --- 兼容旧字段（前端已在用）---
@@ -1462,6 +1919,8 @@ const consoleServer = http.createServer(async (req, res) => {
             selfId,
             sessions: Object.fromEntries([...sessionStats.entries()]),
             sessionChoices: sessions,
+            /** 每个会话实际生效的后端：{ key: { backend, inherited } } */
+            sessionBackends: backendBySession,
             catalogs,
             logs: logBuffer,
             config: cfg,
@@ -1512,13 +1971,19 @@ const consoleServer = http.createServer(async (req, res) => {
         return;
     }
     if (req.method === 'POST' && req.url === '/api/session-choice') {
-        // 手动为某会话设置角色/世界书
+        // 手动为某会话设置角色/世界书/后端
         let body = '';
         req.on('data', (c) => (body += c));
         req.on('end', () => {
             try {
-                const { sessionKey, character, world, replyProcessors, reset } = JSON.parse(body);
+                const { sessionKey, character, world, replyProcessors, reset, backend } = JSON.parse(body);
                 if (!sessionKey) throw new Error('sessionKey required');
+
+                // 校验后端取值：'' = 清除会话级设置（继承全局）
+                if (backend !== undefined && !['', 'taver', 'dsh'].includes(String(backend))) {
+                    throw new Error("backend 只能是 'taver' / 'dsh' / ''（继承全局）");
+                }
+
                 if (reset === 'pipeline') {
                     // 只清除管道配置，恢复继承全局
                     if (sessions[sessionKey]) {
@@ -1529,15 +1994,46 @@ const consoleServer = http.createServer(async (req, res) => {
                 } else if (reset) {
                     delete sessions[sessionKey];
                     saveSessions();
+                    // 会话被重置时，把 dsh 侧上下文一起清掉，避免"删了会话但 AI 还记得"
+                    dsh?.clearHistory?.(sessionKey);
                 } else {
+                    // backend 为空串 = 删除键，回到继承全局
+                    if (backend === '') {
+                        if (sessions[sessionKey]) {
+                            delete sessions[sessionKey].backend;
+                            sessions[sessionKey].updatedAt = new Date().toISOString();
+                        }
+                    }
                     rememberSession(sessionKey, {
                         ...(character !== undefined ? { character } : {}),
                         ...(world !== undefined ? { world } : {}),
                         ...(replyProcessors !== undefined ? { replyProcessors } : {}),
+                        ...(backend && backend !== '' ? { backend } : {}),
                     });
+                    if (backend !== undefined) {
+                        const eff = sessionBackend(sessionKey);
+                        log(
+                            `会话后端已更新 [${sessionKey}]：`
+                            + `${eff.backend === 'dsh' ? 'dsh' : '酒馆'}`
+                            + `${eff.inherited ? '（继承全局）' : '（会话级）'}`,
+                        );
+                        // 切到 dsh 时给个明确提示，切回酒馆时提示扩展侧会接手
+                        if (eff.backend === 'dsh' && !eff.inherited && stClients.size === 0) {
+                            log('  提示：该会话改走 dsh，酒馆扩展是否连接不再影响它');
+                        }
+                    }
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: true, sessions }));
+                res.end(JSON.stringify({
+                    ok: true,
+                    sessions,
+                    sessionBackends: Object.fromEntries(
+                        Object.keys(sessions).map((k) => {
+                            const r = sessionBackend(k);
+                            return [k, { backend: r.backend, inherited: r.inherited }];
+                        }),
+                    ),
+                }));
             } catch (e) {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -1597,6 +2093,19 @@ const consoleServer = http.createServer(async (req, res) => {
                     patch.ollamaModelsDir !== undefined
                 ) {
                     applyOllamaConfig();
+                }
+
+                // dsh 相关配置变更后重建客户端
+                if (
+                    patch.dshExePath !== undefined ||
+                    patch.dshProfile !== undefined ||
+                    patch.dshWorkRoot !== undefined ||
+                    patch.dshTimeoutMs !== undefined ||
+                    patch.dshHistoryTurns !== undefined ||
+                    patch.dshPersistHistory !== undefined ||
+                    patch.dshConcurrency !== undefined
+                ) {
+                    applyDshConfig();
                 }
                 // defaults / 会话状态变更后主动同步给已连接的酒馆扩展
                 if (patch.defaults !== undefined) {
@@ -2540,6 +3049,344 @@ const consoleServer = http.createServer(async (req, res) => {
         return;
     }
 
+    // ================= dsh（DeepSeek Harness）=================
+    if (req.url?.startsWith('/api/dsh')) {
+        const u = new URL(req.url, 'http://127.0.0.1');
+        const p = u.pathname;
+        const json = (code, data) => {
+            res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify(data));
+        };
+        const readBody = () =>
+            new Promise((resolve) => {
+                let body = '';
+                req.on('data', (c) => (body += c));
+                req.on('end', () => {
+                    try {
+                        resolve(JSON.parse(body || '{}'));
+                    } catch {
+                        resolve({});
+                    }
+                });
+            });
+
+        // GET /api/dsh/status   探测安装与当前配置
+        if (req.method === 'GET' && p === '/api/dsh/status') {
+            // 手动「重新探测」时跳过 60s 缓存
+            if (u.searchParams.get('fresh') === '1') invalidateDshProbe();
+            const found = findDsh(cfg.dshExePath ?? '');
+            json(200, {
+                ok: true,
+                installed: !!found.path,
+                exePath: found.path,
+                /** 用户手动填写的路径（可能为空，也可能与探测结果不同） */
+                configuredExePath: cfg.dshExePath ?? '',
+                source: found.source,
+                version: found.version,
+                home: dshHome(),
+                profiles: listProfiles(),
+                backend: cfg.backend ?? 'taver',
+                config: {
+                    profile: cfg.dshProfile ?? 'headless',
+                    workRoot: cfg.dshWorkRoot ?? '',
+                    timeoutMs: Number(cfg.dshTimeoutMs ?? 180000),
+                    historyTurns: Number(cfg.dshHistoryTurns ?? 6),
+                    systemPrompt: cfg.dshSystemPrompt ?? '',
+                    errorReply: cfg.dshErrorReply ?? '',
+                    persistHistory: cfg.dshPersistHistory !== false,
+                    concurrency: Number(cfg.dshConcurrency ?? 1),
+                    serviceProfile: cfg.dshServiceProfile ?? 'web',
+                    servicePort: Number(cfg.dshServicePort ?? 3080),
+                    serviceLogFile: cfg.dshServiceLogFile ?? '',
+                    pluginToken: cfg.dshPluginToken ?? '',
+                    pluginEnabled: cfg.dshPluginEnabled !== false,
+                },
+                runtime: dsh?.status?.() ?? null,
+                load: dsh?.load?.() ?? null,
+                sessions: dsh?.listSessions?.() ?? [],
+                service: await dshService.inspect({ logTail: 25 }),
+                plugin: dshPluginStatus(),
+            });
+            return;
+        }
+
+        // POST /api/dsh/test   发一句话测试连通性（不影响真实会话）
+        if (req.method === 'POST' && p === '/api/dsh/test') {
+            const body = await readBody();
+            const text = String(body.text ?? '只回复两个字：正常').trim();
+            const rawKey = String(body.sessionKey ?? 'default').trim() || 'default';
+            // 测试会话统一加 `_test` 前缀，避免和真实 private_/group_ 会话串上下文
+            const sessionKey = rawKey.startsWith('_test') ? rawKey : `_test_${rawKey}`;
+            if (!dsh) {
+                json(500, { ok: false, error: 'dsh 未初始化' });
+                return;
+            }
+            const r = await dsh.ask({
+                sessionKey,
+                text,
+                system: dshSystemPrompt(),
+                useHistory: body.useHistory !== false,
+            });
+            json(r.ok ? 200 : 400, { ...r, sessionKey });
+            return;
+        }
+
+        // POST /api/dsh/backend   切换后端（taver / dsh）
+        if (req.method === 'POST' && p === '/api/dsh/backend') {
+            const body = await readBody();
+            const want = String(body.backend ?? '').trim();
+            if (!['taver', 'dsh'].includes(want)) {
+                json(400, { ok: false, error: "backend 只能是 'taver' 或 'dsh'" });
+                return;
+            }
+            cfg.backend = want;
+            saveConfig();
+            log(`后端已切换为：${want === 'dsh' ? 'dsh（DeepSeek Harness）' : '酒馆（SillyTavern）'}`);
+            json(200, { ok: true, backend: cfg.backend });
+            return;
+        }
+
+        // POST /api/dsh/config   更新 dsh 参数
+        if (req.method === 'POST' && p === '/api/dsh/config') {
+            const body = await readBody();
+            let rebuild = false;
+            const touch = (name) => {
+                if (body[name] !== undefined) rebuild = true;
+            };
+            if (body.exePath !== undefined) cfg.dshExePath = String(body.exePath).trim();
+            if (body.profile !== undefined) cfg.dshProfile = String(body.profile).trim() || 'headless';
+            if (body.workRoot !== undefined) cfg.dshWorkRoot = String(body.workRoot).trim();
+            if (body.timeoutMs !== undefined) cfg.dshTimeoutMs = Number(body.timeoutMs) || 180000;
+            if (body.historyTurns !== undefined) {
+                cfg.dshHistoryTurns = Math.max(0, Number(body.historyTurns) || 0);
+            }
+            ['exePath', 'profile', 'workRoot', 'timeoutMs', 'historyTurns'].forEach(touch);
+            if (body.systemPrompt !== undefined) cfg.dshSystemPrompt = String(body.systemPrompt);
+            if (body.errorReply !== undefined) cfg.dshErrorReply = String(body.errorReply);
+            if (body.concurrency !== undefined) {
+                cfg.dshConcurrency = Math.max(1, Math.min(8, Number(body.concurrency) || 1));
+                rebuild = true;
+            }
+            if (body.persistHistory !== undefined) {
+                cfg.dshPersistHistory = body.persistHistory !== false;
+                rebuild = true;
+            }
+            if (body.exePath !== undefined) invalidateDshProbe();
+
+            // 常驻服务参数
+            let serviceChanged = false;
+            if (body.serviceProfile !== undefined) {
+                cfg.dshServiceProfile = String(body.serviceProfile).trim() || 'web';
+                serviceChanged = true;
+            }
+            if (body.servicePort !== undefined) {
+                cfg.dshServicePort = Math.max(1, Math.min(65535, Number(body.servicePort) || 3080));
+                serviceChanged = true;
+            }
+            if (body.serviceLogFile !== undefined) {
+                cfg.dshServiceLogFile = String(body.serviceLogFile).trim();
+                serviceChanged = true;
+            }
+            // 连接插件参数
+            if (body.pluginToken !== undefined) cfg.dshPluginToken = String(body.pluginToken).trim();
+            if (body.pluginEnabled !== undefined) cfg.dshPluginEnabled = body.pluginEnabled !== false;
+
+            saveConfig();
+            if (rebuild) applyDshConfig();
+            if (serviceChanged) applyDshServiceConfig();
+            json(200, {
+                ok: true,
+                config: {
+                    exePath: cfg.dshExePath,
+                    profile: cfg.dshProfile,
+                    workRoot: cfg.dshWorkRoot,
+                    timeoutMs: cfg.dshTimeoutMs,
+                    historyTurns: cfg.dshHistoryTurns,
+                    systemPrompt: cfg.dshSystemPrompt ?? '',
+                    errorReply: cfg.dshErrorReply ?? '',
+                    persistHistory: cfg.dshPersistHistory !== false,
+                    concurrency: Number(cfg.dshConcurrency ?? 1),
+                    serviceProfile: cfg.dshServiceProfile ?? 'web',
+                    servicePort: Number(cfg.dshServicePort ?? 3080),
+                    serviceLogFile: cfg.dshServiceLogFile ?? '',
+                    pluginToken: cfg.dshPluginToken ?? '',
+                    pluginEnabled: cfg.dshPluginEnabled !== false,
+                },
+            });
+            return;
+        }
+
+        // POST /api/dsh/reset   清空会话上下文（留空 sessionKey 则清空全部）
+        if (req.method === 'POST' && p === '/api/dsh/reset') {
+            const body = await readBody();
+            const key = String(body.sessionKey ?? '').trim();
+            const removeWorkDir = body.removeWorkDir === true;
+            if (!key) {
+                if (body.all !== true) {
+                    json(400, { ok: false, error: '缺少 sessionKey（或传 all: true 清空全部）' });
+                    return;
+                }
+                const cleared = dsh?.clearAllHistory?.() ?? 0;
+                log(`dsh：已清空全部会话上下文（${cleared} 个）`);
+                json(200, { ok: true, cleared, sessions: dsh?.listSessions?.() ?? [] });
+                return;
+            }
+            const existed = dsh?.clearHistory(key, { removeWorkDir }) ?? false;
+            log(`dsh：已清空会话上下文 [${key}]${removeWorkDir ? '（含工作目录）' : ''}`);
+            json(200, {
+                ok: true,
+                sessionKey: key,
+                existed,
+                sessions: dsh?.listSessions?.() ?? [],
+            });
+            return;
+        }
+
+        // ================= dsh 常驻服务 =================
+        // GET /api/dsh/service    服务状态（端口 / PID / 日志尾巴）
+        if (req.method === 'GET' && p === '/api/dsh/service') {
+            const st = await dshService.inspect({ logTail: 40 });
+            json(200, { ok: true, ...st });
+            return;
+        }
+
+        // POST /api/dsh/service/start | stop | restart
+        const svcMatch = p.match(/^\/api\/dsh\/service\/(start|stop|restart)$/);
+        if (req.method === 'POST' && svcMatch) {
+            const action = svcMatch[1];
+            if (!dshService) {
+                json(500, { ok: false, error: 'dsh 服务未初始化' });
+                return;
+            }
+            try {
+                let r;
+                if (action === 'start') r = await dshService.start();
+                else if (action === 'stop') r = await dshService.stop();
+                else r = await dshService.restart();
+                const st = await dshService.inspect({ logTail: 20 });
+                json(r.ok ? 200 : 400, { ok: r.ok, action, result: r, ...st });
+            } catch (e) {
+                json(400, { ok: false, error: e.message });
+            }
+            return;
+        }
+
+        // ================= dsh 连接插件 =================
+        // GET /api/dsh/plugin    注入状态 + 在线连接
+        if (req.method === 'GET' && p === '/api/dsh/plugin') {
+            json(200, dshPluginStatus());
+            return;
+        }
+
+        // POST /api/dsh/plugin/inject   把插件装进 profile（可选顺带重启）
+        if (req.method === 'POST' && p === '/api/dsh/plugin/inject') {
+            const body = await readBody();
+            const profile = String(body.profile ?? cfg.dshServiceProfile ?? 'web').trim();
+            const inject = injectPlugin({
+                profile,
+                sourceDir: DSH_PLUGIN_SOURCE_DIR,
+                url: dshPluginUrl(),
+                token: String(body.token ?? cfg.dshPluginToken ?? ''),
+                cwdRoot: String(body.cwdRoot ?? cfg.dshWorkRoot ?? ''),
+                home: dshHome(),
+            });
+            if (!inject.ok) {
+                json(400, { ok: false, error: inject.error, inject });
+                return;
+            }
+            log(
+                `dsh：连接插件已${inject.action === 'injected' ? '注入' : '更新'}到 profile ${profile}`
+                + `（${inject.target}）`,
+            );
+
+            // 记下本次注入的 profile/token，保持与配置一致
+            if (body.profile !== undefined) {
+                cfg.dshServiceProfile = profile;
+                applyDshServiceConfig();
+            }
+            if (body.token !== undefined) cfg.dshPluginToken = String(body.token).trim();
+            saveConfig();
+
+            let verified = null;
+            if (body.verify !== false) {
+                verified = verifyInjection({ exePath: cfg.dshExePath ?? '', profile, home: dshHome() });
+                log(verified.ok
+                    ? 'dsh：插件已出现在 profile 组合结果中'
+                    : `dsh：插件校验未通过 —— ${verified.error}`);
+            }
+
+            let restart = null;
+            if (body.restart === true) {
+                restart = await dshService.restart();
+                log(restart.ok
+                    ? `dsh：已重启服务（${dshService.host}:${dshService.port}）`
+                    : `dsh：重启失败 —— ${restart.error ?? '未知错误'}`);
+            }
+
+            json(200, {
+                ok: true,
+                inject,
+                verified,
+                restart,
+                plugin: dshPluginStatus(),
+                service: await dshService.inspect({ logTail: 15 }),
+            });
+            return;
+        }
+
+        // POST /api/dsh/plugin/remove   移除注入
+        if (req.method === 'POST' && p === '/api/dsh/plugin/remove') {
+            const body = await readBody();
+            const profile = String(body.profile ?? cfg.dshServiceProfile ?? 'web').trim();
+            const r = removePlugin({ profile, home: dshHome() });
+            if (!r.ok) {
+                json(400, { ok: false, error: r.error });
+                return;
+            }
+            log(`dsh：已从 profile ${profile} 移除连接插件`);
+            let restart = null;
+            if (body.restart === true) {
+                restart = await dshService.restart();
+            }
+            json(200, { ok: true, remove: r, restart, plugin: dshPluginStatus() });
+            return;
+        }
+
+        // POST /api/dsh/plugin/reset   让插件释放某会话（或全部）的 Agent
+        if (req.method === 'POST' && p === '/api/dsh/plugin/reset') {
+            const body = await readBody();
+            const soc = pickDshPlugin();
+            if (!soc) {
+                json(400, { ok: false, error: '没有在线的 dsh 连接插件' });
+                return;
+            }
+            const key = String(body.sessionKey ?? '').trim();
+            const keys = key ? [key] : Object.keys(sessions);
+            let sent = 0;
+            for (const k of keys) {
+                try {
+                    soc.send(JSON.stringify({
+                        type: 'dsh_reset',
+                        requestId: `reset_${++dshPluginReqSeq}`,
+                        sessionKey: k,
+                        removeWorkDir: body.removeWorkDir === true,
+                    }));
+                    sent += 1;
+                } catch {
+                    /* 忽略 */
+                }
+            }
+            // 本地 headless 侧的历史也一并清掉，避免切回子进程时"还记得"
+            for (const k of keys) dsh?.clearHistory?.(k, { removeWorkDir: body.removeWorkDir === true });
+            log(`dsh 插件：已请求释放 ${sent} 个会话的上下文`);
+            json(200, { ok: true, sent, sessions: keys });
+            return;
+        }
+
+        json(404, { ok: false, error: `未知的 dsh 接口：${req.method} ${p}` });
+        return;
+    }
+
     res.writeHead(404); res.end('not found');
 });
 consoleServer.listen(cfg.consolePort ?? 9510, '127.0.0.1', () =>
@@ -2566,5 +3413,21 @@ if (!configFileExisted) {
 if (!cfg.stDataDir) {
     log('⚠ 未能定位酒馆数据目录（stDataDir），角色/世界书清单将仅依赖扩展上报');
     log('   可在系统设置中填写，或设置环境变量 ST_DATA_DIR');
+}
+
+// ===== 启动提示：当前回复后端与 dsh 可用性 =====
+if (cfg.backend === 'dsh') {
+    const st = dsh?.status?.() ?? null;
+    if (st?.installed) {
+        log(`ℹ 回复后端：dsh（${st.version || '版本未知'}，profile=${st.profile}）→ QQ 消息不再经过酒馆`);
+    } else {
+        log('─'.repeat(64));
+        log('⚠ 回复后端配置为 dsh，但未找到可执行文件，QQ 消息将无人应答');
+        log('   请安装：npm i -g @deepseek-ai/dsh，或在「dsh 接入」页填写路径 / 切回酒馆');
+        log(`   探测路径：${st?.exePath || '(空)'}`);
+        log('─'.repeat(64));
+    }
+} else {
+    log('ℹ 回复后端：酒馆（SillyTavern）');
 }
 

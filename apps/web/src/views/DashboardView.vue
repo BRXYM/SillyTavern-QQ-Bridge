@@ -32,6 +32,15 @@ onUnmounted(() => {
 const status = computed(() => store.status);
 const sessions = computed(() => Object.entries(status.value?.sessions ?? {}));
 const sessionCount = computed(() => status.value?.metrics?.sessionCount ?? sessions.value.length);
+
+/** 某会话实际生效的后端（后端已算好则直接用，否则按 sessionChoices / 全局推断） */
+function sessionBackendLabel(key: string): 'taver' | 'dsh' {
+    const fromServer = status.value?.sessionBackends?.[key];
+    if (fromServer) return fromServer.backend;
+    const own = status.value?.sessionChoices?.[key]?.backend;
+    if (own === 'dsh' || own === 'taver') return own;
+    return status.value?.config?.['backend'] === 'dsh' ? 'dsh' : 'taver';
+}
 const totalIn = computed(() =>
     status.value?.metrics?.totalIn ?? sessions.value.reduce((n, [, s]) => n + s.in, 0),
 );
@@ -488,8 +497,14 @@ async function retry() {
                     </UiBadge>
                     <div class="min-w-0 flex-1">
                         <p class="truncate font-mono text-[12px] leading-tight">{{ key }}</p>
-                        <p class="mt-0.5 truncate text-[11px]">
-                            <span v-if="store.status?.sessionChoices[key]?.character" class="text-primary">
+                        <p class="mt-0.5 flex items-center gap-1.5 truncate text-[11px]">
+                            <span v-if="sessionBackendLabel(key) === 'dsh'" class="text-info">dsh</span>
+                            <span v-else class="text-muted-foreground/80">酒馆</span>
+                            <span class="opacity-30">·</span>
+                            <span v-if="sessionBackendLabel(key) === 'dsh'" class="text-muted-foreground/70">
+                                {{ store.status?.sessionChoices[key]?.character || '默认人设' }}
+                            </span>
+                            <span v-else-if="store.status?.sessionChoices[key]?.character" class="text-primary">
                                 {{ store.status.sessionChoices[key].character }}
                             </span>
                             <span v-else class="text-muted-foreground/70">继承默认角色</span>

@@ -28,6 +28,12 @@ const routes = [
         meta: { title: '服务管理', desc: '协议端与酒馆', icon: 'Server', group: '服务' } satisfies NavMeta,
     },
     {
+        path: '/dsh',
+        name: 'dsh',
+        component: () => import('@/views/DshView.vue'),
+        meta: { title: 'dsh 接入', desc: 'DeepSeek Harness', icon: 'Terminal', group: '服务' } satisfies NavMeta,
+    },
+    {
         path: '/sessions',
         name: 'sessions',
         component: () => import('@/views/SessionsView.vue'),

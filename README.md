@@ -8,7 +8,7 @@
 
 前后端分离的 monorepo：Vue 3 + TypeScript + Vite 7 + Tailwind CSS v4。
 
-> 当前状态：**后端已整合**。Web 控制台 7 个页面可用，桥接后端与酒馆扩展已并入同一仓库，`pnpm dev` 即可完整运行。核心逻辑（分段 / 管道 / 会话 / 图片）抽为独立包并覆盖 56 个单元测试。
+> 当前状态：**后端已整合**。Web 控制台 8 个页面可用，桥接后端与酒馆扩展已并入同一仓库，`pnpm dev` 即可完整运行。核心逻辑（分段 / 管道 / 会话 / 图片）抽为独立包并覆盖 66 个单元测试。
 
 > **分支说明**：本分支（`next`）是下一代主线，仓库根目录即完整前后端工程。v1 / v2 的历史版本仍可在 `main` 分支查看。
 
@@ -18,11 +18,13 @@
 
 ### 已验证可用
 
-- **Web 控制台** — 7 个页面：总览、运行日志、服务管理、会话、回复分段、图片表情、系统设置
+- **Web 控制台** — 8 个页面：总览、运行日志、服务管理、dsh 接入、会话、回复分段、图片表情、系统设置
 - **多会话隔离** — 每个 QQ 号 / 群聊独立绑定角色与世界书，留空则继承全局默认
 - **回复分段** — 四层分隔符（硬标点 / 软标点 / 配对符 / 自定义字符串），按字数与条数智能打包，条间随机延迟
 - **配对符保护** — `*动作*`、`"台词"` 等成对内容保持完整，内部标点不切分
 - **回复处理管道** — `replace` / `remove` / `strip` 三类规则，支持三层策略：全局默认 → 会话覆盖
+- **dsh 直连** — QQ ↔ DeepSeek Harness（dsh）第二条后端链路：共用触发规则、处理管道、分段与表情包；按会话隔离上下文并落盘续聊
+- **会话级后端** — 每个 QQ 号 / 群成员可单独选择走 dsh 还是酒馆角色对话，未设置的继承全局默认
 - **图片 / 表情回复** — 识别 `[图片:URL]`、`<img src>`、`[表情:]` 并转为 OneBot 消息段
 - **通知弹窗** — 右上角堆叠、进度条推进、3 秒自动消失、悬停暂停
 - **亮 / 暗双主题** — 跟随系统，可手动切换并持久化
@@ -42,6 +44,7 @@
 
 - Node.js >= 22
 - pnpm >= 11
+- （可选）DeepSeek Harness：`npm i -g @deepseek-ai/dsh`
 
 ### 安装
 
@@ -109,7 +112,7 @@ pnpm dev:web          # 只启动前端（后端需已在运行）
 pnpm dev:api          # 只启动后端
 pnpm start            # 只启动后端（生产）
 pnpm build            # 构建前端
-pnpm test             # 运行单元测试（56 个）
+pnpm test             # 运行单元测试（74 个）
 pnpm typecheck        # 类型检查
 ```
 
@@ -139,6 +142,61 @@ $env:WEB_PORT='5180'; $env:API_PORT='9520'; $env:EXT_PORT='9521'; pnpm dev
 
 ---
 
+## 接入 DeepSeek Harness（dsh）
+
+除了酒馆，还可以让 QQ 消息直接交给本机的 **dsh**（DeepSeek Harness）处理。两条链路**共用同一套触发规则**，切换后端不会绕过限制。
+
+### 使用步骤
+
+1. 安装 dsh：`npm i -g @deepseek-ai/dsh`
+2. 控制台进入 **dsh 接入** 页，点「重新探测」确认版本与路径
+3. 按需填写 profile（默认 `headless`）、工作目录根、超时、上下文轮数
+4. 点「保存参数」，再点「dsh DeepSeek Harness」切换全局默认后端
+5. 发一条 QQ 消息验证；运行日志里会看到 `QQ消息 → dsh [...]`
+
+### 会话级切换（dsh / 酒馆角色对话）
+
+全局后端只是默认值。想按人区分时，到 **会话** 页，每个 QQ 会话都有一条「回复后端」下拉：
+
+| 选项 | 行为 |
+|---|---|
+| 继承全局 | 跟随「dsh 接入」页的全局后端（默认） |
+| 酒馆（角色对话） | 该会话交给酒馆，使用下方所选角色 / 世界书 |
+| dsh（DeepSeek Harness） | 该会话交给 dsh 直答，不加载角色卡与世界书全文 |
+
+- 两者可以同时在线：例如全局走 dsh，只让常聊的某人继续用酒馆角色
+- 会话级选择保存在 `sessions.json` 的 `backend` 字段，缺失即继承
+- 卡片的徽标会显示该会话当前生效的后端以及是否继承
+- 触发规则（群聊 @、私聊开关、白名单）、处理管道、分段与表情两条链路完全一致
+- 「清除配置」会连同会话级后端一起清掉，恢复继承全局
+
+### 行为说明
+
+- **触发规则**：群聊仅 @ 机器人时响应、私聊自动回复开关、用户 / 群白名单，与酒馆完全一致（在「会话 → 触发规则」中配置）
+- **回复处理管道**：dsh 的回复同样经过会话级 / 全局 `replyProcessors`，再做分段、动作标记转换、表情包解析
+- **上下文隔离**：每个 `sessionKey` 一个独立工作目录；`headless` 本身不记忆会话，由 Bridge 维护最近 N 轮并拼进 prompt
+- **上下文落盘**：默认写入 `apps/server/dsh-history.json`（已 gitignore），重启后仍能续聊；可在页面关闭
+- **表情包**：后端会把表情词表、图片能力和自定义人设拼进 system 提示词，因此 dsh 也能输出 `[表情:开心]`
+
+### 相关配置
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `backend` | `taver` | `taver` = 酒馆 / `dsh` = DeepSeek Harness |
+| `dshExePath` | 空 | 留空自动从 PATH / npm 全局探测 |
+| `dshProfile` | `headless` | dsh profile 名 |
+| `dshWorkRoot` | 空 | 会话工作目录根，留空用系统临时目录 |
+| `dshTimeoutMs` | `180000` | 单次调用超时 |
+| `dshHistoryTurns` | `6` | 保留几轮上下文，`0` = 不带上下文 |
+| `dshSystemPrompt` | 空 | 追加的人设 / 规则 |
+| `dshErrorReply` | 空 | 调用失败时回给 QQ 的话，留空只写日志 |
+| `dshPersistHistory` | `true` | 上下文是否落盘 |
+| `dshConcurrency` | `1` | 同时最多几个 dsh 进程，超出排队（1–8） |
+
+> ⚠ dsh 具备本机文件与命令能力，请只在受信任的私聊 / 群聊启用，并给工作目录根设置专用目录。
+
+---
+
 ## 项目结构
 
 ```
@@ -146,7 +204,7 @@ SillyTavern-QQ-Bridge/
 ├── apps/
 │   ├── web/                  # Vue 3 控制台
 │   │   └── src/
-│   │       ├── views/        # 7 个页面
+│   │       ├── views/        # 8 个页面（含 dsh 接入）
 │   │       ├── components/
 │   │       │   ├── layout/   # 侧栏 / 顶栏 / 布局
 │   │       │   └── ui/       # 手写组件（Card/Button/Badge/…）+ ToastHost
@@ -155,6 +213,7 @@ SillyTavern-QQ-Bridge/
 │   │       └── style.css     # 设计 token（oklch）
 │   ├── server/               # 桥接后端
 │   │   ├── snowluma-bridge.mjs    # OneBot 连接 + 扩展 WS + Web API
+│   │   ├── dsh-service.mjs        # DeepSeek Harness 探测 / 调用 / 上下文
 │   │   ├── st-headless.mjs        # 酒馆无头驱动（playwright-core）
 │   │   ├── config.example.json    # 配置模板
 │   │   └── test-console-runtime.mjs
@@ -163,7 +222,7 @@ SillyTavern-QQ-Bridge/
 │       ├── manifest.json
 │       └── style.css
 ├── packages/
-│   ├── core/                 # 纯逻辑，无 IO，56 个测试
+│   ├── core/                 # 纯逻辑，无 IO，66 个测试
 │   │   ├── segmentation.ts   # 回复分段算法
 │   │   ├── pipeline.ts       # 回复处理管道 + 三层策略
 │   │   ├── session.ts        # sessionKey ↔ chatName 映射
@@ -231,6 +290,8 @@ apps/extension        apps/web 控制台 (:5178)
 
 **数据流**：QQ 消息 → SnowLuma → 桥接后端按 `sessionKey` 广播 → 酒馆扩展触发回复 → 扩展回传 `sessionKey` → 后端分段 + 处理管道 → SnowLuma → QQ。
 
+**dsh 数据流**：QQ 消息 → SnowLuma → 桥接后端（触发规则）→ `dsh --profile headless` → 处理管道 → 分段 / 表情解析 → SnowLuma → QQ。上下文按 `sessionKey` 维护在工作目录中，可落盘。
+
 **会话隔离**：`sessionKey` 格式为 `private_<userId>` 或 `group_<groupId>_<userId>`，据此映射到酒馆的独立 chat 文件。
 
 ---
@@ -249,6 +310,11 @@ apps/extension        apps/web 控制台 (:5178)
 | `POST /api/catalog/refresh` | 刷新角色与世界书清单 |
 | `POST /api/test-segments` | 预览分段结果 |
 | `POST /api/test-pipeline` | 预览管道处理结果 |
+| `GET /api/dsh/status` | dsh 安装探测、配置、会话上下文 |
+| `POST /api/dsh/test` | 用独立 `_test` 会话试调用 dsh |
+| `POST /api/dsh/backend` | 切换 `taver` / `dsh` 后端 |
+| `POST /api/dsh/config` | 更新 dsh 调用参数 |
+| `POST /api/dsh/reset` | 清空某会话 / 全部 dsh 上下文 |
 
 如果你没有 v2 后端，前端仍可启动，但各页面会显示「后端连接失败」，此时需要自行实现 `apps/server`。
 
