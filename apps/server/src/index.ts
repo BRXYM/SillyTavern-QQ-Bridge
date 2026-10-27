@@ -43,7 +43,7 @@ import type { BridgeConfig } from './config/schema.ts';
 import type { DshSettings } from './downstream/dsh.ts';
 import { DshAdapter } from './downstream/dsh.ts';
 import { DshClient } from '../dsh-service.mjs';
-import { DshService } from '../dsh-profile-service.mjs';
+import { DshService, dshHome, detectHomeMismatch } from '../dsh-profile-service.mjs';
 import { FaceService } from '../faces-service.mjs';
 import { OllamaClient, OllamaDaemon } from '../ollama-service.mjs';
 
@@ -467,6 +467,37 @@ async function bootstrap(): Promise<void> {
     }
     if (!cfg.upstream.token) {
         log('⚠ 上游 token 为空；若 SnowLuma 开了 Access Token 会返回 401');
+    }
+
+    logEnvironment();
+}
+
+/**
+ * 打印运行时环境，专门用于在进程管理器（MCSManager / nssm / systemd）
+ * 下排查「看起来启动成功，但行为不对」的问题。
+ *
+ * 典型症状：进程被托管在 Session 0，HOME 指向系统账户，
+ * 于是 dsh 插件被装进一个空目录，而用户自己的 dsh 毫无变化。
+ * 这些信息在托管面板的日志里一眼可见，比事后猜路径高效得多。
+ */
+function logEnvironment(): void {
+    const parts: string[] = [];
+    parts.push(`cwd=${process.cwd()}`);
+    parts.push(`home=${os.homedir()}`);
+    parts.push(`DSH_HOME=${process.env.DSH_HOME || '(未设置)'}`);
+
+    // 配置与会话落盘位置：不依赖 cwd，明确告知以便核对
+    parts.push(`config=${CONFIG_PATH}`);
+    log(`环境: ${parts.join(' | ')}`);
+
+    // HOME 是否被系统账户接管
+    const mismatch = detectHomeMismatch();
+    if (mismatch) {
+        log(`⚠ ${mismatch.reason}`);
+        log(`   dsh 实际目录: ${mismatch.home}`);
+        log(`   ${mismatch.hint}`);
+    } else {
+        log(`dsh home: ${dshHome()}`);
     }
 }
 
