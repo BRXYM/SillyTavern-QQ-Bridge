@@ -4,6 +4,7 @@ import {
     Boxes, RefreshCw, Plus, Trash2, Play, Loader2, CheckCircle2,
     AlertTriangle, Server, Star, Info, Power, RotateCw, Plug, PlugZap,
     Terminal, FileText, ChevronDown, ChevronRight, MessageSquare, Save,
+    ShieldCheck, Activity,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -168,6 +169,150 @@ function removeHistoryRule(id: string, idx: number): void {
 function setHistoryRule(id: string, idx: number, patch: Partial<HistoryRule>): void {
     const rule = historyOf(id)[idx];
     if (rule) Object.assign(rule, patch);
+}
+
+// ---------------- 准入名单 ----------------
+
+interface AccessState {
+    /** 逗号分隔的原始输入，提交时再解析成数字 */
+    allow: string;
+    deny: string;
+}
+
+const accessDrafts = reactive<Record<string, AccessState>>({});
+
+function accessOf(id: string): AccessState {
+    if (!accessDrafts[id]) {
+        const item = registered.value.find((d) => d.id === id);
+        const raw = (item as unknown as { access?: { allow?: number[]; deny?: number[] } } | undefined)?.access;
+        accessDrafts[id] = {
+            allow: (raw?.allow ?? []).join(','),
+            deny: (raw?.deny ?? []).join(','),
+        };
+    }
+    return accessDrafts[id]!;
+}
+
+function setAccessList(id: string, field: 'allow' | 'deny', value: string): void {
+    accessOf(id)[field] = value;
+}
+
+/** 解析逗号分隔的 QQ 号列表 */
+function parseIds(s: string): number[] {
+    return s
+        .split(/[,，\s]+/)
+        .map((x) => Number(x.trim()))
+        .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+function accessSummary(id: string): { label: string; tone: 'outline' | 'warning' | 'info' } {
+    const a = accessOf(id);
+    const allow = parseIds(a.allow);
+    const deny = parseIds(a.deny);
+    if (deny.length > 0) return { label: `黑名单 ${deny.length}`, tone: 'warning' };
+    if (allow.length > 0) return { label: `白名单 ${allow.length}`, tone: 'info' };
+    return { label: '不限制', tone: 'outline' };
+}
+
+async function saveAccess(item: {
+    id: string;
+    kind: string;
+    name: string;
+    enabled: boolean;
+    settings: Record<string, unknown>;
+}): Promise<void> {
+    const a = accessOf(item.id);
+    working.value = `access:${item.id}`;
+    try {
+        await api.saveDownstream({
+            id: item.id,
+            kind: item.kind,
+            name: item.name,
+            enabled: item.enabled,
+            settings: item.settings,
+            access: { allow: parseIds(a.allow), deny: parseIds(a.deny) },
+        });
+        delete accessDrafts[item.id];
+        await load({ silent: true });
+        toast.success('准入名单已保存', accessSummary(item.id).label);
+    } catch (e) {
+        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        working.value = '';
+    }
+}
+
+// ---------------- 进度转发 ----------------
+
+interface ProgressState {
+    enabled: boolean;
+    minIntervalMs: number;
+    maxMessages: number;
+    prefix: string;
+}
+
+const progressDrafts = reactive<Record<string, ProgressState>>({});
+
+function progressOf(id: string): ProgressState {
+    if (!progressDrafts[id]) {
+        const item = registered.value.find((d) => d.id === id);
+        const raw = (item?.settings?.progress ?? {}) as Partial<ProgressState>;
+        progressDrafts[id] = {
+            enabled: raw.enabled === true,
+            minIntervalMs: Number(raw.minIntervalMs ?? 4000),
+            maxMessages: Number(raw.maxMessages ?? 3),
+            prefix: typeof raw.prefix === 'string' ? raw.prefix : '⏳ ',
+        };
+    }
+    return progressDrafts[id]!;
+}
+
+function setProgressFlag(id: string, key: 'enabled', value: boolean): void {
+    progressOf(id)[key] = value;
+}
+
+function setProgressNum(id: string, key: 'minIntervalMs' | 'maxMessages', value: string): void {
+    const n = Number(value);
+    progressOf(id)[key] = Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+function setProgressText(id: string, key: 'prefix', value: string): void {
+    progressOf(id)[key] = value;
+}
+
+async function saveProgress(item: {
+    id: string;
+    kind: string;
+    name: string;
+    enabled: boolean;
+    settings: Record<string, unknown>;
+}): Promise<void> {
+    const p = progressOf(item.id);
+    working.value = `progress:${item.id}`;
+    try {
+        await api.saveDownstream({
+            id: item.id,
+            kind: item.kind,
+            name: item.name,
+            enabled: item.enabled,
+            settings: {
+                ...item.settings,
+                progress: {
+                    enabled: p.enabled,
+                    minIntervalMs: p.minIntervalMs,
+                    maxMessages: p.maxMessages,
+                    prefix: p.prefix,
+                },
+            },
+        });
+        delete progressDrafts[item.id];
+        await load({ silent: true });
+        toast.success('进度设置已保存', p.enabled ? '将转发分析摘要' : '已关闭');
+    } catch (e) {
+        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        working.value = '';
+    }
 }
 
 /** 保存某实例的提示词设置 */
@@ -896,6 +1041,127 @@ onMounted(() => void load({ silent: true }));
                                     >
                                         <Trash2 class="size-3.5" />
                                     </UiButton>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 准入名单：哪些 QQ 可以用这个下游 -->
+                        <div class="mt-2 rounded-md border border-border/60 bg-card/40 p-3">
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <div class="flex items-center gap-2">
+                                    <ShieldCheck class="size-3.5 text-muted-foreground" />
+                                    <span class="text-xs font-medium">准入名单</span>
+                                    <UiBadge
+                                        :tone="accessSummary(item.id).tone"
+                                        class="text-micro"
+                                    >
+                                        {{ accessSummary(item.id).label }}
+                                    </UiBadge>
+                                </div>
+                                <UiButton
+                                    size="sm"
+                                    variant="outline"
+                                    :disabled="saving"
+                                    @click="saveAccess(item)"
+                                >
+                                    <Loader2 v-if="working === `access:${item.id}`" class="size-3.5 animate-spin" />
+                                    <Save v-else class="size-3.5" />
+                                    保存
+                                </UiButton>
+                            </div>
+
+                            <p class="mt-1.5 text-[10px] text-muted-foreground">
+                                控制哪些 QQ 号能用这个下游。留空 = 所有人可用；
+                                黑名单优先于白名单。
+                            </p>
+
+                            <div class="mt-2 grid gap-2 sm:grid-cols-2">
+                                <div>
+                                    <label class="text-[10px] text-muted-foreground">白名单（只允许这些）</label>
+                                    <UiInput
+                                        :model-value="accessOf(item.id).allow"
+                                        class="mt-1"
+                                        mono
+                                        placeholder="逗号分隔 QQ 号，留空 = 不限制"
+                                        @update:model-value="(v: string) => setAccessList(item.id, 'allow', v)"
+                                    />
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-muted-foreground">黑名单（禁止这些）</label>
+                                    <UiInput
+                                        :model-value="accessOf(item.id).deny"
+                                        class="mt-1"
+                                        mono
+                                        placeholder="逗号分隔 QQ 号"
+                                        @update:model-value="(v: string) => setAccessList(item.id, 'deny', v)"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 进度转发：把分析摘要发到 QQ -->
+                        <div class="mt-2 rounded-md border border-border/60 bg-card/40 p-3">
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <div class="flex items-center gap-2">
+                                    <Activity class="size-3.5 text-muted-foreground" />
+                                    <span class="text-xs font-medium">进度转发</span>
+                                    <UiBadge :tone="progressOf(item.id).enabled ? 'info' : 'outline'" class="text-micro">
+                                        {{ progressOf(item.id).enabled ? '已开启' : '关闭' }}
+                                    </UiBadge>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <UiSwitch
+                                        :model-value="progressOf(item.id).enabled"
+                                        class="shrink-0"
+                                        @update:model-value="(v: boolean) => setProgressFlag(item.id, 'enabled', v)"
+                                    />
+                                    <UiButton
+                                        size="sm"
+                                        variant="outline"
+                                        :disabled="saving"
+                                        @click="saveProgress(item)"
+                                    >
+                                        <Loader2 v-if="working === `progress:${item.id}`" class="size-3.5 animate-spin" />
+                                        <Save v-else class="size-3.5" />
+                                        保存
+                                    </UiButton>
+                                </div>
+                            </div>
+
+                            <p class="mt-1.5 text-[10px] text-muted-foreground">
+                                把 dsh 的分析摘要（开始处理、读取、搜索、执行命令等）发到 QQ，
+                                让用户知道进行到哪一步。默认关闭；开启后会限流，不会刷屏。
+                            </p>
+
+                            <div v-if="progressOf(item.id).enabled" class="mt-2 grid gap-2 sm:grid-cols-3">
+                                <div>
+                                    <label class="text-[10px] text-muted-foreground">最小间隔（毫秒）</label>
+                                    <UiInput
+                                        :model-value="String(progressOf(item.id).minIntervalMs)"
+                                        type="number"
+                                        mono
+                                        class="mt-1"
+                                        @update:model-value="(v: string) => setProgressNum(item.id, 'minIntervalMs', v)"
+                                    />
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-muted-foreground">最多几条</label>
+                                    <UiInput
+                                        :model-value="String(progressOf(item.id).maxMessages)"
+                                        type="number"
+                                        mono
+                                        class="mt-1"
+                                        @update:model-value="(v: string) => setProgressNum(item.id, 'maxMessages', v)"
+                                    />
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-muted-foreground">消息前缀</label>
+                                    <UiInput
+                                        :model-value="progressOf(item.id).prefix"
+                                        class="mt-1"
+                                        placeholder="⏳ "
+                                        @update:model-value="(v: string) => setProgressText(item.id, 'prefix', v)"
+                                    />
                                 </div>
                             </div>
                         </div>

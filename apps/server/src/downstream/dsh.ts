@@ -26,6 +26,7 @@ import type {
     DownstreamConfig,
     DownstreamResult,
     DownstreamStatus,
+    ProgressEvent,
 } from './types.ts';
 
 export interface DshSettings {
@@ -100,6 +101,8 @@ interface Pending {
     resolve: (result: DownstreamResult) => void;
     timer: NodeJS.Timeout;
     startedAt: number;
+    /** 进度回调（转发给 dispatch 决定是否发 QQ） */
+    onProgress?: (event: ProgressEvent) => void;
 }
 
 export interface DshDeps {
@@ -241,6 +244,21 @@ export class DshAdapter implements DownstreamAdapter {
     /** 处理插件回包；返回 true 表示已消费 */
     handleMessage(msg: Record<string, unknown>): boolean {
         const type = String(msg.type ?? '');
+
+        // 进度节点：不结束等待，只转发给上层
+        if (type === 'downstream_progress') {
+            const requestId = String(msg.requestId ?? '');
+            const record = this.pending.get(requestId);
+            if (!record) return false;
+            record.onProgress?.({
+                kind: (String(msg.kind ?? 'stage') as 'start' | 'tool' | 'stage' | 'done'),
+                text: String(msg.text ?? ''),
+                ...(msg.detail !== undefined ? { detail: String(msg.detail) } : {}),
+                at: Date.now() - record.startedAt,
+            });
+            return true;
+        }
+
         if (type !== 'downstream_reply' && type !== 'downstream_error') return false;
 
         const requestId = String(msg.requestId ?? '');
@@ -332,7 +350,7 @@ export class DshAdapter implements DownstreamAdapter {
                 });
             }, timeoutMs);
 
-            this.pending.set(requestId, { resolve, timer, startedAt });
+            this.pending.set(requestId, { resolve, timer, startedAt, onProgress: req.onProgress });
 
             try {
                 socket.send(JSON.stringify({
@@ -341,6 +359,8 @@ export class DshAdapter implements DownstreamAdapter {
                     sessionKey: req.sessionKey,
                     text: req.text,
                     system: req.system,
+                    // 告知插件是否上报进度：Bridge 侧没开就完全不必解析事件
+                    progress: typeof req.onProgress === 'function',
                 }));
             } catch (e) {
                 this.pending.delete(requestId);
@@ -365,6 +385,8 @@ export class DshAdapter implements DownstreamAdapter {
             system: req.system,
             // 历史不整段发送，只按配置的正则提取参考片段
             historyExtracts: this.settings.historyExtracts ?? [],
+            // 把 reasoning 摘要节点透传给上游（是否转发由 dispatch 决定）
+            onProgress: req.onProgress,
         });
         return { ...result, via: result.via ?? 'headless' } as DownstreamResult;
     }

@@ -22,6 +22,32 @@ export interface DownstreamAsk {
     system: string;
     /** 群聊里的发送者昵称，便于下游区分说话人 */
     sender?: string;
+    /**
+     * 进度回调：下游在执行过程中遇到的「关键节点」，
+     * 由上游决定要不要转发给用户（见 progress 配置）。
+     *
+     * 只应上报摘要级信息（开始、工具名、阶段切换），
+     * 不要逐字上报 reasoning —— 每一条都可能变成一条 QQ 消息。
+     */
+    onProgress?: (event: ProgressEvent) => void;
+}
+
+/** 一次执行中的关键节点 */
+export interface ProgressEvent {
+    /**
+     * 节点类型：
+     *   start  开始处理
+     *   tool   调用工具（detail = 工具名）
+     *   stage  阶段变化（detail = 说明）
+     *   done   完成（通常不需要单独发，最终回复本身即结果）
+     */
+    kind: 'start' | 'tool' | 'stage' | 'done';
+    /** 人类可读的一句话 */
+    text: string;
+    /** 附加信息，如工具名 */
+    detail?: string;
+    /** 相对开始的时间戳（毫秒） */
+    at: number;
 }
 
 /** 一次问答结果 */
@@ -92,4 +118,45 @@ export interface DownstreamConfig {
     enabled: boolean;
     /** 各类型自己的参数，由适配器工厂校验 */
     settings: Record<string, unknown>;
+    /** 会话准入：只允许这些 QQ 会话使用本下游 */
+    access?: DownstreamAccess;
+}
+
+/**
+ * 下游准入规则（按 QQ 号，不是 sessionKey）。
+ *
+ * 语义与触发规则一致：
+ *   - 两个列表都为空 → 不限制
+ *   - 命中黑名单 → 拒绝
+ *   - 白名单非空 → 必须在白名单里
+ */
+export interface DownstreamAccess {
+    /** 黑名单：这些 QQ 号不能用本下游（优先级高于白名单） */
+    deny: number[];
+    /** 白名单：非空时只有这些 QQ 号可以用 */
+    allow: number[];
+}
+
+export const DEFAULT_ACCESS: DownstreamAccess = { deny: [], allow: [] };
+
+/**
+ * 判断某 QQ 号能否使用该下游。
+ * @returns allowed=false 时带上原因，供日志与前端展示
+ */
+export function checkAccess(
+    access: DownstreamAccess | undefined,
+    userId: number,
+): { allowed: boolean; reason?: string } {
+    if (!access) return { allowed: true };
+    const deny = Array.isArray(access.deny) ? access.deny : [];
+    const allow = Array.isArray(access.allow) ? access.allow : [];
+    const id = Number(userId);
+
+    if (deny.some((u) => Number(u) === id)) {
+        return { allowed: false, reason: '该 QQ 在这个下游的黑名单里' };
+    }
+    if (allow.length > 0 && !allow.some((u) => Number(u) === id)) {
+        return { allowed: false, reason: '该 QQ 不在这个下游的白名单里' };
+    }
+    return { allowed: true };
 }

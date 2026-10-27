@@ -239,12 +239,25 @@ function normalizeV2(raw: Raw): { config: BridgeConfig; notes: string[] } {
                 notes.push(`忽略缺少 id/kind 的下游项：${JSON.stringify(d).slice(0, 80)}`);
                 continue;
             }
+            // 准入名单：只在配置里存在时带上，避免给所有实例塞空对象
+            const access = d.access && typeof d.access === 'object'
+                ? {
+                    allow: Array.isArray((d.access as Record<string, unknown>).allow)
+                        ? ((d.access as Record<string, unknown>).allow as unknown[]).map(Number).filter(Number.isFinite)
+                        : [],
+                    deny: Array.isArray((d.access as Record<string, unknown>).deny)
+                        ? ((d.access as Record<string, unknown>).deny as unknown[]).map(Number).filter(Number.isFinite)
+                        : [],
+                }
+                : undefined;
+
             list.push({
                 id,
                 kind: kind as DownstreamConfig['kind'],
                 name: str(d.name, id),
                 enabled: bool(d.enabled, true),
                 settings: (d.settings as Record<string, unknown>) ?? {},
+                ...(access ? { access } : {}),
             });
         }
         if (list.length > 0) base.downstreams = list;

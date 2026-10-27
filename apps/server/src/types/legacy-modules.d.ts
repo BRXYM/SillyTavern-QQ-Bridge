@@ -60,6 +60,13 @@ declare module '*dsh-service.mjs' {
             system?: string;
             /** 从历史提取参考片段的正则规则（默认空 = 不发送历史） */
             historyExtracts?: Array<{ pattern: string; flags?: string; label?: string }>;
+            /** 进度摘要回调（由 dispatch 决定是否转发） */
+            onProgress?: (ev: {
+                kind: 'start' | 'tool' | 'stage' | 'done';
+                text: string;
+                detail?: string;
+                at: number;
+            }) => void;
         }): Promise<DshAskResult>;
         clearHistory(sessionKey: string, opts?: { removeWorkDir?: boolean }): boolean;
         clearAllHistory(): number;
@@ -76,6 +83,11 @@ declare module '*dsh-service.mjs' {
     export function dshHome(): string;
     export function invalidateDshProbe(): void;
     export function cleanOutput(raw: string): string;
+    export function extractProgress(
+        chunk: string,
+        state: { started: boolean; tools: Set<string> },
+        startedAt?: number,
+    ): Array<{ kind: 'start' | 'tool' | 'stage' | 'done'; text: string; detail?: string; at: number }>;
 }
 
 declare module '*dsh-profile-service.mjs' {

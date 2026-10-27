@@ -292,6 +292,8 @@ export const api = {
         name?: string;
         enabled?: boolean;
         settings?: Record<string, unknown>;
+        /** 准入名单：控制哪些 QQ 可用 */
+        access?: { allow: number[]; deny: number[] };
     }) =>
         request<{ ok: boolean; error?: string; downstream: unknown; status: DownstreamStatusDto[] }>('/downstreams', {
             method: 'POST',

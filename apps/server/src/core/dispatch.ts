@@ -17,7 +17,8 @@ import { applyReplyProcessors } from '@bridge/core';
 import type { OneBotEvent } from '../upstream/onebot.ts';
 import type { SessionStore, SessionRoute } from './sessions.ts';
 import { sessionKeyOf } from './sessions.ts';
-import type { DownstreamAdapter } from '../downstream/types.ts';
+import type { DownstreamAdapter, DownstreamConfig, ProgressEvent } from '../downstream/types.ts';
+import { checkAccess } from '../downstream/types.ts';
 import type { BridgeConfig, ProcessorRule } from '../config/schema.ts';
 import { log } from './logger.ts';
 import { sendReply, type SendContext } from './sending.ts';
@@ -203,10 +204,37 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
         return;
     }
 
+    // ---- 下游准入（QQ 黑白名单）----
+    const downstreamCfg = config.downstreams.find((d) => d.id === resolved.backendId);
+    const access = checkAccess(downstreamCfg?.access, userId);
+    if (!access.allowed) {
+        log(
+            `⛔ 下游 ${adapter.name} 拒绝了 [${sessionKey}]：${access.reason}`
+            + `（QQ ${userId}）`,
+        );
+        // 可选：回一句说明。默认静默，避免把内部策略暴露给用户
+        const notice = progressNotice(config, adapter.id, 'denied');
+        if (notice) {
+            await sendReply(deps.sending, { messageType, groupId, userId, sessionKey }, notice);
+        }
+        return;
+    }
+
     log(
         `QQ消息 → ${adapter.name} [${sessionKey}]: [${senderName}] ${parsed.text}`
         + (resolved.inherited ? '（继承全局下游）' : '（会话级下游）'),
     );
+
+    // ---- 进度摘要转发 ----
+    // 只在需要时挂回调，避免无谓的对象创建与判断
+    const progressCfg = progressSettings(downstreamCfg);
+    const onProgress = progressCfg.enabled
+        ? makeProgressReporter({
+            sending: deps.sending,
+            target: { messageType, groupId, userId, sessionKey },
+            cfg: progressCfg,
+        })
+        : undefined;
 
     // ---- 询问下游 ----
     const userText = messageType === 'group' ? `[群成员 ${senderName}] ${parsed.text}` : parsed.text;
@@ -215,6 +243,7 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
         text: userText,
         system: buildSystemPrompt(config, sessionKey, deps, adapter),
         sender: senderName,
+        onProgress,
     });
 
     if (!result.ok) {
@@ -260,4 +289,92 @@ function errorReplyFor(config: BridgeConfig, adapterId: string): string {
     const ds = config.downstreams.find((d) => d.id === adapterId);
     const val = ds?.settings?.errorReply;
     return typeof val === 'string' ? val.trim() : '';
+}
+
+/** 准入被拒时的提示文案（空 = 静默） */
+function progressNotice(config: BridgeConfig, adapterId: string, kind: 'denied'): string {
+    const ds = config.downstreams.find((d) => d.id === adapterId);
+    const p = (ds?.settings?.progress ?? {}) as Record<string, unknown>;
+    if (kind === 'denied') {
+        return typeof p.deniedReply === 'string' ? p.deniedReply.trim() : '';
+    }
+    return '';
+}
+
+/** 进度转发的有效配置 */
+interface ProgressSettings {
+    enabled: boolean;
+    /** 最少间隔（毫秒）：太快会刷屏 */
+    minIntervalMs: number;
+    /** 最长只发这么多条 */
+    maxMessages: number;
+    /** 只发这些类型的节点 */
+    kinds: Array<'start' | 'tool' | 'stage' | 'done'>;
+    /** 消息前缀，便于识别这是进度而非正式回复 */
+    prefix: string;
+}
+
+const DEFAULT_PROGRESS: ProgressSettings = {
+    enabled: false,
+    minIntervalMs: 4000,
+    maxMessages: 3,
+    kinds: ['start', 'tool'],
+    prefix: '⏳ ',
+};
+
+/** 读下游的进度配置（默认关闭） */
+function progressSettings(cfg: DownstreamConfig | undefined): ProgressSettings {
+    const raw = (cfg?.settings?.progress ?? {}) as Record<string, unknown>;
+    const kinds = Array.isArray(raw.kinds)
+        ? (raw.kinds.filter((k): k is ProgressSettings['kinds'][number] =>
+            k === 'start' || k === 'tool' || k === 'stage' || k === 'done'))
+        : DEFAULT_PROGRESS.kinds;
+
+    return {
+        enabled: raw.enabled === true,
+        minIntervalMs: Math.max(0, Number(raw.minIntervalMs ?? DEFAULT_PROGRESS.minIntervalMs) || 0),
+        maxMessages: Math.max(0, Number(raw.maxMessages ?? DEFAULT_PROGRESS.maxMessages) || 0),
+        kinds: kinds.length > 0 ? kinds : DEFAULT_PROGRESS.kinds,
+        prefix: typeof raw.prefix === 'string' ? raw.prefix : DEFAULT_PROGRESS.prefix,
+    };
+}
+
+/**
+ * 构造进度上报器。
+ *
+ * 三条限制避免刷屏：
+ *   1. 类型白名单：默认只发 start / tool
+ *   2. 最小间隔：距离上一条太近的直接丢弃（而不是排队）
+ *   3. 数量上限：达到上限后静默
+ *
+ * 上报是「尽力而为」：发送失败不影响主流程，也不抛出。
+ */
+function makeProgressReporter(opts: {
+    sending: SendContext;
+    target: { messageType: 'private' | 'group'; groupId: number | null; userId: number; sessionKey: string };
+    cfg: ProgressSettings;
+}): (event: ProgressEvent) => void {
+    const { sending, target, cfg } = opts;
+    let sent = 0;
+    let lastAt = 0;
+
+    return (event) => {
+        if (sent >= cfg.maxMessages) return;
+        if (!cfg.kinds.includes(event.kind)) return;
+
+        const now = Date.now();
+        // 首条立即发，之后按最小间隔限流
+        if (sent > 0 && now - lastAt < cfg.minIntervalMs) return;
+
+        const text = `${cfg.prefix}${event.text}`.trim();
+        if (!text) return;
+
+        sent += 1;
+        lastAt = now;
+
+        // 不 await：进度不应阻塞主流程
+        void sendReply(sending, target, text).catch((e) => {
+            log(`进度发送失败：${e instanceof Error ? e.message : String(e)}`);
+        });
+    };
 }

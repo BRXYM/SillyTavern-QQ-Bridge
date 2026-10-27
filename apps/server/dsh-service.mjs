@@ -472,7 +472,7 @@ export class DshClient {
      *        从历史里提取参考片段的正则规则（默认空 = 不发送任何历史内容）
      * @returns {Promise<{ok:boolean, text:string, elapsedMs:number, error?:string, sessionKey:string}>}
      */
-    async ask({ sessionKey, text, system, historyExtracts = [] }) {
+    async ask({ sessionKey, text, system, historyExtracts = [], onProgress }) {
         const key = String(sessionKey || 'default').trim() || 'default';
         const exe = findDsh(this.exePath).path;
         if (!exe || !fs.existsSync(exe)) {
@@ -515,7 +515,7 @@ export class DshClient {
             }
             let r;
             try {
-                r = await this.#runOnce(exe, prompt, dir, t0);
+                r = await this.#runOnce(exe, prompt, dir, t0, onProgress);
             } finally {
                 this.#releaseSlot();
             }
@@ -768,8 +768,10 @@ export class DshClient {
         }
     }
 
-    #runOnce(exe, prompt, cwd, t0) {
+    #runOnce(exe, prompt, cwd, t0, onProgress) {
         return new Promise((resolve) => {
+            /** 进度提取状态：避免重复上报同类动作 */
+            const progressState = { started: false, tools: new Set() };
             const args = ['--profile', this.profile, prompt];
 
             // 优先用 node + bin.js 直接调用：
@@ -842,8 +844,20 @@ export class DshClient {
                 if (out.length > 200000) out = out.slice(-100000);
             });
             child.stderr?.on('data', (d) => {
-                err += String(d);
+                const chunk = String(d);
+                err += chunk;
                 if (err.length > 20000) err = err.slice(-10000);
+
+                // reasoning 流里提取摘要节点，交给上层决定是否转发
+                if (typeof onProgress === 'function') {
+                    try {
+                        for (const ev of extractProgress(chunk, progressState, t0)) {
+                            onProgress(ev);
+                        }
+                    } catch {
+                        /* 进度解析失败不影响主流程 */
+                    }
+                }
             });
 
             child.on('error', (e) => {
@@ -868,6 +882,55 @@ export class DshClient {
     }
 }
 
+/**
+ * 从 dsh 的 stderr（reasoning 流）提取摘要节点。
+ *
+ * 为什么不直接转发原文：reasoning 是逐 token 输出的，全发会变成几十条
+ * QQ 消息。这里只识别「有意义的转折点」：
+ *   - 首次出现 reasoning        → start
+ *   - 提到工具/命令/搜索/读取等 → tool（带简短描述）
+ *   - 其余内容                  → 忽略
+ *
+ * @param {string} chunk 本次新增的 stderr 文本
+ * @param {object} state 跨 chunk 的状态（避免重复发同一条）
+ * @returns {Array<{kind:string,text:string,detail?:string,at:number}>}
+ */
+export function extractProgress(chunk, state, startedAt = Date.now()) {
+    const out = [];
+    const text = String(chunk ?? '');
+    if (!text) return out;
+
+    const at = Date.now() - startedAt;
+
+    // 首次收到 reasoning → 报「开始分析」
+    if (!state.started && /reasoning/i.test(text)) {
+        state.started = true;
+        out.push({ kind: 'start', text: '正在处理…', at });
+    }
+
+    /**
+     * 工具/动作识别。
+     * 这些词是 dsh reasoning 里表达"我要去做某事"的高频线索，
+     * 只在同一类动作未上报过时发，避免"读文件×10"刷屏。
+     */
+    const patterns = [
+        { key: 'read', re: /读取|读取文件|read(ing)?\s+(the\s+)?file|扫描/i, label: '读取文件' },
+        { key: 'search', re: /搜索|检索|查找|search|grep|find/i, label: '搜索' },
+        { key: 'exec', re: /执行|运行命令|run(ning)?\s+(the\s+)?command|powershell|bash/i, label: '执行命令' },
+        { key: 'web', re: /联网|网页|web\s+(search|fetch)|http/i, label: '联网查询' },
+        { key: 'write', re: /写入|修改文件|编辑|write|edit(ing)?\s+(the\s+)?file/i, label: '写入文件' },
+        { key: 'think', re: /分析|思考|推理|整理|总结/i, label: '分析' },
+    ];
+
+    for (const p of patterns) {
+        if (state.tools.has(p.key)) continue;
+        if (!p.re.test(text)) continue;
+        state.tools.add(p.key);
+        out.push({ kind: 'tool', text: `${p.label}…`, detail: p.key, at });
+    }
+
+    return out;
+}
 /**
  * 清洗 dsh 的 stdout。
  *

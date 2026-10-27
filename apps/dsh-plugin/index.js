@@ -50,6 +50,60 @@ function safeDirName(key) {
     return String(key || 'default').replace(/[^\w.-]+/g, '_').slice(0, 60) || 'default';
 }
 
+/**
+ * 从 dsh 的 session 事件里提取进度节点。
+ *
+ * 只关心「模型正在做什么」这一类信号（工具调用），
+ * 且同一工具只上报一次 —— 否则一个循环读十个文件会发十条消息。
+ *
+ * @param {object} event   session 事件
+ * @param {{started:boolean, tools:Set<string>}} state 跨事件状态
+ * @param {(kind:string, text:string, detail?:string)=>void} emit
+ */
+function collectProgress(event, state, emit) {
+    const type = String(event?.type ?? '');
+
+    // 工具调用开始：事件里带工具名就报出来
+    if (type === 'tool/call' || type === 'tool/start') {
+        const name = String(event.data?.call?.name ?? event.data?.name ?? '').trim();
+        if (!name) return;
+        const key = name.toLowerCase();
+        if (state.tools.has(key)) return;
+        state.tools.add(key);
+        emit('tool', `${toolLabel(name)}…`, name);
+        return;
+    }
+
+    // 有的实现把工具名放在 assistant chunk 里
+    if (type === 'assistant/chunk') {
+        const chunk = event.data?.chunk;
+        if (chunk?.type !== 'block-start' || chunk.blockType !== 'tool_use') return;
+        const name = String(chunk.name ?? '工具').trim();
+        const key = name.toLowerCase();
+        if (state.tools.has(key)) return;
+        state.tools.add(key);
+        emit('tool', `${toolLabel(name)}…`, name);
+    }
+}
+
+/** 工具名 → 中文动作（未知工具原样显示） */
+function toolLabel(name) {
+    const n = String(name).toLowerCase();
+    const map = [
+        [/read|fs_read|cat/, '读取文件'],
+        [/write|edit|str_replace/, '写入文件'],
+        [/grep|search|find/, '搜索'],
+        [/bash|pwsh|shell|terminal|exec/, '执行命令'],
+        [/web|fetch|http/, '联网查询'],
+        [/todo|plan/, '整理计划'],
+        [/skill|subagent/, '调用技能'],
+    ];
+    for (const [re, label] of map) {
+        if (re.test(n)) return label;
+    }
+    return name;
+}
+
 /** 从会话日志里取最后一条 assistant 文本（与 headless 的 summarize 同口径） */
 function lastAssistantText(session, fromSeq) {
     let started = false;
@@ -156,14 +210,10 @@ export function apply(ctx, config = {}) {
         }
     }
 
-    // ---- 系统提示：QQ 场景约束（profile 级，一次注册） ----
-    ctx.inject(['systemPrompt'], (promptCtx) => {
-        promptCtx.systemPrompt.section({
-            name: 'snowluma-qq',
-            order: 2000,
-            text: QQ_SECTION,
-        });
-    });
+    // ---- 系统提示 ----
+    // 插件不再无条件注入任何提示词：Bridge 只转发用户原话，
+    // 需要约束/人设时由 Bridge 按下游实例的 prompt 开关显式拼进消息。
+    // （早期版本在这里硬注入 QQ 场景约束，等于用户关不掉，已移除。）
 
     /** 取（或创建）某个 QQ 会话对应的 Agent */
     async function ensureAgent(key) {
@@ -225,21 +275,56 @@ export function apply(ctx, config = {}) {
             const agent = state.handle.agent;
             const firstSeq = agent.session.seq;
 
-            // 会话级人设 / 表情词表等由 Bridge 下发；
-            // Agent 的系统提示是 profile 级的，这里作为本轮前置说明随消息一起送入。
-            const text = system ? `${system}\n\n[用户消息]\n${rawText}` : rawText;
+            /**
+             * 组装本轮输入。
+             *
+             * system 为空时（默认）**原样发送用户消息**，不加任何标记；
+             * 只有 Bridge 显式下发了提示词，才在前面拼一段分隔说明。
+             */
+            const text = system ? `${system}\n\n${rawText}` : rawText;
+
+            // 进度上报：只挑关键节点，且每类只发一次
+            const progressState = { started: false, tools: new Set() };
+            const startedAt = Date.now();
+            const reportProgress = (kind, text, detail) => {
+                if (!msg.progress) return;
+                reply({ type: 'downstream_progress', kind, text, ...(detail ? { detail } : {}) });
+            };
+
+            // 监听本轮的 session 事件，从工具调用里提取节点
+            let stopWatch = null;
+            if (msg.progress && typeof agent.ctx?.on === 'function') {
+                reportProgress('start', '正在处理…');
+                progressState.started = true;
+
+                stopWatch = agent.ctx.on('session/event', (session, event) => {
+                    if (session !== agent.session) return;
+                    try {
+                        collectProgress(event, progressState, (kind, t, detail) => {
+                            reportProgress(kind, t, detail);
+                        });
+                    } catch {
+                        /* 进度提取失败不影响主流程 */
+                    }
+                });
+            }
 
             const { createUserMessage } = await import('@deepseek-ai/dsh-llm');
-            agent.followup(createUserMessage({
-                content: [{ type: 'text', text }],
-                source: { kind: 'user' },
-            }));
-            await agent.whenIdle();
+            try {
+                agent.followup(createUserMessage({
+                    content: [{ type: 'text', text }],
+                    source: { kind: 'user' },
+                }));
+                await agent.whenIdle();
+            } finally {
+                stopWatch?.();
+            }
             await ctx.sessions.flush(agent.session);
 
             const out = lastAssistantText(agent.session, firstSeq);
             const elapsedMs = Date.now() - t0;
             state.busy = false;
+            void startedAt;
 
             if (!out) {
                 log(`⚠ dsh 未产出文本 [${key}]`);
