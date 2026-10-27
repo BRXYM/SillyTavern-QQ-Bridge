@@ -61,6 +61,22 @@ function isDshKind(kind: string): boolean {
     return kind.startsWith('dsh');
 }
 
+/** 安装来源的中文名 */
+function sourceLabel(source?: string): string {
+    switch (source) {
+        case 'desktop':
+            return '桌面版';
+        case 'config':
+            return '手动指定';
+        case 'PATH':
+            return 'PATH';
+        case 'npm-global':
+            return 'npm 全局';
+        default:
+            return source || '未知';
+    }
+}
+
 function toggle(id: string): void {
     expanded[id] = !expanded[id];
 }
@@ -453,6 +469,46 @@ onMounted(() => void load({ silent: true }));
                             <div class="flex min-w-0 items-center gap-1.5">
                                 <span class="shrink-0 text-muted-foreground">DSH_HOME</span>
                                 <span class="truncate font-mono">{{ dsh?.home || '—' }}</span>
+                            </div>
+                        </div>
+
+                        <!-- 多版本：桌面版优先，其余作为备选 -->
+                        <div
+                            v-if="(dsh?.installations?.length ?? 0) > 1"
+                            class="mb-3 rounded-md border border-border/50 px-2.5 py-2"
+                        >
+                            <p class="mb-1 text-[10px] text-muted-foreground">
+                                检测到 {{ dsh?.installations?.length }} 个安装，已自动选用优先级最高的
+                            </p>
+                            <div
+                                v-for="inst in dsh?.installations ?? []"
+                                :key="inst.path"
+                                class="flex items-center gap-1.5 py-0.5 text-[10px]"
+                            >
+                                <span
+                                    class="size-1 shrink-0 rounded-full"
+                                    :class="inst.path === dsh?.exePath ? 'bg-success' : 'bg-muted-foreground/30'"
+                                />
+                                <span :class="inst.path === dsh?.exePath ? 'text-foreground' : 'text-muted-foreground/70'">
+                                    {{ sourceLabel(inst.source) }}
+                                </span>
+                                <span class="font-mono text-muted-foreground/70">v{{ inst.version || '?' }}</span>
+                                <span class="min-w-0 flex-1 truncate font-mono text-muted-foreground/50">
+                                    {{ inst.path }}
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- 目录自检异常 -->
+                        <div
+                            v-if="dsh?.homeCheck"
+                            class="mb-3 flex items-start gap-1.5 rounded-md border border-warning/40 bg-warning/5 px-2.5 py-2"
+                        >
+                            <AlertTriangle class="mt-0.5 size-3 shrink-0 text-warning" />
+                            <div class="min-w-0 text-[10px] text-muted-foreground">
+                                <p class="text-warning">{{ dsh.homeCheck.reason }}</p>
+                                <p class="mt-0.5">{{ dsh.homeCheck.hint }}</p>
+                                <p class="mt-0.5 font-mono">{{ dsh.homeCheck.home }}</p>
                             </div>
                         </div>
 

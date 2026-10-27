@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
+import { findDsh } from './dsh-service.mjs';
 
 const isWin = process.platform === 'win32';
 
@@ -23,36 +24,137 @@ export const PLUGIN_NAME = '@snowluma/dsh-bridge-connector';
 /** 插件在 profile 里使用的 loader 行 id */
 export const PLUGIN_ROW_ID = 'snowluma-bridge-connector';
 
+/**
+ * 解析 dsh 的 home 目录。
+ *
+ * 优先级：
+ *   1. 环境变量 DSH_HOME（用户显式指定，最高优先）
+ *   2. os.homedir()/.dsh
+ *   3. **若上一步落在系统账户目录，自动扫描真实用户的 .dsh**
+ *
+ * 第 3 条是关键：Bridge 以服务方式运行时处在 Session 0，
+ * os.homedir() 会返回 C:\WINDOWS\system32\config\systemprofile，
+ * 于是插件被装进一个空目录，用户自己的 dsh 毫无变化。
+ * 这不是权限不足 —— 用户对自己的 .dsh 有完全控制权 —— 而是找错了目录。
+ */
 export function dshHome() {
-    return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    if (process.env.DSH_HOME) return process.env.DSH_HOME;
+
+    const fallback = path.join(os.homedir(), '.dsh');
+    if (!looksLikeSystemHome(fallback)) return fallback;
+
+    // 处在系统账户下：优先找真实用户的 .dsh
+    const detected = detectRealUserDshHome();
+    return detected || fallback;
+}
+
+/** 该路径是否属于系统账户（Session 0 特征） */
+function looksLikeSystemHome(home) {
+    const n = String(home).replace(/\//g, '\\').toLowerCase();
+    return (
+        n.includes('\\windows\\system32\\config\\systemprofile') ||
+        n.includes('\\windows\\syswow64\\config\\systemprofile') ||
+        n.startsWith('/var/root')
+    );
 }
 
 /**
- * 判断当前 home 是否像「以系统身份运行」导致的错误目录。
+ * 在 C:\Users\* 下找真实用户目录里已存在的 .dsh。
  *
- * Bridge 被注册成 Windows 服务、或用管理员/SYSTEM 身份启动时，
- * os.homedir() 会返回 systemprofile，于是去操作一个空的 .dsh ——
- * 表现为「安装成功但用户自己的 dsh 没有变化」，极难排查。
+ * 判定标准是「像真的 dsh home」：含 profiles 目录，或至少含配置/凭据文件。
+ * 多个候选时取最近修改的那个（真实用户通常最活跃）。
+ */
+export function detectRealUserDshHome() {
+    const roots = [];
+
+    // Windows：C:\Users\*，从 SystemDrive 推算，避免硬编码盘符
+    if (process.platform === 'win32') {
+        const drive = process.env.SystemDrive || 'C:';
+        roots.push(path.join(`${drive}\\`, 'Users'));
+    } else {
+        roots.push('/home', '/Users');
+    }
+
+    const candidates = [];
+    for (const root of roots) {
+        let entries;
+        try {
+            entries = fs.readdirSync(root, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+
+        for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+            const name = entry.name;
+            // 跳过系统内置账户
+            if (/^(Public|Default|Default User|All Users|WDAGUtilityAccount)$/i.test(name)) continue;
+
+            const home = path.join(root, name, '.dsh');
+            const looksReal = looksLikeDshHome(home);
+            if (!looksReal) continue;
+
+            let mtime = 0;
+            try {
+                mtime = fs.statSync(home).mtimeMs;
+            } catch {
+                /* 忽略 */
+            }
+            candidates.push({ home, mtime, user: name });
+        }
+    }
+
+    if (candidates.length === 0) return '';
+
+    candidates.sort((a, b) => b.mtime - a.mtime);
+    return candidates[0].home;
+}
+
+/** 该目录看起来是不是一个真的 dsh home（避免把空目录当目标） */
+export function looksLikeDshHome(home) {
+    try {
+        if (!fs.statSync(home).isDirectory()) return false;
+    } catch {
+        return false;
+    }
+
+    // profiles 目录存在（且非空）是最强信号
+    try {
+        const profiles = fs.readdirSync(path.join(home, 'profiles'));
+        if (profiles.length > 0) return true;
+    } catch {
+        /* 没有 profiles */
+    }
+
+    // 退而求其次：有凭据/配置/会话，也说明用过
+    for (const f of ['settings.yaml', '.credentials.yaml', 'sessions', 'storages']) {
+        try {
+            fs.statSync(path.join(home, f));
+            return true;
+        } catch {
+            /* 继续 */
+        }
+    }
+    return false;
+}
+
+/**
+ * 检测 home 是否指向系统账户目录。
  *
- * 这里只做**检测与提示**，不擅自改路径：用户可能真的用 DSH_HOME 指定了位置。
+ * 与早期版本的区别：现在 dshHome() 会自动纠正路径，
+ * 所以这个函数只在「纠正失败」时才有值，用于给出明确提示。
  */
 export function detectHomeMismatch(home = dshHome()) {
-    const normalized = String(home).replace(/\//g, '\\').toLowerCase();
-    const suspicious = [
-        '\\windows\\system32\\config\\systemprofile',
-        '\\windows\\syswow64\\config\\systemprofile',
-        '/var/root',
-    ];
-    const hit = suspicious.find((s) => normalized.includes(s));
-    if (!hit) return null;
+    if (!looksLikeSystemHome(home)) return null;
 
+    const real = detectRealUserDshHome();
     return {
         home,
-        reason: '当前进程以系统身份运行，HOME 指向系统账户目录',
-        hint: '请在与你登录桌面同一个用户下启动 Bridge，或显式设置 DSH_HOME 指向你的 ~/.dsh',
-        actualDshDirs: process.env.USERPROFILE && process.env.USERPROFILE !== home
-            ? [path.join(process.env.USERPROFILE, '.dsh')]
-            : [],
+        reason: '当前进程以系统身份运行（Session 0），HOME 指向系统账户目录',
+        hint: real
+            ? `已自动定位到真实用户目录 ${real}；若仍失败请显式设置 DSH_HOME`
+            : '请在与你登录桌面同一个用户下启动 Bridge，或显式设置 DSH_HOME 指向你的 ~/.dsh',
+        actualDshDirs: real ? [real] : [],
     };
 }
 
@@ -404,65 +506,96 @@ export function verifyInjection({ exePath, profile, home = dshHome() }) {
             env: { ...process.env, DSH_HOME: home },
             stdio: ['ignore', 'pipe', 'pipe'],
         });
-        const present = String(raw).includes(PLUGIN_ROW_ID);
+        const text = String(raw);
+        const present = text.includes(PLUGIN_ROW_ID);
         return {
             ok: present,
             present,
             error: present ? '' : 'profile 组合结果里没有找到插件行（检查 bundles 与 patch 配置）',
-            configDumpLength: String(raw).length,
+            configDumpLength: text.length,
+            exe,
         };
     } catch (e) {
-        return { ok: false, error: e.message };
-    }
-}
+        const msg = e instanceof Error ? e.message : String(e);
 
-/** 找 dsh 可执行文件（与 dsh-service 的探测顺序一致，单独实现避免循环依赖） */
-function findDshExe() {
-    const candidates = [];
-    try {
-        const raw = execFileSync(isWin ? 'where' : 'which', ['dsh'], {
-            encoding: 'utf8',
-            windowsHide: true,
-            timeout: 8000,
-            stdio: ['ignore', 'pipe', 'ignore'],
-        });
-        candidates.push(
-            ...String(raw)
-                .split(/\r?\n/)
-                .map((x) => x.trim())
-                .filter(Boolean)
-                .filter((p) => /\.(exe|cmd|bat|ps1)$/i.test(p)),
-        );
-    } catch {
-        /* PATH 里没有 */
-    }
-    for (const p of candidates) {
-        try {
-            if (fs.statSync(p).isFile()) return p;
-        } catch {
-            /* 继续 */
+        /**
+         * 区分两类失败，避免把「环境本来就坏」算成「我们注入坏了」：
+         *
+         *   A) 报 cannot resolve profile bundle "xxx"
+         *      → 该 profile 里别的插件缺依赖，和本次注入无关
+         *      → 标记 unrelated=true，不要求回滚
+         *
+         *   B) 报 failed to parse ... cordis.patch.yml
+         *      → 我们写的 YAML 有问题，必须回滚
+         */
+        const missingBundle = /cannot resolve profile bundle "([^"]+)"/.exec(msg);
+        const parseError = /failed to parse .*cordis\.patch\.yml/i.test(msg);
+
+        if (missingBundle && !parseError) {
+            const name = missingBundle[1];
+            const ours = name === PLUGIN_NAME;
+            return {
+                ok: false,
+                present: false,
+                unrelated: !ours,
+                unrelatedReason: ours
+                    ? ''
+                    : `profile 里另有插件「${name}」缺少依赖（与本次安装无关）`,
+                error: ours
+                    ? `连接插件的依赖未正确安装：${name}`
+                    : `profile ${profile} 存在既有问题：插件「${name}」无法解析。\n`
+                        + `这不是本次注入导致的，可先修复它（在 profile 目录执行 dsh plugin install），或改用干净的 profile。`,
+                exe,
+                raw: msg.slice(0, 800),
+            };
         }
+
+        return { ok: false, error: msg, exe, raw: msg.slice(0, 800) };
     }
-    return '';
 }
 
-/** 从 dsh.cmd 反推 bin.js，绕开 shell 拿到干净输出 */
+/**
+ * 找 dsh 可执行文件。
+ *
+ * 直接复用 dsh-service.mjs 的探测：那里已经实现了
+ * 「桌面版优先 + 版本新优先」的完整规则。
+ * 之前这里有一份只看 PATH 的独立实现，导致校验用的是旧版 npm dsh，
+ * 而实际注入用的是桌面版，两者对同一份 profile 的解析结果不一致。
+ */
+function findDshExe() {
+    const found = findDsh('');
+    return found.path || '';
+}
+
+/**
+ * 从 dsh.cmd / dsh.ps1 反推 bin.js 路径。
+ *
+ * 直接 `node bin.js` 可以绕开 shell：stdout 干净、参数不用拼接，
+ * 也不会触发 DEP0190（spawn + shell + args 的告警）。
+ *
+ * 注意桌面版的 cli.js 在 app.asar 里，路径结构与 npm 版不同，
+ * 这里两种都尝试；都找不到时退回 shell 调用。
+ */
 function resolveBinJs(exePath) {
+    if (!exePath) return '';
     const dir = path.dirname(exePath);
-    for (const c of [
+    const candidates = [
+        // npm 全局：<prefix>/node_modules/@deepseek-ai/dsh/lib/bin.js
         path.join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
         path.join(dir, '..', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
-    ]) {
+        // 桌面版：resources/runtime/cli/bin -> app.asar/dsh/node_modules/.../cli.js
+        path.join(dir, '..', '..', '..', 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js'),
+    ];
+    for (const c of candidates) {
         try {
             if (fs.statSync(c).isFile()) return path.resolve(c);
         } catch {
-            /* 继续 */
+            /* 继续找 */
         }
     }
     return '';
 }
 
-/** 组装 spawn 参数（Windows 下 .cmd 必须走 shell） */
 export function buildSpawnArgs(exePath, args) {
     const binJs = resolveBinJs(exePath);
     if (binJs) return { cmd: process.execPath, argv: [binJs, ...args], useShell: false };

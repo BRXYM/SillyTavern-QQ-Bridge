@@ -67,6 +67,10 @@ export interface DshStatus {
     settings: Record<string, unknown>;
     service: DshServiceStatus;
     plugin?: DshPluginStatus;
+    /** 本机所有可用安装（桌面版优先） */
+    installations?: Array<{ path: string; source: string; version: string }>;
+    /** 目录自检；正常为 null */
+    homeCheck?: { home: string; reason: string; hint: string } | null;
 }
 
 /** 一键安装的返回：带阶段与可直接展示的结论 */

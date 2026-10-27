@@ -16,6 +16,8 @@ declare module '*dsh-service.mjs' {
         source: string;
         version: string;
         binJs?: string;
+        /** 本机所有可用安装，按优先级排序 */
+        all?: Array<{ path: string; source: string; version: string; binJs?: string }>;
     }
     export interface DshStatusInfo {
         installed: boolean;
@@ -81,6 +83,8 @@ declare module '*dsh-profile-service.mjs' {
     export function profilesRoot(home?: string): string;
     export function resolveProfileDir(profile: string, home?: string): string;
     export function pluginTargetDir(home?: string): string;
+    export function detectRealUserDshHome(): string;
+    export function looksLikeDshHome(home: string): boolean;
     export function detectHomeMismatch(home?: string): {
         home: string;
         reason: string;
@@ -142,7 +146,17 @@ declare module '*dsh-profile-service.mjs' {
         exePath?: string;
         profile: string;
         home?: string;
-    }): { ok: boolean; present?: boolean; error: string; configDumpLength?: number };
+    }): {
+        ok: boolean;
+        present?: boolean;
+        error: string;
+        configDumpLength?: number;
+        exe?: string;
+        raw?: string;
+        /** true = 失败原因与本次注入无关（profile 里别的插件缺依赖） */
+        unrelated?: boolean;
+        unrelatedReason?: string;
+    };
 
     export interface ServiceStatusInfo {
         profile: string;

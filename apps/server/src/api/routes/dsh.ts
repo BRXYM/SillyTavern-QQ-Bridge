@@ -61,6 +61,10 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
             home: dshHome(),
             profiles: listProfiles(),
             settings,
+            /** 本机所有可用安装（桌面版优先），供控制台展示与切换 */
+            installations: found.all ?? [{ path: found.path, source: found.source, version: found.version }],
+            /** 目录自检：正常时为 null */
+            homeCheck: detectHomeMismatch(dshHome()),
             // 兼作 dsh 自身的健康信息
             service: app.dshService().status(),
         });
@@ -185,8 +189,9 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
             return;
         }
 
-        // ---- 2.5) 检查 HOME 是否指向系统账户目录 ----
-        // 以系统身份运行时这里会操作一个空的 .dsh，用户自己的 dsh 不会有任何变化
+        // ---- 2.5) HOME 自检 ----
+        // dshHome() 已能在 Session 0 下自动定位真实用户目录；
+        // 这里只在「自动纠正也失败」时拦截，避免把插件装进空目录。
         const mismatch = detectHomeMismatch(dshHome());
         if (mismatch) {
             json(res, 400, {
@@ -221,14 +226,41 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
         // ---- 4) 校验组合结果（--dump-config 里必须出现插件行）----
         // 校验不通过说明 patch/bundles 写坏了，此时**绝不能重启**——
         // 否则会把本来在跑的服务打成起不来（真实踩过的坑）。
-        let verified: { ok: boolean; error: string } | null = null;
+        let verified: {
+            ok: boolean;
+            error: string;
+            unrelated?: boolean;
+            unrelatedReason?: string;
+        } | null = null;
         if (body.verify !== false) {
             const v = verifyInjection({ exePath: settings.exePath, profile, home: dshHome() });
             verified = v;
             log(v.ok ? 'dsh：插件已进入 profile 组合结果' : `dsh：插件校验未通过 —— ${v.error}`);
 
+            /**
+             * 与本次注入无关的失败（profile 里别的插件缺依赖）：
+             * 我们的写入本身是对的，回滚反而有害（用户再修一次还是同样报错）。
+             * 这种情况保留注入、不重启，明确告诉用户问题出在别处。
+             */
+            if (!v.ok && v.unrelated) {
+                json(res, 200, {
+                    ok: true,
+                    stage: 'installed-warning',
+                    error: v.error,
+                    verified,
+                    inject,
+                    rolledBack: false,
+                    restart: null,
+                    online: false,
+                    message: `插件已写入 ${profile}，但该 profile 本身另有问题：`
+                        + `${v.unrelatedReason || '存在无法解析的插件'}。`
+                        + '本次改动已保留，尚未重启服务。',
+                });
+                return;
+            }
+
             if (!v.ok) {
-                // 回滚：撤掉刚写入的配置，让 profile 回到可用状态
+                // 确属我们写坏了：回滚，让 profile 回到可用状态
                 const rollback = removePlugin({ profile, home: dshHome() });
                 log(rollback.ok
                     ? `dsh：已回滚插件注入（profile ${profile}）`

@@ -88,8 +88,25 @@ export function invalidateDshProbe() {
 function probeDsh(configured) {
     const candidates = [];
 
+    // 用户显式配置的最高优先级：配了就只用它，不再猜测
     if (configured) {
-        candidates.push({ path: configured, source: 'config' });
+        try {
+            if (fs.statSync(configured).isFile()) {
+                return {
+                    path: configured,
+                    source: 'config',
+                    version: readDshVersion(configured),
+                    binJs: resolveBinJs(configured),
+                };
+            }
+        } catch {
+            /* 配的路径无效，继续自动探测 */
+        }
+    }
+
+    // ---- 收集候选（含来源），最后统一按「桌面版优先 + 版本新优先」排序 ----
+    for (const p of desktopInstallCandidates()) {
+        candidates.push({ path: p, source: 'desktop' });
     }
 
     // PATH 探测：Windows 上 `where dsh` 会同时返回 dsh / dsh.cmd / dsh.ps1，
@@ -115,14 +132,16 @@ function probeDsh(configured) {
         /* PATH 里没有 */
     }
 
-    // npm 全局（按可执行性排序）
-    // 注意：这里只放跨机器通用的位置。用户自定义的 npm prefix（例如装在 D:\NODE\npm_global）
-    // 不会自动出现，请用 dshExePath 或 PATH 指定，避免把本地路径写进代码。
+    // npm 全局
     const appData = process.env.APPDATA ?? '';
+    const npmPrefix = process.env.NPM_CONFIG_PREFIX ?? '';
     const npmGlobal = [
         path.join(appData, 'npm', 'dsh.cmd'),
         path.join(appData, 'npm', 'dsh.exe'),
         path.join(appData, 'npm', 'dsh.ps1'),
+        // 常见的自定义 npm prefix（不硬编码盘符，只拼相对结构）
+        npmPrefix ? path.join(npmPrefix, 'dsh.cmd') : '',
+        npmPrefix ? path.join(npmPrefix, 'dsh.exe') : '',
         '/usr/local/bin/dsh',
         '/usr/bin/dsh',
         '/opt/homebrew/bin/dsh',
@@ -131,19 +150,179 @@ function probeDsh(configured) {
         if (p) candidates.push({ path: p, source: 'npm-global' });
     }
 
+    // ---- 逐个校验 + 打分 ----
+    const probed = [];
+    const seen = new Set();
     for (const c of candidates) {
+        if (!c.path) continue;
+        const key = path.resolve(c.path).toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+
         try {
-            if (!c.path || !fs.statSync(c.path).isFile()) continue;
-            return {
-                ...c,
-                version: readDshVersion(c.path),
-                binJs: resolveBinJs(c.path),
-            };
+            if (!fs.statSync(c.path).isFile()) continue;
         } catch {
-            /* 继续找 */
+            continue;
+        }
+
+        probed.push({
+            path: c.path,
+            source: c.source,
+            version: readDshVersion(c.path),
+            binJs: resolveBinJs(c.path),
+            score: scoreCandidate({ path: c.path, source: c.source }),
+        });
+    }
+
+    if (probed.length === 0) {
+        return { path: '', source: 'none', version: '', binJs: '' };
+    }
+
+    probed.sort((a, b) => b.score - a.score);
+    const best = probed[0];
+
+    return {
+        path: best.path,
+        source: best.source,
+        version: best.version,
+        binJs: best.binJs,
+        /** 所有可用安装，供控制台展示与用户手动切换 */
+        all: probed.map(({ score, ...rest }) => rest),
+    };
+}
+
+/**
+ * 桌面版（Electron 独立软件）的 CLI 候选路径。
+ *
+ * 桌面版把 CLI 挂在 resources/runtime/cli/bin 下，并通过内置 Electron
+ * 以 ELECTRON_RUN_AS_NODE 方式运行，功能与 npm 版一致但版本通常更新
+ * （实测 0.2.1 vs npm 的 0.1.2），因此优先探测。
+ *
+ * 不硬编码安装盘符：从注册表、常见安装位置、运行中的进程三处找。
+ */
+function desktopInstallCandidates() {
+    const out = [];
+
+    // 1) 常见安装位置（含默认安装路径）
+    const roots = [
+        'C:\\Program Files\\DeepSeek Harness',
+        'C:\\Program Files (x86)\\DeepSeek Harness',
+        path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DeepSeek Harness'),
+        path.join(process.env.LOCALAPPDATA ?? '', 'DeepSeek Harness'),
+        path.join(process.env.ProgramFiles ?? '', 'DeepSeek Harness'),
+    ];
+    for (const root of roots) {
+        if (!root) continue;
+        out.push(path.join(root, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'));
+    }
+
+    // 2) 从运行中的桌面版进程反查安装目录（绿色版没有注册表项，这是最可靠的一手信息）
+    if (isWin) {
+        try {
+            const raw = execFileSync('wmic', ['process', 'where', "name='DeepSeek Harness.exe'", 'get', 'ExecutablePath'], {
+                encoding: 'utf8',
+                windowsHide: true,
+                timeout: 6000,
+                stdio: ['ignore', 'pipe', 'ignore'],
+            });
+            for (const line of String(raw).split(/\r?\n/)) {
+                const exe = line.trim();
+                if (!exe || !/\.exe$/i.test(exe)) continue;
+                // <安装目录>\DeepSeek Harness.exe
+                const root = path.dirname(exe);
+                out.push(path.join(root, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'));
+            }
+        } catch {
+            /* wmic 不可用（较新系统已移除），跳过 */
         }
     }
-    return { path: '', source: 'none', version: '', binJs: '' };
+
+    // 3) 各盘符根下的常见目录名（覆盖装在 D:\ 这类非默认位置的情况）
+    if (isWin) {
+        for (const drive of listFixedDrives()) {
+            for (const name of ['DeepSeekHarness', 'DeepSeek Harness', 'deepseek-harness']) {
+                out.push(path.join(`${drive}\\`, name, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'));
+            }
+        }
+    }
+
+    // 4) 注册表里的安装位置（安装版才有）
+    if (isWin) {
+        for (const hive of ['HKLM', 'HKCU']) {
+            for (const key of [
+                'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DeepSeek Harness',
+                'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\deepseek-harness',
+            ]) {
+                try {
+                    const raw = execFileSync('reg', ['query', `${hive}\\${key}`, '/v', 'InstallLocation'], {
+                        encoding: 'utf8',
+                        windowsHide: true,
+                        timeout: 5000,
+                        stdio: ['ignore', 'pipe', 'ignore'],
+                    });
+                    const m = /REG_SZ\s+(.+?)\s*$/m.exec(String(raw));
+                    if (m && m[1]) {
+                        out.push(path.join(m[1].trim(), 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'));
+                    }
+                } catch {
+                    /* 该键不存在 */
+                }
+            }
+        }
+    }
+
+    return out;
+}
+
+/** 列出本机固定磁盘（A/B 软驱除外），用于扫描非默认安装位置 */
+function listFixedDrives() {
+    if (!isWin) return [];
+    try {
+        const raw = execFileSync('wmic', ['logicaldisk', 'get', 'name'], {
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 5000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        return String(raw)
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => /^[C-Z]:$/.test(l));
+    } catch {
+        // wmic 不可用时退回常见盘符
+        return ['C:', 'D:', 'E:'];
+    }
+}
+
+/**
+ * 候选打分：来源权重 + 版本号。
+ *
+ * 规则（明确可预测，不依赖遍历顺序）：
+ *   1. desktop  +200   —— 用户要求优先软件版
+ *   2. config   +300   —— 显式配置最高（实际上配了就直接返回了）
+ *   3. version  +0..99 —— 同来源下取版本更新的
+ * 用 semver 里第一段数值做粗排序即可，精确比较交给 displayed version。
+ */
+function scoreCandidate({ path: p, source }) {
+    let score = 0;
+    if (source === 'config') score += 300;
+    else if (source === 'desktop') score += 200;
+    else if (source === 'PATH') score += 100;
+    else score += 50;
+
+    const v = versionWeight(readDshVersion(p));
+    return score + v;
+}
+
+/** 把 0.2.1-rc.2 这类版本折算成 0..99 的小数，仅用于同来源内排序 */
+function versionWeight(version) {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(version ?? ''));
+    if (!m) return 0;
+    const major = Number(m[1]) || 0;
+    const minor = Number(m[2]) || 0;
+    const patch = Number(m[3]) || 0;
+    // 主要看 major/minor，patch 权重很小
+    return Math.min(99, major * 10 + minor + patch / 100);
 }
 
 /** 读版本（失败返回空，不阻塞） */
