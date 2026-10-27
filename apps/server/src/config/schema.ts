@@ -147,10 +147,19 @@ export const DEFAULT_CONFIG: BridgeConfig = {
                 workRoot: '',
                 timeoutMs: 180000,
                 historyTurns: 6,
-                systemPrompt: '',
                 errorReply: '',
                 persistHistory: true,
                 concurrency: 1,
+                // 历史提取：默认空，不发送任何历史文本
+                historyExtracts: [],
+                // 提示词注入：默认全关，只转发用户原话
+                prompt: {
+                    qqBase: false,
+                    character: false,
+                    faces: false,
+                    images: false,
+                    extra: '',
+                },
                 // 常驻服务
                 serviceProfile: 'web',
                 servicePort: 3080,

@@ -103,7 +103,19 @@ export function migrateLegacy(raw: Raw): { config: BridgeConfig; notes: string[]
     dshSettings.workRoot = str(raw.dshWorkRoot, '');
     dshSettings.timeoutMs = num(raw.dshTimeoutMs, 180000);
     dshSettings.historyTurns = num(raw.dshHistoryTurns, 6);
-    dshSettings.systemPrompt = str(raw.dshSystemPrompt, '');
+    /**
+     * 旧版的 dshSystemPrompt 是「追加在人设之后」的自由文本。
+     * 新版提示词改为按开关组装、且默认全关，因此旧文本迁移到 prompt.extra，
+     * 其余开关保持关闭 —— 升级后行为是「只发这段自定义文本」，不会突然多出别的注入。
+     */
+    const legacySystemPrompt = str(raw.dshSystemPrompt, '');
+    dshSettings.prompt = {
+        qqBase: false,
+        character: false,
+        faces: false,
+        images: false,
+        extra: legacySystemPrompt,
+    };
     dshSettings.errorReply = str(raw.dshErrorReply, '');
     dshSettings.persistHistory = bool(raw.dshPersistHistory, true);
     dshSettings.concurrency = num(raw.dshConcurrency, 1);

@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import {
     Boxes, RefreshCw, Plus, Trash2, Play, Loader2, CheckCircle2,
     AlertTriangle, Server, Star, Info, Power, RotateCw, Plug, PlugZap,
-    Terminal, FileText, ChevronDown, ChevronRight,
+    Terminal, FileText, ChevronDown, ChevronRight, MessageSquare, Save,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -59,6 +59,163 @@ function kindLabel(kind: string): string {
 
 function isDshKind(kind: string): boolean {
     return kind.startsWith('dsh');
+}
+
+/**
+ * 提示词开关项。
+ *
+ * 全部默认关闭：Bridge 只转发用户原话，不夹带任何说明。
+ * 每一项都是独立开关，按需打开。
+ */
+const PROMPT_OPTIONS = [
+    {
+        key: 'qqBase' as const,
+        label: 'QQ 聊天约束',
+        desc: '要求简短、口语化、不要 Markdown。开启后 AI 更像在聊天',
+    },
+    {
+        key: 'character' as const,
+        label: '角色人设',
+        desc: '把会话绑定的角色（含世界书名）作为人设告诉下游',
+    },
+    {
+        key: 'faces' as const,
+        label: '表情词表',
+        desc: '关闭时 AI 不会产出 [表情:标签]，表情包功能失效',
+    },
+    {
+        key: 'images' as const,
+        label: '图片能力',
+        desc: '允许 AI 用 [图片:URL] 发送网络图片',
+    },
+] as const;
+
+type PromptKey = (typeof PROMPT_OPTIONS)[number]['key'];
+
+interface PromptState {
+    qqBase: boolean;
+    character: boolean;
+    faces: boolean;
+    images: boolean;
+    extra: string;
+}
+
+/** 每个实例的提示词草稿（未保存的新值放这里，避免直接改 registered） */
+const promptDrafts = reactive<Record<string, PromptState>>({});
+
+/** 取某实例的提示词状态（优先草稿，否则读配置） */
+function promptOf(id: string): PromptState {
+    if (!promptDrafts[id]) {
+        const item = registered.value.find((d) => d.id === id);
+        const raw = (item?.settings?.prompt ?? {}) as Partial<PromptState>;
+        promptDrafts[id] = {
+            qqBase: raw.qqBase === true,
+            character: raw.character === true,
+            faces: raw.faces === true,
+            images: raw.images === true,
+            extra: typeof raw.extra === 'string' ? raw.extra : '',
+        };
+    }
+    return promptDrafts[id]!;
+}
+
+function promptEnabledCount(id: string): number {
+    const p = promptOf(id);
+    return PROMPT_OPTIONS.filter((o) => p[o.key] === true).length;
+}
+
+function setPromptFlag(id: string, key: PromptKey, value: boolean): void {
+    promptOf(id)[key] = value;
+}
+
+function setPromptExtra(id: string, value: string): void {
+    promptOf(id).extra = value;
+}
+
+// ---------------- 历史引用规则 ----------------
+
+interface HistoryRule {
+    pattern: string;
+    label?: string;
+}
+
+/** 每个实例的历史规则草稿 */
+const historyDrafts = reactive<Record<string, HistoryRule[]>>({});
+
+/** 取某实例的历史规则（优先草稿，否则读配置） */
+function historyOf(id: string): HistoryRule[] {
+    if (!historyDrafts[id]) {
+        const item = registered.value.find((d) => d.id === id);
+        const raw = item?.settings?.historyExtracts;
+        historyDrafts[id] = Array.isArray(raw)
+            ? raw.map((r) => ({
+                pattern: String((r as HistoryRule).pattern ?? ''),
+                label: String((r as HistoryRule).label ?? ''),
+            }))
+            : [];
+    }
+    return historyDrafts[id]!;
+}
+
+function addHistoryRule(id: string): void {
+    historyOf(id).push({ pattern: '', label: '' });
+}
+
+function removeHistoryRule(id: string, idx: number): void {
+    historyOf(id).splice(idx, 1);
+}
+
+function setHistoryRule(id: string, idx: number, patch: Partial<HistoryRule>): void {
+    const rule = historyOf(id)[idx];
+    if (rule) Object.assign(rule, patch);
+}
+
+/** 保存某实例的提示词设置 */
+async function savePrompt(item: {
+    id: string;
+    kind: string;
+    name: string;
+    enabled: boolean;
+    settings: Record<string, unknown>;
+}): Promise<void> {
+    const draft = promptOf(item.id);
+    const rules = historyOf(item.id).filter((r) => r.pattern.trim());
+    working.value = `prompt:${item.id}`;
+    try {
+        await api.saveDownstream({
+            id: item.id,
+            kind: item.kind,
+            name: item.name,
+            enabled: item.enabled,
+            settings: {
+                ...item.settings,
+                // 只存有效规则，空 pattern 直接丢弃
+                historyExtracts: rules.map((r) => ({
+                    pattern: r.pattern.trim(),
+                    ...(r.label?.trim() ? { label: r.label.trim() } : {}),
+                })),
+                prompt: {
+                    qqBase: draft.qqBase,
+                    character: draft.character,
+                    faces: draft.faces,
+                    images: draft.images,
+                    extra: draft.extra,
+                },
+            },
+        });
+        // 保存成功后让草稿失效，下次从配置重新读
+        delete promptDrafts[item.id];
+        delete historyDrafts[item.id];
+        await load({ silent: true });
+        toast.success(
+            '提示词已保存',
+            promptEnabledCount(item.id) > 0 ? '将按开启项注入' : '全部关闭，只转发原话',
+        );
+    } catch (e) {
+        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        working.value = '';
+    }
 }
 
 /** 安装来源的中文名 */
@@ -622,6 +779,125 @@ onMounted(() => void load({ silent: true }));
                             <pre
                                 class="max-h-32 overflow-auto rounded-md bg-muted/40 px-2.5 py-2 font-mono text-[10px] leading-relaxed text-muted-foreground"
                             >{{ (dsh?.service?.logTail ?? []).slice(-12).join('\n') }}</pre>
+                        </div>
+
+                        <!-- 提示词：默认全关，只转发用户原话 -->
+                        <div class="mt-2 rounded-md border border-border/60 bg-card/40 p-3">
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <div class="flex items-center gap-2">
+                                    <MessageSquare class="size-3.5 text-muted-foreground" />
+                                    <span class="text-xs font-medium">提示词注入</span>
+                                    <UiBadge
+                                        :tone="promptEnabledCount(item.id) > 0 ? 'info' : 'outline'"
+                                        class="text-micro"
+                                    >
+                                        {{ promptEnabledCount(item.id) > 0
+                                            ? `已开 ${promptEnabledCount(item.id)} 项`
+                                            : '全部关闭' }}
+                                    </UiBadge>
+                                </div>
+                                <UiButton
+                                    size="sm"
+                                    variant="outline"
+                                    :disabled="saving"
+                                    @click="savePrompt(item)"
+                                >
+                                    <Loader2 v-if="working === `prompt:${item.id}`" class="size-3.5 animate-spin" />
+                                    <Save v-else class="size-3.5" />
+                                    保存
+                                </UiButton>
+                            </div>
+
+                            <p class="mt-1.5 text-[10px] text-muted-foreground">
+                                默认不发送任何提示词，只把用户原话转发给下游。
+                                打开下面任意一项后，才会把对应内容拼进去。
+                            </p>
+
+                            <div class="mt-2 space-y-1.5">
+                                <label
+                                    v-for="opt in PROMPT_OPTIONS"
+                                    :key="opt.key"
+                                    class="flex items-start justify-between gap-3 rounded border border-border/40 px-2.5 py-1.5"
+                                >
+                                    <div class="min-w-0">
+                                        <p class="text-[11px] font-medium">{{ opt.label }}</p>
+                                        <p class="text-[10px] text-muted-foreground">{{ opt.desc }}</p>
+                                    </div>
+                                    <UiSwitch
+                                        :model-value="promptOf(item.id)[opt.key] === true"
+                                        class="shrink-0"
+                                        @update:model-value="(v: boolean) => setPromptFlag(item.id, opt.key, v)"
+                                    />
+                                </label>
+                            </div>
+
+                            <div class="mt-2">
+                                <label class="text-[10px] text-muted-foreground">附加文本（总是最后拼接）</label>
+                                <textarea
+                                    :value="promptOf(item.id).extra"
+                                    rows="3"
+                                    class="mt-1 w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 font-mono text-[11px] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/40"
+                                    placeholder="留空 = 不发送"
+                                    @input="(e: Event) => setPromptExtra(item.id, (e.target as HTMLTextAreaElement).value)"
+                                />
+                            </div>
+
+                            <!-- 历史引用：dsh 自己存 session，默认不发历史 -->
+                            <div class="mt-3 border-t border-border/40 pt-2.5">
+                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                    <div class="flex items-center gap-2">
+                                        <span class="text-[11px] font-medium">历史引用</span>
+                                        <UiBadge
+                                            :tone="historyOf(item.id).length > 0 ? 'info' : 'outline'"
+                                            class="text-micro"
+                                        >
+                                            {{ historyOf(item.id).length > 0
+                                                ? `${historyOf(item.id).length} 条规则`
+                                                : '不发送历史' }}
+                                        </UiBadge>
+                                    </div>
+                                    <UiButton
+                                        variant="ghost"
+                                        size="sm"
+                                        @click="addHistoryRule(item.id)"
+                                    >
+                                        <Plus class="size-3.5" />
+                                        加规则
+                                    </UiButton>
+                                </div>
+                                <p class="mt-1 text-[10px] text-muted-foreground">
+                                    dsh 会按 session 自动保留上下文，所以默认不再重发历史。
+                                    这里只在需要引用上一轮片段（表情标签、数值等）时加正则；
+                                    命中的内容以「[参考]」附在本次消息前。
+                                </p>
+
+                                <div
+                                    v-for="(rule, idx) in historyOf(item.id)"
+                                    :key="idx"
+                                    class="mt-1.5 flex items-center gap-1.5"
+                                >
+                                    <UiInput
+                                        :model-value="rule.label ?? ''"
+                                        placeholder="名称"
+                                        class="max-w-24"
+                                        @update:model-value="(v: string) => setHistoryRule(item.id, idx, { label: v })"
+                                    />
+                                    <UiInput
+                                        :model-value="rule.pattern"
+                                        placeholder="正则，如 \[表情:([^\]]+)\]"
+                                        mono
+                                        class="flex-1"
+                                        @update:model-value="(v: string) => setHistoryRule(item.id, idx, { pattern: v })"
+                                    />
+                                    <UiButton
+                                        variant="ghost"
+                                        size="sm"
+                                        @click="removeHistoryRule(item.id, idx)"
+                                    >
+                                        <Trash2 class="size-3.5" />
+                                    </UiButton>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>

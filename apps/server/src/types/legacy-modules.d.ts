@@ -47,6 +47,7 @@ declare module '*dsh-service.mjs' {
             timeoutMs?: number;
             log?: (...args: unknown[]) => void;
             historyTurns?: number;
+            historyExtractsMax?: number;
             historyFile?: string;
             systemPrompt?: string;
             concurrency?: number;
@@ -56,8 +57,9 @@ declare module '*dsh-service.mjs' {
         ask(opts: {
             sessionKey: string;
             text: string;
-            useHistory?: boolean;
             system?: string;
+            /** 从历史提取参考片段的正则规则（默认空 = 不发送历史） */
+            historyExtracts?: Array<{ pattern: string; flags?: string; label?: string }>;
         }): Promise<DshAskResult>;
         clearHistory(sessionKey: string, opts?: { removeWorkDir?: boolean }): boolean;
         clearAllHistory(): number;

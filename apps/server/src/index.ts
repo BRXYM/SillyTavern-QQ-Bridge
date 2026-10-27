@@ -241,10 +241,43 @@ function dshSettings(): DshSettings & {
         persistHistory: s.persistHistory !== false,
         concurrency: Number(s.concurrency ?? 1),
         errorReply: String(s.errorReply ?? ''),
-        systemPrompt: String(s.systemPrompt ?? ''),
+        // 提示词开关：默认全关，前端按实例配置
+        prompt: normalizePrompt(s.prompt),
+        // 历史提取规则：默认空（不发送任何历史文本）
+        historyExtracts: normalizeExtracts(s.historyExtracts),
         serviceProfile: String(s.serviceProfile ?? 'web'),
         servicePort: Number(s.servicePort ?? 3080),
         serviceLogFile: String(s.serviceLogFile ?? ''),
+    };
+}
+
+/** 历史提取规则：只保留 pattern 非空、flags 合法的项 */
+function normalizeExtracts(raw: unknown): Array<{ pattern: string; flags?: string; label?: string }> {
+    if (!Array.isArray(raw)) return [];
+    const out: Array<{ pattern: string; flags?: string; label?: string }> = [];
+    for (const item of raw) {
+        if (!item || typeof item !== 'object') continue;
+        const r = item as Record<string, unknown>;
+        const pattern = String(r.pattern ?? '').trim();
+        if (!pattern) continue;
+        out.push({
+            pattern,
+            ...(typeof r.flags === 'string' && r.flags ? { flags: r.flags } : {}),
+            ...(typeof r.label === 'string' && r.label ? { label: r.label } : {}),
+        });
+    }
+    return out;
+}
+
+/** 把配置里的 prompt 字段收敛成固定形状，缺省一律关闭 */
+function normalizePrompt(raw: unknown): DshSettings['prompt'] {
+    const p = (raw ?? {}) as Record<string, unknown>;
+    return {
+        qqBase: p.qqBase === true,
+        character: p.character === true,
+        faces: p.faces === true,
+        images: p.images === true,
+        extra: typeof p.extra === 'string' ? p.extra : '',
     };
 }
 

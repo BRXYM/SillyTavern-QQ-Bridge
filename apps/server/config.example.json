@@ -23,11 +23,18 @@
                 "historyTurns": 6,
                 "persistHistory": true,
                 "concurrency": 1,
-                "systemPrompt": "",
                 "errorReply": "",
                 "serviceProfile": "web",
                 "servicePort": 3080,
-                "serviceLogFile": ""
+                "serviceLogFile": "",
+                "historyExtracts": [],
+                "prompt": {
+                    "qqBase": false,
+                    "character": false,
+                    "faces": false,
+                    "images": false,
+                    "extra": ""
+                }
             }
         },
         {
@@ -59,16 +66,31 @@
         "hardChars": "。！？!?…",
         "softChars": "，,；;",
         "pairChars": [
-            ["动作", "*"],
-            ["台词", "\""],
-            ["中文台词", "“”"],
-            ["括号动作", "（）"]
+            [
+                "动作",
+                "*"
+            ],
+            [
+                "台词",
+                "\""
+            ],
+            [
+                "中文台词",
+                "“”"
+            ],
+            [
+                "括号动作",
+                "（）"
+            ]
         ],
         "splitStrings": [],
         "splitOnPairs": true,
         "pairMinLen": 3,
         "convertActionMarkers": true,
-        "delayMs": [300, 900]
+        "delayMs": [
+            300,
+            900
+        ]
     },
     "imageReplies": {
         "enabled": true,

@@ -41,9 +41,46 @@ export interface DshSettings {
     concurrency: number;
     /** 失败时回给 QQ 的一句话；空 = 静默 */
     errorReply: string;
-    /** 追加到内置提示词之后的人设 */
-    systemPrompt: string;
+
+    /**
+     * 从历史里提取参考片段的正则规则。
+     *
+     * dsh 自己按 session 保存上下文，因此默认**不发送任何历史文本**。
+     * 需要引用上一轮某个片段（表情标签、某个数值等）时，在这里加规则，
+     * 命中的内容会以「[参考]」形式附在本次消息前。
+     */
+    historyExtracts: Array<{ pattern: string; flags?: string; label?: string }>;
+
+    /**
+     * 提示词注入。
+     *
+     * 默认**全部关闭**：Bridge 只转发用户原话，不夹带任何自己的说明。
+     * 需要时在控制台按会话/按实例显式打开，避免 AI 被隐式提示词影响。
+     */
+    prompt: PromptSettings;
 }
+
+/** 提示词注入开关 + 自由文本 */
+export interface PromptSettings {
+    /** QQ 聊天约束（简短、口语化、不要 Markdown） */
+    qqBase: boolean;
+    /** 会话绑定的角色人设 */
+    character: boolean;
+    /** 表情词表（关闭后 AI 不会产出 [表情:标签]） */
+    faces: boolean;
+    /** 图片回复能力说明 */
+    images: boolean;
+    /** 自由附加文本，总是最后拼接（仅当非空） */
+    extra: string;
+}
+
+export const DEFAULT_PROMPT_SETTINGS: PromptSettings = {
+    qqBase: false,
+    character: false,
+    faces: false,
+    images: false,
+    extra: '',
+};
 
 const DEFAULT_SETTINGS: DshSettings = {
     fallbackHeadless: true,
@@ -55,7 +92,8 @@ const DEFAULT_SETTINGS: DshSettings = {
     persistHistory: true,
     concurrency: 1,
     errorReply: '',
-    systemPrompt: '',
+    historyExtracts: [],
+    prompt: { ...DEFAULT_PROMPT_SETTINGS },
 };
 
 interface Pending {
@@ -325,6 +363,8 @@ export class DshAdapter implements DownstreamAdapter {
             sessionKey: req.sessionKey,
             text: req.text,
             system: req.system,
+            // 历史不整段发送，只按配置的正则提取参考片段
+            historyExtracts: this.settings.historyExtracts ?? [],
         });
         return { ...result, via: result.via ?? 'headless' } as DownstreamResult;
     }
@@ -345,6 +385,46 @@ export class DshAdapter implements DownstreamAdapter {
             face: renderFaceInstruction(this.deps.faceManifest()),
             image: renderImageInstruction(this.deps.imageReplies()),
         };
+    }
+
+    /**
+     * 按本实例的提示词开关组装 system 文本。
+     *
+     * 默认全部关闭 → 返回空串 → 上层不发送任何提示词，只转发用户原话。
+     * 每个开关独立生效，顺序固定（基础约束 → 人设 → 表情 → 图片 → 自定义）。
+     */
+    composeSystemPrompt(sessionKey: string): string {
+        const p = this.settings.prompt ?? DEFAULT_PROMPT_SETTINGS;
+        const parts: string[] = [];
+
+        if (p.qqBase) parts.push(QQ_BASE_PROMPT);
+
+        if (p.character) {
+            const { character, world } = this.deps.sessionDefaults(sessionKey);
+            if (character) {
+                const worldLine = world
+                    ? `\n背景设定：${world}（不需要逐条复述，自然地体现即可）。`
+                    : '';
+                parts.push(
+                    `【角色】你在扮演「${character}」，用第一人称以这个角色的口吻说话。${worldLine}`,
+                );
+            }
+        }
+
+        if (p.faces) {
+            const face = renderFaceInstruction(this.deps.faceManifest());
+            if (face) parts.push(face);
+        }
+
+        if (p.images) {
+            const img = renderImageInstruction(this.deps.imageReplies());
+            if (img) parts.push(img);
+        }
+
+        const extra = String(p.extra ?? '').trim();
+        if (extra) parts.push(extra);
+
+        return parts.join('\n\n');
     }
 }
 

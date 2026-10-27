@@ -383,6 +383,7 @@ export class DshClient {
         timeoutMs = 180000,
         log = () => {},
         historyTurns = 6,
+        historyExtractsMax = 5,
         historyFile = '',
         systemPrompt = '',
         concurrency = 1,
@@ -394,6 +395,8 @@ export class DshClient {
         this.log = log;
         /** 保留多少轮对话（一问一答算一轮；0 = 不带上下文也不持久化） */
         this.historyTurns = Math.max(0, Math.floor(Number(historyTurns) || 0));
+        /** 每条提取规则最多取几条历史命中 */
+        this.historyExtractsMax = Math.max(1, Math.floor(Number(historyExtractsMax) || 5));
         /** 上下文持久化文件；留空则只保存在内存里 */
         this.historyFile = historyFile ? path.resolve(historyFile) : '';
         /** 每次调用都附加的默认系统设定 */
@@ -465,10 +468,11 @@ export class DshClient {
      * @param {string} opts.sessionKey 会话标识（决定上下文隔离）
      * @param {string} opts.text       要问的内容
      * @param {string} [opts.system]   本次调用的系统设定（缺省用实例配置）
-     * @param {boolean} [opts.useHistory] 是否携带历史（默认 true）
+     * @param {Array<{pattern:string,flags?:string,label?:string}>} [opts.historyExtracts]
+     *        从历史里提取参考片段的正则规则（默认空 = 不发送任何历史内容）
      * @returns {Promise<{ok:boolean, text:string, elapsedMs:number, error?:string, sessionKey:string}>}
      */
-    async ask({ sessionKey, text, useHistory = true, system }) {
+    async ask({ sessionKey, text, system, historyExtracts = [] }) {
         const key = String(sessionKey || 'default').trim() || 'default';
         const exe = findDsh(this.exePath).path;
         if (!exe || !fs.existsSync(exe)) {
@@ -482,7 +486,8 @@ export class DshClient {
 
         const dir = this.workDirFor(key);
         const sys = String(system ?? this.systemPrompt ?? '').trim();
-        const prompt = useHistory ? this.#composePrompt(key, raw, sys) : raw;
+        // 历史不再整段拼接（dsh 自己存 session），只按规则提取参考片段
+        const prompt = this.#composePrompt(key, raw, sys, historyExtracts);
 
         // 同一会话串行，避免两个进程抢同一目录的会话文件。
         // 注意排队句柄要保存「链上的那个 Promise」，否则永远删不掉，长跑必然泄漏。
@@ -603,47 +608,86 @@ export class DshClient {
     }
 
     /**
-     * 把历史 + 新消息拼成最终 prompt。
+     * 组装最终 prompt。
      *
-     * 格式用最朴素的分隔，避免模型误以为是 system 指令：
-     *   [之前的对话]
-     *   用户：xxx
-     *   你：yyy
-     *   [现在]
-     *   用户：<新消息>
-     *   （请直接回复这一条）
+     * 设计变更（重要）：
+     * dsh 自己按工作目录归档 session，会保留完整上下文。
+     * 因此这里**不再拼接历史对话**——那等于把同样的内容喂两遍，
+     * 既浪费 token 又容易让模型混淆"哪句是新的"。
+     *
+     * 但仍支持一种例外：用户可能想从历史里提取特定片段
+     * （比如上一轮发过的表情标签、某个数值），作为本次的参考。
+     * 这由 `historyExtract` 正则显式开启，默认关闭。
+     *
+     * @param {string} sessionKey
+     * @param {string} newText
+     * @param {string} system        系统设定（默认为空，见 PromptSettings）
+     * @param {Array<{pattern:string,flags?:string,label?:string}>} extracts 历史提取规则
      */
-    #composePrompt(sessionKey, newText, system = '') {
+    #composePrompt(sessionKey, newText, system = '', extracts = []) {
         const sys = String(system ?? '').trim();
-        let hist = this.historyTurns > 0 ? [...(this.#history.get(sessionKey) ?? [])] : [];
+        const sections = [];
 
-        const build = () => {
-            const sections = [];
-            if (sys) sections.push(`[系统设定]\n${sys}`);
-            if (hist.length > 0) {
-                const lines = ['[之前的对话]'];
-                for (const h of hist) {
-                    lines.push(`${h.role === 'user' ? '用户' : '你'}：${h.text}`);
-                }
-                lines.push('[现在]');
-                lines.push(`用户：${newText}`);
-                lines.push('（请只回复“用户”这一条，不要复述历史）');
-                sections.push(lines.join('\n'));
-            } else if (sys) {
-                sections.push(`[当前消息]\n用户：${newText}`);
-            } else {
-                return newText;
-            }
-            return sections.join('\n\n');
-        };
+        if (sys) sections.push(`[系统设定]\n${sys}`);
 
-        let prompt = build();
-        // 超长保护：从最旧的整轮开始丢，直到塞得下
-        while (prompt.length > PROMPT_MAX_CHARS && hist.length > 0) {
-            hist = hist.slice(2);
-            prompt = build();
+        // 历史提取：只取命中的片段，不发送整段对话
+        const refs = this.#extractFromHistory(sessionKey, extracts);
+        if (refs.length > 0) {
+            sections.push(`[参考]\n${refs.join('\n')}`);
         }
-        return prompt.length > PROMPT_MAX_CHARS ? prompt.slice(0, PROMPT_MAX_CHARS) : prompt;
+
+        // 没有任何附加内容时，原样发送用户消息
+        if (sections.length === 0) return newText;
+
+        sections.push(newText);
+        return sections.join('\n\n');
+    }
+
+    /**
+     * 按用户给定的正则从历史里提取参考片段。
+     *
+     * 每条规则独立执行，最多取最近 `historyExtractsMax` 条命中；
+     * 规则写错（非法正则）只跳过该条并记日志，不影响本次对话。
+     */
+    #extractFromHistory(sessionKey, extracts) {
+        if (!Array.isArray(extracts) || extracts.length === 0) return [];
+
+        const hist = this.#history.get(sessionKey) ?? [];
+        if (hist.length === 0) return [];
+
+        const out = [];
+        for (const rule of extracts) {
+            const pattern = String(rule?.pattern ?? '').trim();
+            if (!pattern) continue;
+
+            let re;
+            try {
+                // 只取第一个捕获组（若有），否则取整个匹配
+                re = new RegExp(pattern, String(rule.flags ?? 'g'));
+            } catch (e) {
+                this.log(`⚠ 历史提取规则无效，已跳过：${pattern}（${e.message}）`);
+                continue;
+            }
+
+            const hits = [];
+            for (const h of hist) {
+                if (hits.length >= this.historyExtractsMax) break;
+                let m;
+                re.lastIndex = 0;
+                while ((m = re.exec(h.text)) !== null) {
+                    const value = (m[1] ?? m[0] ?? '').trim();
+                    if (value) hits.push(value);
+                    if (m.index === re.lastIndex) re.lastIndex += 1; // 防零宽死循环
+                    if (hits.length >= this.historyExtractsMax) break;
+                }
+            }
+
+            if (hits.length > 0) {
+                const label = String(rule.label ?? '').trim();
+                out.push(label ? `${label}：${hits.join('、')}` : hits.join('、'));
+            }
+        }
+        return out;
     }
 
     #appendHistory(sessionKey, userText, replyText) {

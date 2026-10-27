@@ -101,23 +101,48 @@ export function checkTrigger(
 }
 
 /** 组装下发给下游的系统设定 */
-export function buildSystemPrompt(config: BridgeConfig, sessionKey: string, deps: DispatchDeps): string {
-    const parts = [QQ_BASE_PROMPT];
-    const resolved = deps.sessions.resolve(sessionKey);
+/**
+ * 组装下发给下游的 system 文本。
+ *
+ * 默认**返回空串**：Bridge 只转发用户原话，不夹带任何自己的说明。
+ * 具体拼哪些内容由下游实例自己的 prompt 开关决定（见 PromptSettings），
+ * 这样同一份配置里 dsh 与酒馆可以各自独立控制。
+ */
+export function buildSystemPrompt(
+    config: BridgeConfig,
+    sessionKey: string,
+    deps: DispatchDeps,
+    adapter?: DownstreamAdapter,
+): string {
+    // 适配器自己会拼（dsh 有完整开关）
+    const composer = (adapter as unknown as { composeSystemPrompt?: (k: string) => string } | undefined)
+        ?.composeSystemPrompt;
+    if (typeof composer === 'function') {
+        return composer.call(adapter, sessionKey);
+    }
 
-    if (resolved.character) {
+    // 其它下游（酒馆）沿用实例 settings 里的开关，默认同样不发
+    const settings = (adapter && 'getSettings' in adapter)
+        ? (adapter as unknown as { getSettings: () => Record<string, unknown> }).getSettings()
+        : undefined;
+    const prompt = (settings?.prompt ?? {}) as Record<string, unknown>;
+    if (prompt.qqBase !== true && prompt.character !== true) return '';
+
+    const parts: string[] = [];
+    if (prompt.qqBase === true) parts.push(QQ_BASE_PROMPT);
+
+    const resolved = deps.sessions.resolve(sessionKey);
+    if (prompt.character === true && resolved.character) {
         const worldLine = resolved.world
             ? `\n背景设定：${resolved.world}（不需要逐条复述，自然地体现即可）。`
             : '';
         parts.push(`【角色】你在扮演「${resolved.character}」，用第一人称以这个角色的口吻说话。${worldLine}`);
     }
 
-    const face = renderFaceInstruction(deps.faceManifest());
-    if (face) parts.push(face);
+    const extra = String(prompt.extra ?? '').trim();
+    if (extra) parts.push(extra);
 
-    const img = renderImageInstruction(config.imageReplies);
-    if (img) parts.push(img);
-
+    void config;
     return parts.join('\n\n');
 }
 
@@ -188,7 +213,7 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     const result = await adapter.ask({
         sessionKey,
         text: userText,
-        system: buildSystemPrompt(config, sessionKey, deps),
+        system: buildSystemPrompt(config, sessionKey, deps, adapter),
         sender: senderName,
     });
 
