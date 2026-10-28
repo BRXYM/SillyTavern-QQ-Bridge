@@ -111,11 +111,39 @@ SnowLuma ──▶ upstream/manager.ts ──▶ 事件补上 accountId
 | 同一条消息被回复两次 | 同上的后果 |
 
 SnowLuma 每个 QQ 号都有独立的 `onebot_<uin>.json`，**各自监听自己的 wsServer**。
-所以端口不能复用：`ensureOneBotEndpoint` 的端口参数由 `pickOneBotPort` 算出来 ——
-该号已有不冲突端口就沿用，否则从 basePort 往上找第一个空闲的。
+
+端口由后端统一分配，起点固定，不随前端输入漂移：
+
+```
+3001 → 3002 → 3003 → …        （第 N 个号用 3001+N-1）
+```
+
+`pickOneBotPort` 的取舍：
+
+| 情况 | 做法 |
+|---|---|
+| 该号已有端口，且没被其他账号占用 | **沿用**（重复点按钮不换端口） |
+| 端口被其他账号配置占用 | 跳过，继续往上 |
+| 端口真被别的进程监听（NapCat / 残留进程） | 跳过，继续往上 |
+
+第二、三条缺一不可：只比配置不看实际监听，会把端口分给一个正在被占用的号，
+结果又是 EADDRINUSE；只查监听又会让自己正在正常工作的号每次都被换端口。
+
+起点固定而不是"找最小空闲"，是为了让「第几个号在哪」可预测 —— 排查时看一眼就知道。
 
 上游管理器还会在 `apply()` 里做一次端点去重：同一 `host:port` 只保留第一个账号，
 其余跳过并记警告。这样即使配置错了，也不会出现"一条消息回两遍"。
+
+### 改完 OneBot 配置必须重启 SnowLuma
+
+`onebot_<uin>.json` 只在 SnowLuma **启动时**读取。写完文件后：
+
+- 运行中的 SnowLuma 仍用旧 token / 旧端口
+- Bridge 立刻用新 token 去连 → 得到 **401 rejected unauthorized WebSocket upgrade**
+- 界面上表现为「配置写成功、状态就绪，但这个号连不上」
+
+`/api/snowluma/apply` 因此返回 `restartRequired`（`changed && 端口在监听`），
+前端把它显示成明确的警告，而不是绿色的"已就绪"。
 
 ## 状态推送
 

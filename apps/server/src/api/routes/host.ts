@@ -50,6 +50,17 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
     const cfg = () => app.config();
 
     /**
+     * OneBot 端口的固定起点。
+     *
+     * 全部号都从这里往上分配：第一个号 3001，第二个 3002，以此类推。
+     * 起点固定而不是让它漂移，是为了让「第几个号用哪个端口」可预测 ——
+     * 排查时看一眼账号 id 顺序就知道大概在哪个端口。
+     */
+    const ONEBOT_PORT_BASE = 3001;
+    /** 最多往后找多少个端口，避免配置异常时死循环 */
+    const ONEBOT_PORT_SPAN = 100;
+
+    /**
      * 为某个 QQ 号挑一个 OneBot 端口。
      *
      * 为什么需要这个：SnowLuma 每个号都**各自监听**自己的 wsServer。
@@ -58,13 +69,15 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
      * 而两侧日志都不明显（SnowLuma 只 WARN 一句 network startup degraded）。
      *
      * 规则：
-     *   1. 该号已有配置且端口与别人不冲突 → 沿用（不要每次点都换端口）
-     *   2. 否则从 basePort 开始找第一个「没被其他账号占用」的端口
+     *   1. 该号已有端口且不与他人冲突 → 沿用（重复点按钮不该换端口）
+     *   2. 否则从 3001 开始往上找第一个**既不与其他账号重复、
+     *      也没被其他进程占用**的端口
      *
-     * 只看**配置层面**的占用：真正跑没跑起来由 SnowLuma 决定，
-     * 这里保证不主动制造冲突。
+     * 第 2 条里"被其他进程占用"是必要的：用户可能同时跑着 NapCat、
+     * 别的机器人，或者上一个 SnowLuma 还没退干净。只比配置不看实际监听，
+     * 会把端口分给一个正在被占用的号，结果又是一次 EADDRINUSE。
      */
-    function pickOneBotPort(uin: string, basePort: number): number {
+    async function pickOneBotPort(uin: string): Promise<number> {
         const accounts = cfg().accounts;
         const self = accounts.find((a) => a.uin === uin || a.id === `qq_${uin}`);
 
@@ -76,7 +89,7 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
             }
         };
 
-        // 其他账号（排除自己）已占用的端口
+        // 其他账号（排除自己）已在配置里占用的端口
         const taken = new Set(
             accounts
                 .filter((a) => a !== self)
@@ -84,15 +97,25 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
                 .filter((p) => p > 0),
         );
 
-        // 1) 自己已有端口且不冲突 → 沿用
+        // 1) 自己已有端口，且没被别的账号占用 → 沿用
+        //
+        // 这一条必须放在"检查端口是否被监听"之前：该号自己的 SnowLuma
+        // wsServer 正在监听这个端口是**正常状态**，若用"端口在监听就换"
+        // 来判，每次点自动配置都会给它换一个新端口。
         const own = self ? portOf(self) : 0;
-        if (own > 0 && !taken.has(own)) return own;
-
-        // 2) 找第一个空闲的
-        for (let p = basePort; p < basePort + 100; p += 1) {
-            if (!taken.has(p)) return p;
+        if (own > 0 && !taken.has(own)) {
+            return own;
         }
-        return basePort;
+
+        // 2) 从固定起点往上找：跳过其他账号已配置的，也跳过真被占用的
+        for (let p = ONEBOT_PORT_BASE; p < ONEBOT_PORT_BASE + ONEBOT_PORT_SPAN; p += 1) {
+            if (taken.has(p)) continue;
+            if (await portListening(p)) continue;
+            return p;
+        }
+
+        // 全被占满时退回起点，让 SnowLuma 自己报 EADDRINUSE，别静默乱选
+        return ONEBOT_PORT_BASE;
     }
 
     /** 该端口是否已被同机其他进程监听（SnowLuma 是否已经跑起来了） */
@@ -144,20 +167,41 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
         const probe = probeSnowLuma(dir, activePort);
         const accounts = probe.ok ? listAccounts(probe.dataDir) : [];
 
-        // OneBot 端口监听状态：用第一个账号的上游配置里的端口
-        let onebotPort = 3001;
-        try {
-            onebotPort = Number(new URL(cfg().accounts[0]?.upstream.url ?? '').port || 3001);
-        } catch {
-            /* 用默认值 */
-        }
-        const running = await isPortOpen(onebotPort);
+        /**
+         * 每个账号的 OneBot 端口与监听状态。
+         *
+         * 多号时只看第一个号是不够的：用户真正想知道的是"我这些号
+         * 是不是都在正常监听"，所以逐个报出来，谁没起来一眼可见。
+         */
+        const accountPorts = await Promise.all(
+            cfg().accounts.map(async (a) => {
+                let port = 0;
+                try {
+                    port = Number(new URL(a.upstream.url).port) || 0;
+                } catch {
+                    /* 地址非法，保持 0 */
+                }
+                const listening = port > 0 ? await portListening(port) : false;
+                return {
+                    id: a.id,
+                    uin: a.uin,
+                    port,
+                    listening,
+                    enabled: a.enabled,
+                };
+            }),
+        );
+
+        // 兼容旧字段：取第一个账号
+        const first = accountPorts[0];
 
         json(res, 200, {
             ...probe,
             accounts,
-            onebotPortListening: running,
-            onebotPort,
+            onebotPortListening: first?.listening ?? false,
+            onebotPort: first?.port ?? ONEBOT_PORT_BASE,
+            /** 每个账号的端口与监听状态 */
+            accountPorts,
         });
     });
 
@@ -166,7 +210,6 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
         try {
             const dir = String(body.dir ?? '').trim();
             const uin = String(body.uin ?? '').trim();
-            const basePort = Number(body.port ?? 3001);
             const host = String(body.host ?? '127.0.0.1');
             const forceToken = body.forceToken === true;
             const webuiPort = Number(body.webuiPort ?? 0) || null;
@@ -178,13 +221,14 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
             if (!probe.ok) throw new Error(probe.error || 'SnowLuma 目录无效');
 
             /**
-             * 端口必须逐号分配。
+             * 端口由后端统一分配，前端不再指定。
              *
-             * 用户填的 basePort（默认 3001）只是起点：如果这个号已经有端口就沿用，
-             * 否则从 basePort 往上找第一个没被别的账号占用的。直接把 3001 写进
-             * 每个号，第二个号必然 EADDRINUSE 起不来，而且表面上"配置成功了"。
+             * 起点固定 3001，逐个号往上排（3001、3002、3003…），
+             * 遇到已被账号占用或真被别的进程占着的就继续往后找。
+             * 这样「第几个号在哪个端口」是可预测的，也不会出现
+             * 把 3001 写进每个号导致 EADDRINUSE 的情况。
              */
-            const port = pickOneBotPort(uin, basePort);
+            const port = await pickOneBotPort(uin);
 
             const result = ensureOneBotEndpoint({
                 configDir: probe.configDir,
@@ -250,6 +294,18 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
                 .filter((a) => a.id !== accountId && sameEndpoint(a.upstream.url, endpoint))
                 .map((a) => a.id);
 
+            /**
+             * Token 变了但 SnowLuma 还在跑 → 我们的连接会被 401 拒绝。
+             *
+             * 这是「配置写成功、界面显示就绪、但实际连不上」的典型陷阱：
+             * OneBot 的 wsServer 在 SnowLuma 启动时读配置，改文件不影响运行中的实例。
+             * 必须明确告诉用户"要重启 SnowLuma"，否则他会以为配置坏了。
+             */
+            const tokenRotated = result.changed && (await portListening(port));
+            if (tokenRotated) {
+                log(`⚠ 账号 ${accountId} 的 OneBot 配置已变，但 SnowLuma 仍在运行旧配置 → 需重启 SnowLuma`);
+            }
+
             json(res, 200, {
                 ok: true,
                 accountId,
@@ -262,6 +318,8 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
                 port,
                 /** 与该号撞了同一端点的其他账号 id（应为空） */
                 conflicts,
+                /** true = 配置已改但 SnowLuma 仍在跑旧配置，必须重启才生效 */
+                restartRequired: tokenRotated || result.changed,
                 configDir: probe.configDir,
                 dataDir: probe.dataDir,
                 mode: probe.mode,

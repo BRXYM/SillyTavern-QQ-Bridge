@@ -22,7 +22,6 @@ const toast = useToastStore();
 
 // ---------------- SnowLuma ----------------
 const snowDir = ref('');
-const snowPort = ref(3001);
 const snowWebuiPort = ref(5099);
 const snowUin = ref('');
 const probing = ref(false);
@@ -546,7 +545,6 @@ async function doApply(forceToken = false) {
         const r = await api.applySnowLuma({
             dir: snowDir.value.trim(),
             uin: snowUin.value.trim(),
-            port: snowPort.value,
             webuiPort: snowWebuiPort.value,
             forceToken,
         });
@@ -554,7 +552,7 @@ async function doApply(forceToken = false) {
         if (r.needRestart) {
             toast.warning(
                 '配置已写入，需重启 SnowLuma',
-                `OneBot 端口 ${r.port ?? snowPort.value}，重启后生效`,
+                `OneBot 端口 ${r.port ?? '-'}，重启后生效`,
             );
         } else {
             toast.success('配置已就绪', `无需改动 · ${r.endpoint}`);
@@ -605,14 +603,6 @@ onMounted(async () => {
     } else {
         // 首次使用：自动尝试定位 SnowLuma（静默）
         void doDiscover({ silent: true });
-    }
-
-    // OneBot 端口：取第一个账号的地址
-    const firstAcc = (cfg?.['accounts'] as Array<{ upstream?: { url?: string } }> | undefined)?.[0];
-    const url = firstAcc?.upstream?.url;
-    if (typeof url === 'string') {
-        const m = url.match(/:(\d+)/);
-        if (m) snowPort.value = Number(m[1]);
     }
 
     // 读取自动注入状态
@@ -697,7 +687,20 @@ async function toggleHook(enabled: boolean): Promise<void> {
                     <UiBadge v-if="probe?.version" tone="outline" class="font-mono text-micro">
                         v{{ probe.version }}
                     </UiBadge>
-                    <UiBadge tone="outline" class="font-mono text-micro">:{{ snowPort }}</UiBadge>
+                    <UiBadge
+                        v-if="probe?.accountPorts?.length === 1"
+                        tone="outline"
+                        class="font-mono text-micro"
+                    >
+                        :{{ probe?.accountPorts?.[0]?.port }}
+                    </UiBadge>
+                    <UiBadge
+                        v-else-if="(probe?.accountPorts?.length ?? 0) > 1"
+                        tone="outline"
+                        class="font-mono text-micro"
+                    >
+                        {{ probe?.accountPorts?.length }} 个号
+                    </UiBadge>
                 </div>
             </div>
 
@@ -837,7 +840,7 @@ async function toggleHook(enabled: boolean): Promise<void> {
                 </div>
 
                 <!-- 账号与端口 -->
-                <div class="grid gap-4 sm:grid-cols-3">
+                <div class="grid gap-4 sm:grid-cols-2">
                     <div>
                         <label class="text-xs font-medium text-muted-foreground">QQ 号</label>
                         <UiInput
@@ -851,12 +854,31 @@ async function toggleHook(enabled: boolean): Promise<void> {
                         <label class="text-xs font-medium text-muted-foreground">WebUI 端口</label>
                         <UiInput v-model.number="snowWebuiPort" type="number" class="mt-1.5" />
                     </div>
-                    <div>
-                        <label class="text-xs font-medium text-muted-foreground">OneBot 端口</label>
-                        <UiInput v-model.number="snowPort" type="number" class="mt-1.5" />
-                        <p class="mt-1 text-[10px] text-muted-foreground/70">
-                            基准值。已被占用时会自动往后找一个空闲端口
-                        </p>
+                </div>
+
+                <!-- 每个号的 OneBot 端口：后端按 3001、3002… 自动分配 -->
+                <div v-if="(probe?.accountPorts?.length ?? 0) > 0" class="rounded-lg border border-border/50 px-3.5 py-2.5">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <p class="text-[11px] font-medium">OneBot 端口分配</p>
+                        <span class="text-[10px] text-muted-foreground/70">
+                            从 3001 起逐号递增，被占用则继续往后找
+                        </span>
+                    </div>
+                    <div class="mt-1.5 flex flex-wrap gap-1.5">
+                        <span
+                            v-for="ap in probe?.accountPorts ?? []"
+                            :key="ap.id"
+                            class="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px]"
+                            :class="ap.listening ? 'border-success/40 bg-success/5' : 'border-warning/40 bg-warning/5'"
+                        >
+                            <span
+                                class="size-1.5 shrink-0 rounded-full"
+                                :class="ap.listening ? 'bg-success' : 'bg-warning'"
+                            />
+                            <span class="font-mono">{{ ap.uin || ap.id }}</span>
+                            <span class="font-mono tabular-nums text-muted-foreground">:{{ ap.port }}</span>
+                            <span v-if="!ap.listening" class="text-warning">未监听</span>
+                        </span>
                     </div>
                 </div>
             </div>
@@ -903,9 +925,12 @@ async function toggleHook(enabled: boolean): Promise<void> {
                             </span>
                         </div>
                     </div>
-                    <p v-if="applyResult.needRestart" class="mt-2 flex items-start gap-1.5 text-xs text-warning">
+                    <p v-if="applyResult.needRestart || applyResult.restartRequired" class="mt-2 flex items-start gap-1.5 text-xs text-warning">
                         <AlertTriangle class="mt-0.5 size-3.5 shrink-0" />
-                        需重启 SnowLuma 使配置生效（OneBot 服务在启动时读取）
+                        <span>
+                            需重启 SnowLuma 使配置生效（它的 OneBot 服务只在启动时读配置）。
+                            <strong>重启前 Bridge 会一直连不上这个号（401）</strong>
+                        </span>
                     </p>
                     <!-- 端口冲突：写入成功了，但别的号会因此起不来，必须显式告警 -->
                     <p

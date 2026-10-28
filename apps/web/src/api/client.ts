@@ -209,6 +209,14 @@ export interface SnowLumaProbe {
     }>;
     onebotPortListening: boolean;
     onebotPort: number;
+    /** 每个账号的 OneBot 端口与监听状态（多号时用这个） */
+    accountPorts?: Array<{
+        id: string;
+        uin: string;
+        port: number;
+        listening: boolean;
+        enabled: boolean;
+    }>;
 }
 
 export interface SnowLumaDiscoverResult {
@@ -241,6 +249,8 @@ export interface SnowLumaApplyResult {
     port?: number;
     /** 与该号撞了同一端点的其他账号（正常应为空） */
     conflicts?: string[];
+    /** true = 配置已写入但 SnowLuma 仍在跑旧配置，必须重启才生效 */
+    restartRequired?: boolean;
     configDir: string;
     dataDir: string;
     mode: string;
