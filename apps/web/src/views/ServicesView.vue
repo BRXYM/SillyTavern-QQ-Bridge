@@ -3,12 +3,14 @@ import { computed, onMounted, ref } from 'vue';
 import {
     Server, Play, Square, RotateCw, Download, ExternalLink, FolderOpen, RefreshCw,
     Wand2, CheckCircle2, AlertTriangle, Info, Copy, Trash2, Save, Eye, EyeOff,
+    Plug,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
+import UiSwitch from '@/components/ui/UiSwitch.vue';
 import { api, type SnowLumaProbe, type SnowLumaApplyResult, type SnowLumaDiscoverResult } from '@/api/client';
 import { useStatusStore } from '@/stores/status';
 import { useToastStore } from '@/stores/toast';
@@ -263,7 +265,61 @@ onMounted(async () => {
         if (m) snowPort.value = Number(m[1]);
     }
 
+    // 读取自动注入状态
+    void loadHook();
 });
+
+// ---------------- QQ 进程自动注入 ----------------
+
+interface HookState {
+    ok: boolean;
+    configured: boolean;
+    found?: boolean;
+    dir?: string;
+    runtimePath?: string;
+    hasWebuiConfig?: boolean;
+    webuiPort?: number;
+    hookAutoLoad?: boolean;
+    error?: string;
+}
+
+const hook = ref<HookState | null>(null);
+const savingHook = ref(false);
+/** 改完需要重启 SnowLuma 才生效 */
+const hookNeedsRestart = ref(false);
+
+async function loadHook(): Promise<void> {
+    try {
+        hook.value = await api.snowlumaHook();
+        hookNeedsRestart.value = false;
+    } catch (e) {
+        hook.value = {
+            ok: false,
+            configured: false,
+            error: e instanceof Error ? e.message : String(e),
+        };
+    }
+}
+
+async function toggleHook(enabled: boolean): Promise<void> {
+    savingHook.value = true;
+    try {
+        const r = await api.setSnowlumaHook(enabled);
+        hookNeedsRestart.value = r.needsRestart === true;
+        toast.success(
+            enabled ? '已开启自动注入' : '已关闭自动注入',
+            r.needsRestart ? '需要重启 SnowLuma 才生效' : '已生效',
+        );
+        await loadHook();
+        // loadHook 会把 restsart 标记重置，这里恢复
+        hookNeedsRestart.value = r.needsRestart === true;
+    } catch (e) {
+        toast.error('设置失败', e instanceof Error ? e.message : String(e));
+        await loadHook();
+    } finally {
+        savingHook.value = false;
+    }
+}
 </script>
 
 <template>
@@ -571,6 +627,104 @@ onMounted(async () => {
                     的 wsServer，并把地址与 Token 同步到 Bridge 的上游连接，无需手动复制粘贴
                 </p>
             </div>
+        </UiCard>
+
+        <!-- ================= QQ 进程自动注入 ================= -->
+        <UiCard>
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
+                <div class="flex items-center gap-3">
+                    <div class="flex size-10 items-center justify-center rounded-xl bg-aurora/15 text-aurora">
+                        <Plug class="size-5" />
+                    </div>
+                    <div>
+                        <h2 class="text-sm font-semibold tracking-tight">QQ 进程自动注入</h2>
+                        <p class="text-xs text-muted-foreground">
+                            让 SnowLuma 自动接管新出现的 QQ 进程，不必每次手动点注入
+                        </p>
+                    </div>
+                </div>
+                <UiBadge
+                    :tone="hook?.hookAutoLoad ? 'success' : 'outline'"
+                    dot
+                    :pulse="hook?.hookAutoLoad === true"
+                >
+                    {{ hook?.hookAutoLoad ? '已开启' : '未开启' }}
+                </UiBadge>
+            </div>
+
+            <!-- 未配置目录 -->
+            <div v-if="hook && !hook.configured" class="px-5 py-4">
+                <p class="text-xs text-muted-foreground">
+                    请先在上方填写并保存 <strong class="text-foreground">SnowLuma 目录</strong>，
+                    然后回到这里开启。
+                </p>
+            </div>
+
+            <!-- 目录里找不到 runtime.json -->
+            <div v-else-if="hook && hook.found === false" class="px-5 py-4">
+                <p class="flex items-start gap-1.5 text-xs text-warning">
+                    <AlertTriangle class="mt-0.5 size-3.5 shrink-0" />
+                    {{ hook.error }}
+                </p>
+            </div>
+
+            <template v-else-if="hook && hook.found">
+                <div class="flex items-center justify-between px-5 py-3.5">
+                    <div class="min-w-0">
+                        <p class="text-sm">自动注入</p>
+                        <p class="text-xs text-muted-foreground">
+                            开启后 SnowLuma 发现 QQ 进程会自动注入；关闭则需在它自己的界面手动注入
+                        </p>
+                    </div>
+                    <UiSwitch
+                        :model-value="hook.hookAutoLoad === true"
+                        :disabled="savingHook"
+                        class="shrink-0"
+                        @update:model-value="toggleHook"
+                    />
+                </div>
+
+                <div class="grid gap-x-6 gap-y-2 border-t border-border/40 px-5 py-3.5 text-[11px] sm:grid-cols-2">
+                    <div class="flex min-w-0 items-center gap-1.5 sm:col-span-2">
+                        <span class="shrink-0 text-muted-foreground">配置文件</span>
+                        <span class="truncate font-mono" :title="hook.runtimePath">{{ hook.runtimePath }}</span>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-muted-foreground">WebUI 端口</span>
+                        <span class="font-mono">{{ hook.webuiPort }}</span>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-muted-foreground">查看注入状态</span>
+                        <a
+                            class="font-mono text-primary hover:underline"
+                            :href="`http://127.0.0.1:${hook.webuiPort}`"
+                            target="_blank"
+                            rel="noopener"
+                        >
+                            打开 SnowLuma
+                        </a>
+                    </div>
+                </div>
+
+                <div
+                    v-if="hookNeedsRestart"
+                    class="border-t border-warning/40 bg-warning/5 px-5 py-2.5"
+                >
+                    <p class="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+                        <AlertTriangle class="mt-0.5 size-3.5 shrink-0 text-warning" />
+                        已写入配置，但<strong class="text-warning">需要重启 SnowLuma 才生效</strong>
+                        （它只在启动时读这一项）。
+                    </p>
+                </div>
+
+                <div class="border-t border-border/40 bg-info/5 px-5 py-2.5">
+                    <p class="text-[11px] text-muted-foreground">
+                        Bridge 只负责打开 SnowLuma 自带的开关，不自己注入进程：
+                        注入需要与 QQ 版本匹配的原生模块，只有 SnowLuma 能做对。
+                        写入前会备份为 <code class="font-mono">runtime.json.bak-snowluma-bridge</code>。
+                    </p>
+                </div>
+            </template>
         </UiCard>
 
         <UiCard class="border-info/30 bg-info/5">

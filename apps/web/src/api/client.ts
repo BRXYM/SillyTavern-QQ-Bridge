@@ -420,6 +420,42 @@ export const api = {
             body: JSON.stringify({ dir }),
         }),
 
+    // ---------------- QQ 进程自动注入 ----------------
+    /** 读取 SnowLuma 的自动注入状态 */
+    snowlumaHook: () =>
+        request<{
+            ok: boolean;
+            configured: boolean;
+            found?: boolean;
+            dir?: string;
+            runtimePath?: string;
+            hasWebuiConfig?: boolean;
+            webuiPort?: number;
+            hookAutoLoad?: boolean;
+            error?: string;
+        }>('/snowluma/hook'),
+
+    /** 开启 / 关闭自动注入（需重启 SnowLuma 生效） */
+    setSnowlumaHook: (enabled: boolean) =>
+        request<{
+            ok: boolean;
+            runtimePath?: string;
+            before?: boolean;
+            after?: boolean;
+            backup?: string;
+            needsRestart?: boolean;
+        }>('/snowluma/hook', {
+            method: 'POST',
+            body: JSON.stringify({ enabled }),
+        }),
+
+    /** 从备份还原 runtime.json */
+    restoreSnowlumaHook: () =>
+        request<{ ok: boolean; runtimePath?: string; needsRestart?: boolean }>('/snowluma/hook/restore', {
+            method: 'POST',
+            body: '{}',
+        }),
+
     refreshCatalog: () =>
         request<{ ok: boolean; catalogs: CatalogDto }>('/catalog/refresh'),
 };

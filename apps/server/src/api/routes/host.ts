@@ -31,6 +31,11 @@ import {
     isPortOpen as isStPortOpen,
 } from '../../../sillytavern-service.mjs';
 import { log } from '../../core/logger.ts';
+import {
+    readSnowLumaRuntime,
+    restoreRuntimeConfig,
+    setHookAutoLoad,
+} from '../../upstream/snowluma-hook.ts';
 
 export interface HostRoutesDeps {
     /** 仓库根目录，用于扩展安装源与目录探测提示 */
@@ -247,6 +252,98 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
         const result = uninstallExtension(dir);
         if (result.ok) log('酒馆扩展已卸载');
         json(res, result.ok ? 200 : 400, result);
+    });
+
+    // ================= 角色 / 世界书清单 =================
+
+    // ================= SnowLuma 自动注入 =================
+    // SnowLuma 的 hookAutoLoad 开关：打开后它自己会把 DLL 注入每个
+    // 发现的 QQ 进程，Bridge 不需要密码、不需要调它的鉴权 API。
+
+    // GET /api/snowluma/hook   读取当前自动注入状态
+    router.get('/api/snowluma/hook', ({ res }) => {
+        const dir = cfg().snowluma.dir;
+        if (!dir) {
+            json(res, 200, {
+                ok: true,
+                configured: false,
+                error: '尚未配置 SnowLuma 目录',
+            });
+            return;
+        }
+
+        const info = readSnowLumaRuntime(dir);
+        if (!info) {
+            json(res, 200, {
+                ok: true,
+                configured: true,
+                found: false,
+                dir,
+                error: '在该目录下没找到 config/runtime.json',
+            });
+            return;
+        }
+
+        json(res, 200, {
+            ok: true,
+            configured: true,
+            found: true,
+            dir,
+            runtimePath: info.runtimePath,
+            hasWebuiConfig: info.hasWebuiConfig,
+            webuiPort: info.webuiPort,
+            hookAutoLoad: info.hookAutoLoad,
+            /** 改完需要重启 SnowLuma 才生效 */
+            needsRestart: false,
+        });
+    });
+
+    // POST /api/snowluma/hook   开启 / 关闭自动注入
+    router.post('/api/snowluma/hook', ({ res, body }) => {
+        const dir = cfg().snowluma.dir;
+        if (!dir) {
+            json(res, 400, { ok: false, error: '请先在页面上填写并保存 SnowLuma 目录' });
+            return;
+        }
+
+        const enabled = body.enabled === true;
+        const r = setHookAutoLoad(dir, enabled);
+        if (!r.ok) {
+            log(`SnowLuma 自动注入设置失败：${r.error}`);
+            json(res, 400, { ok: false, error: r.error, backup: r.backup });
+            return;
+        }
+
+        log(
+            `SnowLuma 自动注入已${enabled ? '开启' : '关闭'}（${r.runtimePath}）`
+            + '；需重启 SnowLuma 生效',
+        );
+
+        json(res, 200, {
+            ok: true,
+            runtimePath: r.runtimePath,
+            before: r.before,
+            after: r.after,
+            backup: r.backup,
+            /** 提示前端：必须重启 SnowLuma */
+            needsRestart: true,
+        });
+    });
+
+    // POST /api/snowluma/hook/restore   从备份还原 runtime.json
+    router.post('/api/snowluma/hook/restore', ({ res }) => {
+        const dir = cfg().snowluma.dir;
+        if (!dir) {
+            json(res, 400, { ok: false, error: '请先配置 SnowLuma 目录' });
+            return;
+        }
+        const r = restoreRuntimeConfig(dir);
+        if (!r.ok) {
+            json(res, 400, { ok: false, error: r.error });
+            return;
+        }
+        log(`SnowLuma runtime.json 已从备份还原（${r.runtimePath}）`);
+        json(res, 200, { ok: true, runtimePath: r.runtimePath, needsRestart: true });
     });
 
     // ================= 角色 / 世界书清单 =================
