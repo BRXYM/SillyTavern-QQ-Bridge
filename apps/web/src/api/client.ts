@@ -229,11 +229,18 @@ export interface SnowLumaDiscoverResult {
 
 export interface SnowLumaApplyResult {
     ok: boolean;
+    /** 写入的账号 id */
+    accountId?: string;
+    createdAccount?: boolean;
     changed: boolean;
     created: boolean;
     path: string;
     token: string;
     endpoint: string;
+    /** 本次分配的 OneBot 端口 */
+    port?: number;
+    /** 与该号撞了同一端点的其他账号（正常应为空） */
+    conflicts?: string[];
     configDir: string;
     dataDir: string;
     mode: string;

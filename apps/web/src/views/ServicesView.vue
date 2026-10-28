@@ -825,6 +825,19 @@ async function toggleHook(enabled: boolean): Promise<void> {
                         <AlertTriangle class="mt-0.5 size-3.5 shrink-0" />
                         需重启 SnowLuma 使配置生效（OneBot 服务在启动时读取）
                     </p>
+                    <!-- 端口冲突：写入成功了，但别的号会因此起不来，必须显式告警 -->
+                    <p
+                        v-if="(applyResult.conflicts?.length ?? 0) > 0"
+                        class="mt-2 flex items-start gap-1.5 rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 text-xs text-destructive"
+                    >
+                        <AlertTriangle class="mt-0.5 size-3.5 shrink-0" />
+                        <span>
+                            端点与账号
+                            <span class="font-mono">{{ applyResult.conflicts?.join(', ') }}</span>
+                            重复。每个 QQ 号必须用不同端口，否则后启动的号在 SnowLuma 里会
+                            <code class="font-mono">EADDRINUSE</code> 起不来、收不到消息。
+                        </span>
+                    </p>
                 </div>
             </div>
 

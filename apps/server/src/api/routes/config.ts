@@ -161,6 +161,39 @@ export function registerConfigRoutes(router: Router, app: AppContext): void {
             return;
         }
 
+        /**
+         * 端点唯一性：两个号不能指向同一个 OneBot 端点。
+         *
+         * 这不是风格问题 —— SnowLuma 每个号各自监听自己的 wsServer，
+         * 两个号写同一端口时后启动的那个会 EADDRINUSE 直接起不来，
+         * 表现是"加了这个号却永远收不到消息"，而且没有任何报错弹到界面上。
+         * 与其让它静默失败，不如在这里挡住并说清原因。
+         */
+        const sameHostPort = (a: string, b: string): boolean => {
+            const key = (u: string): string => {
+                try {
+                    const p = new URL(u);
+                    return `${p.hostname.toLowerCase()}:${p.port || (p.protocol === 'wss:' ? '443' : '80')}`;
+                } catch {
+                    return u.trim().toLowerCase();
+                }
+            };
+            return key(a) === key(b);
+        };
+
+        const clash = cfg.accounts.find(
+            (a) => a.id !== next.id && sameHostPort(a.upstream.url, next.upstream.url),
+        );
+        if (clash) {
+            json(res, 400, {
+                ok: false,
+                error: `端点 ${next.upstream.url} 已被账号 ${clash.id} 使用。`
+                    + '每个 QQ 号在 SnowLuma 里要监听不同端口，请换一个端口'
+                    + '（或在「SnowLuma 接入」页用自动配置让它自动分配）',
+            });
+            return;
+        }
+
         app.updateConfig((c) => {
             if (index >= 0) {
                 // 保留 id，其余覆盖

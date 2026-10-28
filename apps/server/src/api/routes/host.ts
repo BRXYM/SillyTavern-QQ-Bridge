@@ -49,6 +49,55 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
     /** 读取本机上已保存的目录（配置里没有时给空串） */
     const cfg = () => app.config();
 
+    /**
+     * 为某个 QQ 号挑一个 OneBot 端口。
+     *
+     * 为什么需要这个：SnowLuma 每个号都**各自监听**自己的 wsServer。
+     * 如果把两个号都写成 3001，先启动的那个会占住端口，后启动的
+     * 直接 `EADDRINUSE` 起不来 —— 表现就是「加了第二个号但收不到消息」，
+     * 而两侧日志都不明显（SnowLuma 只 WARN 一句 network startup degraded）。
+     *
+     * 规则：
+     *   1. 该号已有配置且端口与别人不冲突 → 沿用（不要每次点都换端口）
+     *   2. 否则从 basePort 开始找第一个「没被其他账号占用」的端口
+     *
+     * 只看**配置层面**的占用：真正跑没跑起来由 SnowLuma 决定，
+     * 这里保证不主动制造冲突。
+     */
+    function pickOneBotPort(uin: string, basePort: number): number {
+        const accounts = cfg().accounts;
+        const self = accounts.find((a) => a.uin === uin || a.id === `qq_${uin}`);
+
+        const portOf = (a: typeof accounts[number]): number => {
+            try {
+                return Number(new URL(a.upstream.url).port) || 0;
+            } catch {
+                return 0;
+            }
+        };
+
+        // 其他账号（排除自己）已占用的端口
+        const taken = new Set(
+            accounts
+                .filter((a) => a !== self)
+                .map(portOf)
+                .filter((p) => p > 0),
+        );
+
+        // 1) 自己已有端口且不冲突 → 沿用
+        const own = self ? portOf(self) : 0;
+        if (own > 0 && !taken.has(own)) return own;
+
+        // 2) 找第一个空闲的
+        for (let p = basePort; p < basePort + 100; p += 1) {
+            if (!taken.has(p)) return p;
+        }
+        return basePort;
+    }
+
+    /** 该端口是否已被同机其他进程监听（SnowLuma 是否已经跑起来了） */
+    const portListening = (port: number): Promise<boolean> => isPortOpen(port);
+
     // ================= SnowLuma =================
 
     // GET /api/snowluma/discover   自动发现安装目录
@@ -117,7 +166,7 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
         try {
             const dir = String(body.dir ?? '').trim();
             const uin = String(body.uin ?? '').trim();
-            const port = Number(body.port ?? 3001);
+            const basePort = Number(body.port ?? 3001);
             const host = String(body.host ?? '127.0.0.1');
             const forceToken = body.forceToken === true;
             const webuiPort = Number(body.webuiPort ?? 0) || null;
@@ -127,6 +176,15 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
 
             const probe = probeSnowLuma(dir, webuiPort);
             if (!probe.ok) throw new Error(probe.error || 'SnowLuma 目录无效');
+
+            /**
+             * 端口必须逐号分配。
+             *
+             * 用户填的 basePort（默认 3001）只是起点：如果这个号已经有端口就沿用，
+             * 否则从 basePort 往上找第一个没被别的账号占用的。直接把 3001 写进
+             * 每个号，第二个号必然 EADDRINUSE 起不来，而且表面上"配置成功了"。
+             */
+            const port = pickOneBotPort(uin, basePort);
 
             const result = ensureOneBotEndpoint({
                 configDir: probe.configDir,
@@ -177,9 +235,20 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
 
             // 让上游按新配置重建连接
             app.upstreams.apply(toUpstreamAccounts(cfg()));
-            log(`上游连接参数已由「自动配置」更新（账号 ${accountId}），正在重连 SnowLuma…`);
+            log(`上游连接参数已由「自动配置」更新（账号 ${accountId}）：${endpoint}`);
 
             log(`✓ SnowLuma 配置已写入：${result.path}（${result.changed ? '已更新' : '无变化'}）`);
+
+            /**
+             * 检查是否与其他账号撞端口。
+             *
+             * 单看这次写入是成功的，撞的是别的号 —— 那会导致那个号
+             * 在 SnowLuma 侧起不来 OneBot 服务，而这里看不出任何异常。
+             * 所以必须把冲突明确回报，让用户知道要重启并核对。
+             */
+            const conflicts = cfg().accounts
+                .filter((a) => a.id !== accountId && sameEndpoint(a.upstream.url, endpoint))
+                .map((a) => a.id);
 
             json(res, 200, {
                 ok: true,
@@ -190,6 +259,9 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
                 path: result.path,
                 token: result.token,
                 endpoint,
+                port,
+                /** 与该号撞了同一端点的其他账号 id（应为空） */
+                conflicts,
                 configDir: probe.configDir,
                 dataDir: probe.dataDir,
                 mode: probe.mode,
@@ -408,4 +480,22 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
             catalogs: out,
         });
     });
+}
+
+/**
+ * 两个 OneBot 地址是否指向同一个端点。
+ *
+ * 只比较 host:port：path 不同在 SnowLuma 里仍是同一个监听端口，
+ * 端口冲突的判定与 path 无关。
+ */
+function sameEndpoint(a: string, b: string): boolean {
+    const key = (url: string): string => {
+        try {
+            const u = new URL(url);
+            return `${u.hostname.toLowerCase()}:${u.port || (u.protocol === 'wss:' ? '443' : '80')}`;
+        } catch {
+            return url.trim().toLowerCase();
+        }
+    };
+    return key(a) === key(b);
 }

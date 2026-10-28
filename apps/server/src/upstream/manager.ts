@@ -52,8 +52,31 @@ export class UpstreamManager extends EventEmitter {
     /** 按当前配置重建全部连接（配置变更时调用） */
     apply(accounts: UpstreamAccount[]): { added: string[]; removed: string[]; updated: string[] } {
         const want = new Map<string, UpstreamAccount>();
+
+        /**
+         * 同一个端点只允许一个账号连。
+         *
+         * 两个账号指向同一 host:port 时，两条 WebSocket 连到的是**同一个**
+         * SnowLuma 实例，因此两条连接收到的都是同一个号的消息 ——
+         * 结果就是同一条消息被处理两次、回复两次，而且两个账号的
+         * selfId 都显示成同一个号。
+         *
+         * SnowLuma 每个号各自监听自己的 wsServer，正确做法是每个号一个端口。
+         * 这里丢弃重复项并明确记日志，比让它静默双发要好得多。
+         */
+        const claimed = new Map<string, string>();
         for (const acc of accounts) {
             if (!acc.enabled) continue;
+            const endpoint = endpointKey(acc.upstream.url);
+            const owner = claimed.get(endpoint);
+            if (owner) {
+                log(
+                    `⚠ 账号 ${acc.id} 与 ${owner} 指向同一端点 ${acc.upstream.url}，已跳过。`
+                    + '每个 QQ 号应使用不同的 OneBot 端口（或用「自动配置连接」自动分配）',
+                );
+                continue;
+            }
+            claimed.set(endpoint, acc.id);
             want.set(acc.id, acc);
         }
 
@@ -204,4 +227,19 @@ function sameUpstream(a: UpstreamOptions, b: UpstreamOptions): boolean {
         && a.token === b.token
         && a.reconnectMs === b.reconnectMs
         && a.actionTimeoutMs === b.actionTimeoutMs;
+}
+
+/**
+ * 端点的比较键：只看 host:port。
+ *
+ * path 与 token 都不参与判定 —— 指向同一端口就是同一个 SnowLuma 实例，
+ * 无论路径写成什么，两条连接都会收到同一批事件。
+ */
+function endpointKey(url: string): string {
+    try {
+        const u = new URL(url);
+        return `${u.hostname.toLowerCase()}:${u.port || (u.protocol === 'wss:' ? '443' : '80')}`;
+    } catch {
+        return String(url).trim().toLowerCase();
+    }
 }
