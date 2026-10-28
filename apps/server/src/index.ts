@@ -38,6 +38,8 @@ import { registerSessionRoutes } from './api/routes/sessions.ts';
 import { registerConfigRoutes, toUpstreamAccounts } from './api/routes/config.ts';
 import { registerDshRoutes } from './api/routes/dsh.ts';
 import { registerHostRoutes } from './api/routes/host.ts';
+import { registerFacesRoutes } from './api/routes/faces.ts';
+import { registerOllamaRoutes } from './api/routes/ollama.ts';
 import { loadConfigFile, saveConfigFile } from './config/store.ts';
 import type { BridgeConfig } from './config/schema.ts';
 import type { DshSettings } from './downstream/dsh.ts';
@@ -472,6 +474,12 @@ registerHostRoutes(router, app, {
     repoRoot: path.resolve(SERVER_ROOT, '..', '..'),
     extensionSourceDir: path.resolve(SERVER_ROOT, '..', 'extension'),
 });
+
+// 表情库（列表 / 同步 / 打标 / 导出）
+registerFacesRoutes(router, app, { dataDir: FACES_DATA_DIR });
+
+// Ollama 管理（服务启停 / 模型 / 拉取 / 打标模型选择）
+registerOllamaRoutes(router, app);
 
 const consoleServer = http.createServer((req, res) => {
     // SSE 长连接：不走 router，否则会被统一的 JSON 处理包住

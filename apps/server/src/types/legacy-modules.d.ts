@@ -250,6 +250,7 @@ declare module '*faces-service.mjs' {
             };
         });
         readonly store: {
+            dataDir: string;
             manifest(): {
                 vocab: Record<string, string[]>;
                 totalWords: number;
@@ -257,12 +258,87 @@ declare module '*faces-service.mjs' {
                 labeled: number;
             };
             pickById(id: string, keyword?: string): FacePick | null;
+            pickByTag(tag: string): FacePick | null;
             pickByTagsDetailed(
                 tags: string[],
                 opts?: { exclude?: string[]; topN?: number },
             ): FacePickResult;
+            stats(): FaceStats;
+            toDto(face: Record<string, unknown>): Record<string, unknown>;
+        };
+        /** Ollama 打标器（改地址/模型后要 reconfigure） */
+        readonly labeler: {
+            baseUrl: string;
+            visionModel: string;
+            textModel: string;
+            reconfigure(opts: {
+                baseUrl?: string;
+                visionModel?: string;
+                textModel?: string;
+            }): void;
+        };
+        /** 同步状态：上一次同步的时间、结果与错误 */
+        readonly syncState: {
+            running: boolean;
+            lastAt: string | null;
+            lastResult: unknown;
+            lastError: string;
         };
         stats(): FaceStats;
+        list(opts: {
+            tag?: string;
+            keyword?: string;
+            page?: number;
+            pageSize?: number;
+        }): {
+            faces: Array<Record<string, unknown>>;
+            total: number;
+            page: number;
+            pageSize: number;
+        };
+        tagStats(): Array<{ tag: string; count: number }>;
+        progress(): {
+            running: boolean;
+            total: number;
+            done: number;
+            ok: number;
+            failed: number;
+            queued: number;
+            percent: number;
+            [key: string]: unknown;
+        };
+        diagnostics(): Promise<{
+            ollama: {
+                baseUrl: string;
+                reachable: boolean;
+                error: string;
+                models: unknown[];
+                visionModel: string;
+                textModel: string;
+                modelReady: boolean;
+            };
+            store: FaceStats;
+            job: unknown;
+            sync: unknown;
+            dataDir: string;
+        }>;
+        syncFromQQ(opts?: { downloadImages?: boolean }): Promise<{
+            ok: boolean;
+            error?: string;
+            added?: number;
+            updated?: number;
+            total?: number;
+            downloaded?: number;
+        }>;
+        startLabeling(opts?: { all?: boolean; limit?: number }): { ok: boolean; error?: string; queued?: number };
+        stopLabeling(): { ok: boolean; dropped: number };
+        setUserTags(md5: string, tags: string[]): boolean;
+        saveToDir(md5s: string[], dir: string): Promise<{
+            ok: boolean;
+            error?: string;
+            dir?: string;
+            saved?: number;
+        }>;
     }
 }
 
@@ -270,7 +346,51 @@ declare module '*ollama-service.mjs' {
     export class OllamaClient {
         constructor(opts?: { baseUrl?: string; timeoutMs?: number });
         baseUrl: string;
-        list(): Promise<Array<{ name: string; size?: number; modified_at?: string }>>;
+        /** 服务版本；服务不可达时返回 ok:false 而不是抛异常 */
+        version(): Promise<{ ok: true; version: string } | { ok: false; error: string }>;
+        list(): Promise<Array<{
+            name: string;
+            sizeBytes: number;
+            family: string;
+            parameterSize: string;
+            quantization: string;
+            format: string;
+            contextLength: number;
+            capabilities: string[];
+            modifiedAt: string | null;
+        }>>;
+        /** 已加载到内存/显存的模型 */
+        running(): Promise<Array<{
+            name: string;
+            sizeBytes: number;
+            sizeVramBytes: number;
+            expiresAt: string | null;
+            digest: string;
+        }>>;
+        show(model: string): Promise<Record<string, unknown>>;
+        load(model: string, opts?: { keepAlive?: string }): Promise<unknown>;
+        unload(model: string): Promise<unknown>;
+        remove(model: string): Promise<unknown>;
+        pull(
+            model: string,
+            onProgress?: (ev: { status?: string; completed?: number; total?: number }) => void,
+        ): Promise<unknown>;
+        chat(
+            model: string,
+            prompt: string,
+            opts?: {
+                timeoutMs?: number;
+                keepAlive?: string;
+                temperature?: number;
+                numPredict?: number;
+            },
+        ): Promise<string>;
+        vision(
+            model: string,
+            prompt: string,
+            imagesBase64: string[],
+            opts?: { timeoutMs?: number; keepAlive?: string; temperature?: number; numPredict?: number },
+        ): Promise<string>;
     }
     export class OllamaDaemon {
         constructor(opts?: {
@@ -282,7 +402,16 @@ declare module '*ollama-service.mjs' {
         baseUrl: string;
         exePath: string;
         modelsDir: string;
-        status(): Record<string, unknown>;
+        status(): {
+            exePath: string;
+            exeGuessed: boolean;
+            exeExists: boolean;
+            managed: boolean;
+            startedByUs: boolean;
+            lastError: string;
+            modelsDir: string;
+            modelsDirSource: 'config' | 'env' | 'default';
+        };
         start(client: OllamaClient): Promise<{
             ok: boolean;
             alreadyRunning?: boolean;
@@ -291,6 +420,10 @@ declare module '*ollama-service.mjs' {
         stop(client: OllamaClient): Promise<{ ok: boolean; action?: string; error?: string }>;
     }
     export function countModelsIn(dir: string): number;
+    export function resolveModelsDir(opts?: {
+        exePath?: string;
+        configured?: string;
+    }): { dir: string; source: 'config' | 'env' | 'default' };
 }
 
 /** snowluma-service：SnowLuma 本体的探测与 OneBot 配置写入 */

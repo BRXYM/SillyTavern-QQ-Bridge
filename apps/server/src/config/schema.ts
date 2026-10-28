@@ -109,6 +109,18 @@ export interface FacesConfig {
     ollamaBaseUrl: string;
     ollamaVisionModel: string;
     ollamaTextModel: string;
+    /**
+     * Ollama 可执行文件路径。空 = 自动探测。
+     * 只在「用户显式指定过」时才该有值，覆盖自动探测。
+     */
+    ollamaExePath: string;
+    /**
+     * Ollama 模型目录。空 = 自动推导。
+     *
+     * 这是最容易出错的一项：模型装在别处、服务看不到时，
+     * 界面会显示"没有模型"，看起来像没装。
+     */
+    ollamaModelsDir: string;
 }
 
 /** SnowLuma（上游软件本体）的安装信息 */
@@ -269,6 +281,8 @@ export const DEFAULT_CONFIG: BridgeConfig = {
         ollamaBaseUrl: 'http://127.0.0.1:11434',
         ollamaVisionModel: 'qwen2.5vl:3b',
         ollamaTextModel: '',
+        ollamaExePath: '',
+        ollamaModelsDir: '',
     },
     registrationToken: '',
 };

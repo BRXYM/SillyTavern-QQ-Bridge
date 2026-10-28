@@ -14,7 +14,6 @@ import {
     ollamaApi, formatBytes,
     type OllamaStatus, type OllamaModel, type OllamaPullJob, type OllamaModelDetail,
 } from '@/api/ollama';
-import { api } from '@/api/client';
 import { useToastStore } from '@/stores/toast';
 
 const toast = useToastStore();
@@ -195,12 +194,20 @@ async function repairService() {
     }
 }
 
-async function saveServiceConfig() {    savingConfig.value = true;
+/**
+ * 保存服务配置。
+ *
+ * 提交到 /api/ollama/select：因为地址、模型名、可执行文件路径、模型目录
+ * 这几项要一起生效 —— 客户端、守护进程、打标器三者共用同一份。
+ * 只改其中一项就走 updateConfig 会让它们不同步。
+ */
+async function saveServiceConfig() {
+    savingConfig.value = true;
     try {
-        await api.updateConfig({
-            ollamaBaseUrl: baseUrl.value.trim(),
-            ollamaExePath: exePath.value.trim(),
-            ollamaModelsDir: modelsDir.value.trim(),
+        await ollamaApi.select({
+            baseUrl: baseUrl.value.trim(),
+            exePath: exePath.value.trim(),
+            modelsDir: modelsDir.value.trim(),
         });
         toast.success('已保存', '配置已生效，无需重启 Bridge');
         await loadAll({ silent: true });

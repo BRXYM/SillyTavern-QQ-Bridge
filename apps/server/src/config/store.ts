@@ -406,9 +406,14 @@ function normalizeV2(raw: Raw): { config: BridgeConfig; notes: string[] } {
     const f = (raw.faces ?? {}) as Raw;
     base.faces = {
         dataDir: str(f.dataDir, ''),
-        ollamaBaseUrl: str(f.ollamaBaseUrl, base.faces.ollamaBaseUrl),
-        ollamaVisionModel: str(f.ollamaVisionModel, base.faces.ollamaVisionModel),
-        ollamaTextModel: str(f.ollamaTextModel, ''),
+        // 五个字段都兼容「faces 下」与「顶层平铺」两种写法：
+        // v1 的旧配置把 ollama* 放在顶层，v2 之后才收进 faces。
+        // 只读 faces 会把 v2 里的旧值静默丢掉（用户改了地址却不生效）。
+        ollamaBaseUrl: str(f.ollamaBaseUrl, str(raw.ollamaBaseUrl, base.faces.ollamaBaseUrl)),
+        ollamaVisionModel: str(f.ollamaVisionModel, str(raw.ollamaVisionModel, base.faces.ollamaVisionModel)),
+        ollamaTextModel: str(f.ollamaTextModel, str(raw.ollamaTextModel, '')),
+        ollamaExePath: str(f.ollamaExePath, str(raw.ollamaExePath, '')),
+        ollamaModelsDir: str(f.ollamaModelsDir, str(raw.ollamaModelsDir, '')),
     };
 
     return { config: base, notes };
@@ -501,9 +506,14 @@ function normalizeV3(raw: Raw): { config: BridgeConfig; notes: string[] } {
     const f = (raw.faces ?? {}) as Raw;
     base.faces = {
         dataDir: str(f.dataDir, ''),
-        ollamaBaseUrl: str(f.ollamaBaseUrl, base.faces.ollamaBaseUrl),
-        ollamaVisionModel: str(f.ollamaVisionModel, base.faces.ollamaVisionModel),
-        ollamaTextModel: str(f.ollamaTextModel, ''),
+        // 五个字段都兼容「faces 下」与「顶层平铺」两种写法：
+        // v1 的旧配置把 ollama* 放在顶层，v2 之后才收进 faces。
+        // 只读 faces 会把 v2 里的旧值静默丢掉（用户改了地址却不生效）。
+        ollamaBaseUrl: str(f.ollamaBaseUrl, str(raw.ollamaBaseUrl, base.faces.ollamaBaseUrl)),
+        ollamaVisionModel: str(f.ollamaVisionModel, str(raw.ollamaVisionModel, base.faces.ollamaVisionModel)),
+        ollamaTextModel: str(f.ollamaTextModel, str(raw.ollamaTextModel, '')),
+        ollamaExePath: str(f.ollamaExePath, str(raw.ollamaExePath, '')),
+        ollamaModelsDir: str(f.ollamaModelsDir, str(raw.ollamaModelsDir, '')),
     };
 
     return { config: base, notes };

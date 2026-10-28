@@ -127,7 +127,9 @@
         "dataDir": "",
         "ollamaBaseUrl": "http://127.0.0.1:11434",
         "ollamaVisionModel": "qwen2.5vl:3b",
-        "ollamaTextModel": ""
+        "ollamaTextModel": "",
+        "ollamaExePath": "",
+        "ollamaModelsDir": ""
     },
     "registrationToken": ""
 }

@@ -32,6 +32,8 @@ apps/server/
 │           ├── downstreams.ts 下游增删改查 + 命名配置 + 自注册
 │           ├── sessions.ts   会话与触发规则
 │           ├── config.ts     全局配置 + 账号
+│           ├── faces.ts      表情库（列表 / 同步 / 打标 / 导出）
+│           ├── ollama.ts     Ollama 管理（启停 / 模型 / 拉取）
 │           ├── dsh.ts        dsh 服务与插件注入
 │           └── host.ts       SnowLuma / 酒馆本体管理
 └── *.mjs                     迁移期保留：表情库、Ollama、dsh 服务管理

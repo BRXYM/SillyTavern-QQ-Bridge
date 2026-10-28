@@ -201,9 +201,27 @@ export const ollamaApi = {
             body: JSON.stringify(payload),
         }),
 
-    /** 选择打标用模型（会持久化到配置并热更新打标器） */
-    select: (payload: { visionModel?: string; textModel?: string; baseUrl?: string }) =>
-        req<{ ok: boolean; visionModel: string; textModel: string; baseUrl: string }>(
+    /**
+     * 选择打标用模型 / 服务参数。
+     *
+     * 会持久化到配置并**立即热更新**打标器与守护进程 ——
+     * 页面显示改成功了但打标还在用旧模型，是最难察觉的一类 bug。
+     */
+    select: (payload: {
+        visionModel?: string;
+        textModel?: string;
+        baseUrl?: string;
+        exePath?: string;
+        modelsDir?: string;
+    }) =>
+        req<{
+            ok: boolean;
+            visionModel: string;
+            textModel: string;
+            baseUrl: string;
+            exePath: string;
+            modelsDir: string;
+        }>(
             '/ollama/select',
             { method: 'POST', body: JSON.stringify(payload) },
         ),

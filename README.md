@@ -400,17 +400,41 @@ SillyTavern-QQ-Bridge/
 | `GET /api/status` | 连接状态、下游状态、会话统计、日志、配置 |
 | `GET /api/logs` | 只取日志（轮询更轻） |
 | `GET /api/health` | 健康检查 |
-| `POST /api/config` | 更新全局配置（上游 / 分段 / 管道 / 图片表情） |
+| `POST /api/config` | 更新全局配置（分段 / 管道 / 图片表情 / 默认角色） |
+| `GET /api/accounts` | 上游账号列表（含每号连接状态） |
+| `POST /api/accounts` | 新增或更新一个 QQ 号 |
+| `DELETE /api/accounts/:id` | 删除账号（连带其会话配置） |
 | `GET /api/downstreams` | 下游实例列表 + 运行态 + 可选类型 |
 | `POST /api/downstreams` | 新增或更新下游实例 |
 | `DELETE /api/downstreams/:id` | 删除下游实例 |
-| `POST /api/downstreams/default` | 设置全局默认下游 |
+| `POST /api/downstreams/default` | 设置全局默认下游 / 默认配置 |
 | `POST /api/downstreams/:id/test` | 用一句话验证某下游连通性 |
 | `POST /api/downstreams/:id/reset` | 清空某下游的会话上下文 |
+| `GET /api/downstreams/:id/profiles` | 某实例的命名配置列表 |
+| `POST /api/downstreams/:id/profiles` | 新增或更新一份命名配置 |
+| `DELETE /api/downstreams/:id/profiles/:pid` | 删除命名配置 |
 | `POST /api/downstreams/register` | **插件自注册**（需 token，仅本机） |
-| `GET /api/sessions` | 会话列表（含实际生效的下游） |
-| `POST /api/sessions/:key` | 更新会话级下游 / 角色 / 世界书 |
+| `GET /api/sessions` | 会话列表（含实际生效的下游与配置） |
+| `POST /api/sessions/:key` | 更新会话级下游 / 配置 / 角色 / 世界书 |
 | `POST /api/trigger` | 更新触发规则与消息长度上限 |
+| `GET /api/faces` | 表情库列表（支持标签 / 关键词 / 分页） |
+| `GET /api/faces/tags` | 标签统计与总量 |
+| `GET /api/faces/progress` | 同步与打标进度 |
+| `GET /api/faces/diagnostics` | 表情库自检（目录 / Ollama / 标注率） |
+| `POST /api/faces/sync` | 从 QQ 同步收藏表情 |
+| `POST /api/faces/label` | 启动后台打标 |
+| `POST /api/faces/label/stop` | 停止打标 |
+| `POST /api/faces/tags` | 修改某张表情的用户标签 |
+| `POST /api/faces/save` | 把表情导出到本地目录 |
+| `GET /api/ollama/status` | Ollama 服务状态 + 环境（含模型目录诊断） |
+| `GET /api/ollama/models` | 本地已下载模型 |
+| `GET /api/ollama/models/:name/show` | 模型详情 |
+| `POST /api/ollama/{start,stop,repair}` | 启动 / 停止 / 修复模型目录 |
+| `POST /api/ollama/models/:name/{load,unload,delete}` | 加载 / 卸载 / 删除模型 |
+| `POST /api/ollama/pull` | 拉取模型（后台任务） |
+| `GET /api/ollama/pull/progress` | 拉取进度 |
+| `POST /api/ollama/{chat,vision}` | 文本 / 视觉连通性测试 |
+| `POST /api/ollama/select` | 选择打标模型与服务参数 |
 | `GET /api/dsh/status` | dsh 安装探测与配置 |
 | `POST /api/dsh/service/{start,stop,restart}` | dsh 常驻服务管理 |
 | `POST /api/dsh/plugin/inject` | 把连接插件注入 dsh profile |
