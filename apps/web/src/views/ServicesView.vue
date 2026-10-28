@@ -216,10 +216,74 @@ function newAccount(): void {
         uin: '',
         name: '',
         enabled: true,
-        url: 'ws://127.0.0.1:3001',
+        url: suggestFreeEndpoint(),
         token: '',
     };
 }
+
+/**
+ * 给新账号建议一个没被占用的端点。
+ *
+ * 之前这里写死 3001：只要已有账号在用 3001，点「添加账号」后一保存就必然撞车，
+ * 而且报错要等提交后才出现 —— 等于每次加号都先踩一次坑。
+ *
+ * 这里复用与后端相同的规则（同 host、往上找第一个空闲端口），
+ * 让表单一打开就是可用值。
+ */
+function suggestFreeEndpoint(): string {
+    const taken = new Set<number>();
+    for (const a of accounts.value) {
+        const port = portOfEndpoint(a.url);
+        if (port > 0) taken.add(port);
+    }
+
+    // 沿用第一个账号的 host；没有账号时用本机回环
+    const host = (() => {
+        for (const a of accounts.value) {
+            try {
+                return new URL(a.url).hostname || '127.0.0.1';
+            } catch {
+                /* 继续找下一个 */
+            }
+        }
+        return '127.0.0.1';
+    })();
+
+    for (let p = 3001; p < 3101; p += 1) {
+        if (!taken.has(p)) return `ws://${host}:${p}`;
+    }
+    return `ws://${host}:3001`;
+}
+
+/** 从 ws:// 地址里取端口（解析失败返回 0） */
+function portOfEndpoint(url: string): number {
+    try {
+        return Number(new URL(url).port) || 0;
+    } catch {
+        return 0;
+    }
+}
+
+/** 已被其他账号占用的端口，用于表单里的即时提示 */
+const takenPorts = computed(() => {
+    const editing = editingAccount.value;
+    const list: Array<{ port: number; id: string }> = [];
+    for (const a of accounts.value) {
+        if (editing && a.id === editing.id) continue;
+        const port = portOfEndpoint(a.url);
+        if (port > 0) list.push({ port, id: a.id });
+    }
+    return list.sort((x, y) => x.port - y.port);
+});
+
+/** 当前表单里的端口是否与别人冲突 */
+const editingConflict = computed(() => {
+    const editing = editingAccount.value;
+    if (!editing) return null;
+    const port = portOfEndpoint(editing.url);
+    if (port <= 0) return null;
+    return takenPorts.value.find((t) => t.port === port) ?? null;
+});
 
 function editAccount(a: AccountForm): void {
     editingAccount.value = { ...a };
@@ -230,6 +294,16 @@ async function saveAccount(): Promise<void> {
     if (!acc) return;
     if (!acc.url.trim()) {
         toast.warning('请填写 OneBot 地址');
+        return;
+    }
+
+    // 端点在提交前就校验：否则后端会拒绝，而用户已经填完整个表单了
+    const clash = editingConflict.value;
+    if (clash) {
+        toast.warning(
+            '端口已被占用',
+            `${portOfEndpoint(acc.url)} 已被 ${clash.id} 使用，每个 QQ 号要一个独立端口`,
+        );
         return;
     }
 
@@ -360,7 +434,8 @@ function adoptAccount(uin: string): void {
         uin,
         name: `QQ ${uin}`,
         enabled: true,
-        url: 'ws://127.0.0.1:3001',
+        // 先给个空闲端点，随后「从 SnowLuma 读取」会用该号自己的端口覆盖它
+        url: suggestFreeEndpoint(),
         token: '',
     };
     // 顺手读它的 OneBot 端点，省得手填端口和 token
@@ -464,6 +539,10 @@ async function doApply(forceToken = false) {
     snowTask.value = 'apply';
     snowHint.value = `正在写入 onebot_${snowUin.value.trim()}.json…`;
     try {
+        /**
+         * port 只是基准端口：后端会为这个号分配一个**没被其他账号占用**的端口
+         * （该号已有端口就沿用）。所以这里传的用户输入值不会直接造成冲突。
+         */
         const r = await api.applySnowLuma({
             dir: snowDir.value.trim(),
             uin: snowUin.value.trim(),
@@ -475,7 +554,7 @@ async function doApply(forceToken = false) {
         if (r.needRestart) {
             toast.warning(
                 '配置已写入，需重启 SnowLuma',
-                'OneBot 服务在启动时读取配置，重启后生效',
+                `OneBot 端口 ${r.port ?? snowPort.value}，重启后生效`,
             );
         } else {
             toast.success('配置已就绪', `无需改动 · ${r.endpoint}`);
@@ -775,6 +854,9 @@ async function toggleHook(enabled: boolean): Promise<void> {
                     <div>
                         <label class="text-xs font-medium text-muted-foreground">OneBot 端口</label>
                         <UiInput v-model.number="snowPort" type="number" class="mt-1.5" />
+                        <p class="mt-1 text-[10px] text-muted-foreground/70">
+                            基准值。已被占用时会自动往后找一个空闲端口
+                        </p>
                     </div>
                 </div>
             </div>
@@ -1011,6 +1093,20 @@ async function toggleHook(enabled: boolean): Promise<void> {
                         <div>
                             <label class="text-xs font-medium text-muted-foreground">WebSocket 地址</label>
                             <UiInput v-model="editingAccount.url" class="mt-1.5" mono placeholder="ws://127.0.0.1:3001" />
+                            <!-- 端口冲突当场提示，不要让用户提交后才看到报错 -->
+                            <p
+                                v-if="editingConflict"
+                                class="mt-1 flex items-start gap-1 text-[10px] text-destructive"
+                            >
+                                <AlertTriangle class="mt-0.5 size-2.5 shrink-0" />
+                                端口 {{ portOfEndpoint(editingAccount.url) }} 已被
+                                <span class="font-mono">{{ editingConflict.id }}</span> 使用，换一个
+                            </p>
+                            <p v-else-if="takenPorts.length > 0" class="mt-1 text-[10px] text-muted-foreground/70">
+                                已占用：
+                                {{ takenPorts.map((t) => t.port).join('、') }}
+                                —— 每个号要一个独立端口
+                            </p>
                         </div>
                         <div class="sm:col-span-2">
                             <label class="text-xs font-medium text-muted-foreground">Access Token</label>
