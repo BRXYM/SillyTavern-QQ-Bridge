@@ -101,28 +101,27 @@ export function checkTrigger(
 /**
  * 会话准入（在触发规则之前执行）。
  *
- * 语义：
- *   - 命中黑名单 → 拒绝
- *   - 白名单非空且未命中 → 拒绝（含"新会话"）
- *   - 两个都空 → 放行
+ * 语义（每个维度独立判断，用户与群都通过才放行）：
+ *   - 黑白名单都为空     → 放行（不限制）
+ *   - 白名单非空         → 以白名单为准：命中放行，否则拒绝
+ *   - 白名单空、黑名单非空 → 命中黑名单则拒，否则放行
  *
- * `unknownPolicy` 决定「既不在白名单也不在黑名单」的新会话怎么办：
- *   - 'allow'（默认）：照常处理
- *   - 'deny'：拒绝，并可按 `denyReply` 回一句自定义提示
- * 注意：白名单为空时所有会话都属于"已知"，不会触发 unknown 策略。
+ * 「白名单优先」是产品选择：同时在两个名单里时放行。
+ * 代价是拉黑在白名单期间不生效，要真拉黑需先从白名单移除。
  */
 export interface SessionAccess {
-    /** 黑名单：这些 QQ/群永远拒绝（优先级最高） */
+    /** 黑名单：白名单未命中时生效 */
     denyUsers: number[];
     denyGroups: number[];
-    /** 白名单：非空时只允许这些（用户与群分别判断） */
+    /** 白名单：非空时以它为准（用户与群分别判断） */
     allowUsers: number[];
     allowGroups: number[];
     /**
-     * 不在任何名单里时的策略。
+     * 保留字段，当前不参与判定。
      *
-     * 对用户白名单与群白名单分别生效：某个名单为空时，
-     * 该维度的所有对象都算"不在名单里"，由这里决定放行还是拒绝。
+     * 早期设计是「白名单非空时，名单外的人怎么办」，但那样会与
+     * 「白名单优先」的语义冲突（名单外就是拒绝，没有第三态）。
+     * 为兼容已存配置继续保留，新逻辑不看它。
      */
     unknownPolicy: 'allow' | 'deny';
     /** 拒绝时回给 QQ 的一句话；空 = 静默 */
@@ -145,11 +144,8 @@ export interface AccessVerdict {
     /** 回给 QQ 的提示（可能为空 = 静默） */
     reply?: string;
     /**
-     * 是否属于「不在任何名单里」这一情形（值取自 unknownPolicy）。
-     *
-     * 注意：这与「这个会话以前有没有建过档」无关。以前用会话是否已存在
-     * 来判断，导致同一个陌生人第一次被拒、第二次就被当成"老会话"放行 ——
-     * 准入等于只生效一次。
+     * 拒绝是否属于「不在任何名单里」（值取自 unknownPolicy）。
+     * 与「会话以前有没有来过」无关 —— 那会把"来过"误当成"被授权"。
      */
     unknown?: boolean;
 }
@@ -159,22 +155,22 @@ const sameId = (a: unknown, b: unknown): boolean => String(a) === String(b);
 /**
  * 判断一条消息是否允许进入处理流程。
  *
- * 判定只看**名单**，不看这个会话以前有没有来过：
+ * 决策顺序（与界面上的说明一致）：
  *
- *   - 命中黑名单            → 拒绝
- *   - 在黑名单之外：
- *       有白名单且命中      → 放行
- *       有白名单但没命中    → 按 unknownPolicy（allow 放行 / deny 拒绝）
- *       白名单为空          → 按 unknownPolicy（allow 放行 / deny 拒绝）
+ *   1. 黑白名单**都为空**        → 放行（不限）
+ *   2. 白名单**非空**            → 以白名单为准
+ *        命中 → 放行（即使同时在黑名单里，见下）
+ *        未命中 → 拒绝
+ *   3. 白名单空、黑名单非空      → 命中黑名单则拒绝，否则放行
+ *   4. 白名单空、黑名单空        → 同 1
  *
- * 最后一条是这次修的重点：原实现只要白名单为空就无条件放行，
- * 于是「白名单为空 + unknownPolicy=deny」这种配置形同虚设 ——
- * 用户把新会话策略设成"拒绝"，实际一条都没拦住。
+ * 关于「白名单优先」：同时在两个名单里时放行，这是产品方的明确选择。
+ * 代价是「拉黑某人」在他也被加白的期间不起作用 —— 要真正拉黑，
+ * 得先从白名单移除。这里不做额外拦截，以免与配置的字面含义打架。
  *
- * 为什么不看「会话是否已建档」：
- * dispatch 在处理任何一条消息时都会 ensure() 建档，所以只要这个人
- * 成功说过一句话，之后他就永远是"已配置"，unknownPolicy 再也没机会生效。
- * 那是把"来过"误当成"被授权"，不是准入该有的语义。
+ * 用户与群**分别**判断：两个维度各自走上面的顺序，都通过才放行。
+ * 群聊里"用户不在白名单"和"群不在白名单"是两件独立的事，
+ * 合并成一个开关会让"允许这个人在这个群"没法表达。
  *
  * @param access 会话准入配置
  * @param ids    本条消息归属的用户与群
@@ -185,67 +181,55 @@ export function checkSessionAccess(
 ): AccessVerdict {
     const a = access ?? DEFAULT_SESSION_ACCESS;
 
-    const denyUsers = Array.isArray(a.denyUsers) ? a.denyUsers : [];
-    const denyGroups = Array.isArray(a.denyGroups) ? a.denyGroups : [];
-    const allowUsers = Array.isArray(a.allowUsers) ? a.allowUsers : [];
-    const allowGroups = Array.isArray(a.allowGroups) ? a.allowGroups : [];
+    const denyList = (v: unknown): number[] => (Array.isArray(v) ? v as number[] : []);
+    const denyUsers = denyList(a.denyUsers);
+    const denyGroups = denyList(a.denyGroups);
+    const allowUsers = denyList(a.allowUsers);
+    const allowGroups = denyList(a.allowGroups);
 
     const denyReply = String(a.denyReply ?? '').trim();
-    const unknownDenied = a.unknownPolicy === 'deny';
 
-    // ---- 1. 黑名单：命中即拒（优先级最高）----
-    if (denyUsers.some((u) => sameId(u, ids.userId))) {
-        return {
-            allowed: false,
-            reason: `用户 ${ids.userId} 在会话黑名单里`,
-            reply: denyReply,
-        };
-    }
-    if (ids.groupId !== null && denyGroups.some((g) => sameId(g, ids.groupId))) {
-        return {
-            allowed: false,
-            reason: `群 ${ids.groupId} 在会话黑名单里`,
-            reply: denyReply,
-        };
-    }
-
-    // ---- 2. 用户白名单 ----
-    // 非空：必须命中；为空：交给 unknownPolicy
-    if (allowUsers.length > 0) {
-        if (!allowUsers.some((u) => sameId(u, ids.userId))) {
+    /** 单维度判定：白名单优先，其次黑名单，都没有则放行 */
+    const judge = (
+        id: number,
+        allow: number[],
+        deny: number[],
+        label: string,
+    ): AccessVerdict => {
+        // 白名单非空 → 以它为准
+        if (allow.length > 0) {
+            if (allow.some((x) => sameId(x, id))) return { allowed: true };
             return {
                 allowed: false,
-                reason: `用户 ${ids.userId} 不在会话白名单里`,
+                reason: `${label} ${id} 不在白名单里`,
                 reply: denyReply,
             };
         }
-    } else if (unknownDenied) {
-        return {
-            allowed: false,
-            unknown: true,
-            reason: `用户 ${ids.userId} 不在任何名单里，且新会话策略为拒绝`,
-            reply: denyReply,
-        };
-    }
 
-    // ---- 3. 群白名单 ----
-    if (ids.groupId !== null) {
-        if (allowGroups.length > 0) {
-            if (!allowGroups.some((g) => sameId(g, ids.groupId))) {
+        // 白名单为空、黑名单非空 → 命中则拒
+        if (deny.length > 0) {
+            if (deny.some((x) => sameId(x, id))) {
                 return {
                     allowed: false,
-                    reason: `群 ${ids.groupId} 不在会话白名单里`,
+                    reason: `${label} ${id} 在黑名单里`,
                     reply: denyReply,
                 };
             }
-        } else if (unknownDenied) {
-            return {
-                allowed: false,
-                unknown: true,
-                reason: `群 ${ids.groupId} 不在任何名单里，且新会话策略为拒绝`,
-                reply: denyReply,
-            };
+            return { allowed: true };
         }
+
+        // 两个都空 → 放行
+        return { allowed: true };
+    };
+
+    // ---- 用户维度 ----
+    const userVerdict = judge(ids.userId, allowUsers, denyUsers, '用户');
+    if (!userVerdict.allowed) return userVerdict;
+
+    // ---- 群维度（仅群聊）----
+    if (ids.groupId !== null) {
+        const groupVerdict = judge(ids.groupId, allowGroups, denyGroups, '群');
+        if (!groupVerdict.allowed) return groupVerdict;
     }
 
     return { allowed: true };
@@ -384,15 +368,32 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     // ---- 选「下游实例 + 配置」----
     const resolved = deps.sessions.resolve(sessionKey);
     const target = deps.resolveDownstream(resolved.backendId, resolved.profileId);
-    if (!target) {
-        log(`⚠ 会话 ${sessionKey} 指向的下游 ${resolved.backendId} 不存在，消息已丢弃`);
+
+    /**
+     * 下游不可用（未配置 / 不存在 / 未启用 / 启动失败）时给用户一个回执。
+     *
+     * 以前只写一行日志就丢弃，用户在 QQ 侧看到的是"完全没反应"，
+     * 分不清是机器人离线、被准入拦住，还是下游挂了。
+     * 现在回一句提示（复用准入的 denyReply，留空则静默），让问题可见。
+     */
+    if (!target || !target.adapter) {
+        const reason = !target
+            ? `下游 ${resolved.backendId || '(未设置)'} 不存在`
+            : `下游 ${resolved.backendId} 未启用或启动失败`;
+        log(`⚠ 会话 ${sessionKey}：${reason}，消息已丢弃`);
+
+        const notice = String(config.sessionAccess.denyReply ?? '').trim();
+        if (notice) {
+            await sendReply(
+                deps.sending,
+                { accountId, messageType, groupId, userId, sessionKey },
+                notice,
+            );
+        }
         return;
     }
+
     const adapter = target.adapter;
-    if (!adapter) {
-        log(`⚠ 会话 ${sessionKey} 指向的下游 ${resolved.backendId} 未启用或启动失败，消息已丢弃`);
-        return;
-    }
 
     const profileLabel = target.profile ? ` / ${target.profile.name}` : '';
     log(
@@ -426,7 +427,17 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
 
     if (!result.ok) {
         log(`下游 ${adapter.name} 处理失败 [${sessionKey}]：${result.error}`);
-        const fallback = errorReplyFor(target.settings);
+
+        /**
+         * 失败提示的优先级：实例自己的 errorReply > 准入的 denyReply。
+         *
+         * 实例配置允许它定制细节（比如"重试一下"），没配就退回全局那句。
+         * 两者都空才静默 —— 否则用户发消息后完全没反应，分不清
+         * 是机器人掉线、被拦住，还是下游崩了。
+         */
+        const fallback = errorReplyFor(target.settings)
+            || String(config.sessionAccess.denyReply ?? '').trim();
+
         if (fallback) {
             await sendReply(deps.sending, {
                 accountId,

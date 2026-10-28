@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { Users, Star, Save, RotateCcw, Info, SlidersHorizontal, ShieldCheck, AlertTriangle } from 'lucide-vue-next';
+import { Users, Star, Save, RotateCcw, Info, SlidersHorizontal, ShieldCheck } from 'lucide-vue-next';
 import { useStatusStore } from '@/stores/status';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
@@ -668,26 +668,23 @@ const groupedSessions = computed(() => {
                 </div>
             </div>
 
-            <!-- 新会话策略 -->
+            <!-- 准入规则说明 + 拒绝文案 -->
             <div class="border-t border-border/40 px-5 py-4">
-                <div class="flex flex-wrap items-center justify-between gap-3">
-                    <div class="min-w-0">
-                        <p class="text-sm">不在任何名单里时</p>
-                        <p class="text-xs text-muted-foreground">
-                            黑名单之外、又没被白名单命中的对象怎么处理（白名单为空时对所有人生效）
-                        </p>
-                    </div>
-                    <UiSelect
-                        v-model="unknownPolicy"
-                        :options="[
-                            { value: 'allow', label: '允许（照常回复）' },
-                            { value: 'deny', label: '拒绝（回提示）' },
-                        ]"
-                        class="w-48 shrink-0"
-                    />
+                <div class="rounded-md border border-border/50 bg-accent/15 px-3 py-2.5">
+                    <p class="text-[11px] font-medium">生效规则</p>
+                    <ul class="mt-1 space-y-0.5 text-[11px] text-muted-foreground">
+                        <li>· 黑白名单<strong class="text-foreground">都为空</strong> → 所有人都能用</li>
+                        <li>· 白名单<strong class="text-foreground">非空</strong> → 只放行名单里的（名单外一律拒绝）</li>
+                        <li>· 白名单空、黑名单非空 → 拒绝黑名单里的，其余放行</li>
+                        <li>· 用户与群<strong class="text-foreground">分别判断</strong>，两边都通过才回复</li>
+                    </ul>
+                    <p class="mt-1.5 text-[10px] text-muted-foreground/70">
+                        白名单优先：同时在两个名单里时会被放行。要真正拉黑某人，
+                        请先从白名单移除
+                    </p>
                 </div>
 
-                <div v-if="unknownPolicy === 'deny'" class="mt-3">
+                <div class="mt-3">
                     <label class="text-xs font-medium text-muted-foreground">拒绝时回的话</label>
                     <UiInput
                         v-model="denyReply"
@@ -695,15 +692,7 @@ const groupedSessions = computed(() => {
                         placeholder="留空 = 静默不回，只写日志"
                     />
                     <p class="mt-1 text-[11px] text-muted-foreground/70">
-                        例如「请先联系管理员授权」；留空则完全不回复
-                    </p>
-                    <p
-                        v-if="allowUsers.length === 0 && allowGroups.length === 0"
-                        class="mt-1.5 flex items-start gap-1 text-[11px] text-warning"
-                    >
-                        <AlertTriangle class="mt-0.5 size-3 shrink-0" />
-                        当前白名单为空，选「拒绝」意味着<strong>所有人都用不了</strong>。
-                        要放行特定的人，请先在上面加白名单
+                        被准入拦下、以及下游不可用时都用这句；留空则完全不回复
                     </p>
                 </div>
             </div>
