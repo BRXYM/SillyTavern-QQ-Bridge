@@ -7,6 +7,7 @@ import UiBadge from '@/components/ui/UiBadge.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
+import IdListEditor from '@/components/ui/IdListEditor.vue';
 import UiSwitch from '@/components/ui/UiSwitch.vue';
 import { api } from '@/api/client';
 import { useToastStore } from '@/stores/toast';
@@ -115,10 +116,6 @@ function syncRulesFromStore() {
     rulesSnapshot.value = rulesSignature();
 }
 
-function parseList(s: string): number[] {
-    return s.split(',').map((x) => x.trim()).filter(Boolean).map(Number).filter(Number.isFinite);
-}
-
 async function saveRules() {
     savingRules.value = true;
     try {
@@ -145,10 +142,10 @@ function resetRules() {
 }
 
 // ---------------- 会话准入（黑白名单） ----------------
-const denyUsers = ref('');
-const denyGroups = ref('');
-const allowUsers = ref('');
-const allowGroups = ref('');
+const denyUsers = ref<number[]>([]);
+const denyGroups = ref<number[]>([]);
+const allowUsers = ref<number[]>([]);
+const allowGroups = ref<number[]>([]);
 const unknownPolicy = ref<'allow' | 'deny'>('allow');
 const denyReply = ref('');
 const savingAccess = ref(false);
@@ -158,10 +155,10 @@ const pendingList = ref<Array<{ key: string; userId: number; senderName: string;
 
 function accessSignature(): string {
     return [
-        denyUsers.value,
-        denyGroups.value,
-        allowUsers.value,
-        allowGroups.value,
+        denyUsers.value.join(','),
+        denyGroups.value.join(','),
+        allowUsers.value.join(','),
+        allowGroups.value.join(','),
         unknownPolicy.value,
         denyReply.value,
     ].join('\u0000');
@@ -179,10 +176,10 @@ function syncAccessFromStore() {
         unknownPolicy?: 'allow' | 'deny';
         denyReply?: string;
     };
-    denyUsers.value = (sa.denyUsers ?? []).join(',');
-    denyGroups.value = (sa.denyGroups ?? []).join(',');
-    allowUsers.value = (sa.allowUsers ?? []).join(',');
-    allowGroups.value = (sa.allowGroups ?? []).join(',');
+    denyUsers.value = sa.denyUsers ?? [];
+    denyGroups.value = sa.denyGroups ?? [];
+    allowUsers.value = sa.allowUsers ?? [];
+    allowGroups.value = sa.allowGroups ?? [];
     unknownPolicy.value = sa.unknownPolicy === 'deny' ? 'deny' : 'allow';
     denyReply.value = sa.denyReply ?? '';
     accessSnapshot.value = accessSignature();
@@ -193,10 +190,10 @@ async function saveAccess() {
     try {
         await api.updateSessionAccess({
             access: {
-                denyUsers: parseList(denyUsers.value),
-                denyGroups: parseList(denyGroups.value),
-                allowUsers: parseList(allowUsers.value),
-                allowGroups: parseList(allowGroups.value),
+                denyUsers: denyUsers.value,
+                denyGroups: denyGroups.value,
+                allowUsers: allowUsers.value,
+                allowGroups: allowGroups.value,
                 unknownPolicy: unknownPolicy.value,
                 denyReply: denyReply.value,
             },
@@ -239,9 +236,7 @@ async function loadPending() {
 
 /** 把某个被拒的用户加入白名单 */
 async function approvePending(userId: number) {
-    const list = parseList(allowUsers.value);
-    if (!list.includes(userId)) list.push(userId);
-    allowUsers.value = list.join(',');
+    if (!allowUsers.value.includes(userId)) allowUsers.value.push(userId);
     await saveAccess();
 }
 
@@ -505,22 +500,54 @@ function isDsh(id: string): boolean {
                 <UiBadge v-if="accessDirty" tone="warning" class="text-micro">未保存</UiBadge>
             </div>
 
-            <div class="grid gap-4 px-5 py-4 sm:grid-cols-2">
+            <div class="grid gap-5 px-5 py-4 sm:grid-cols-2">
                 <div>
                     <label class="text-xs font-medium text-muted-foreground">用户黑名单</label>
-                    <UiInput v-model="denyUsers" class="mt-1.5" mono placeholder="逗号分隔 QQ 号，永远拒绝" />
+                    <p class="mb-1.5 mt-0.5 text-[11px] text-muted-foreground/70">这些 QQ 号永远拒绝</p>
+                    <IdListEditor
+                        v-model="denyUsers"
+                        placeholder="输入 QQ 号后回车"
+                        empty-text="未设置，没人被拉黑"
+                        hint="qq"
+                        :disabled="savingAccess"
+                    />
                 </div>
                 <div>
                     <label class="text-xs font-medium text-muted-foreground">群黑名单</label>
-                    <UiInput v-model="denyGroups" class="mt-1.5" mono placeholder="逗号分隔群号，永远拒绝" />
+                    <p class="mb-1.5 mt-0.5 text-[11px] text-muted-foreground/70">这些群永远拒绝</p>
+                    <IdListEditor
+                        v-model="denyGroups"
+                        placeholder="输入群号后回车"
+                        empty-text="未设置，没有群被拉黑"
+                        hint="group"
+                        :disabled="savingAccess"
+                    />
                 </div>
                 <div>
                     <label class="text-xs font-medium text-muted-foreground">用户白名单</label>
-                    <UiInput v-model="allowUsers" class="mt-1.5" mono placeholder="留空 = 不限制" />
+                    <p class="mb-1.5 mt-0.5 text-[11px] text-muted-foreground/70">
+                        留空 = 不限制；非空时只有这些 QQ 号可用
+                    </p>
+                    <IdListEditor
+                        v-model="allowUsers"
+                        placeholder="输入 QQ 号后回车"
+                        empty-text="未设置，所有人可用"
+                        hint="qq"
+                        :disabled="savingAccess"
+                    />
                 </div>
                 <div>
                     <label class="text-xs font-medium text-muted-foreground">群白名单</label>
-                    <UiInput v-model="allowGroups" class="mt-1.5" mono placeholder="留空 = 不限制" />
+                    <p class="mb-1.5 mt-0.5 text-[11px] text-muted-foreground/70">
+                        留空 = 不限制；非空时只有这些群可用
+                    </p>
+                    <IdListEditor
+                        v-model="allowGroups"
+                        placeholder="输入群号后回车"
+                        empty-text="未设置，所有群可用"
+                        hint="group"
+                        :disabled="savingAccess"
+                    />
                 </div>
             </div>
 
