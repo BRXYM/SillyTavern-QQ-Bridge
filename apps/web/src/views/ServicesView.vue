@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import {
     Server, Play, Square, RotateCw, Download, ExternalLink, FolderOpen, RefreshCw,
     Wand2, CheckCircle2, AlertTriangle, Info, Copy, Trash2, Save, Eye, EyeOff,
@@ -119,6 +119,34 @@ const editingAccount = ref<AccountForm | null>(null);
 
 const upstreamConnected = computed(() => store.onebotConnected);
 
+/**
+ * 账号的在线状态以 `/api/status` 为准。
+ *
+ * `/api/accounts` 只在挂载与保存时拉一次，SSE 推来的连接变化不会进它，
+ * 页面开着时状态会一直停在旧值。这里用状态快照里的 accounts 覆盖在线相关字段，
+ * 其余（地址、token、备注）仍以 accounts 接口为准。
+ */
+watch(
+    () => store.status?.accounts,
+    (live) => {
+        if (!live || live.length === 0) return;
+        const byId = new Map(live.map((a) => [a.id, a]));
+        accounts.value = accounts.value.map((acc) => {
+            const hit = byId.get(acc.id);
+            if (!hit) return { ...acc, running: false, connected: false };
+            return {
+                ...acc,
+                running: true,
+                connected: hit.connected,
+                selfId: hit.selfId,
+                nickname: hit.nickname,
+                lastError: hit.lastError,
+            };
+        });
+    },
+    { deep: true },
+);
+
 async function loadAccounts(silent = false): Promise<void> {
     loadingAccounts.value = true;
     try {
@@ -210,9 +238,99 @@ async function removeAccount(id: string): Promise<void> {
     }
 }
 
+// ---------------- 已接入 QQ 号汇总 ----------------// 这区块回答一个问题：「现在到底有哪些号在跑？」
+// 三个来源合并看：Bridge 自己配的账号、实际连上的 selfId、SnowLuma 里登录的号。
+// 后两个能暴露出「SnowLuma 里有这个号，但 Bridge 还没接」这种漏配。
+
+interface ActiveAccount {
+    /** Bridge 账号 id（未配置的号为空） */
+    id: string;
+    /** QQ 号 */
+    uin: string;
+    name: string;
+    /** 上游连接是否在线 */
+    online: boolean;
+    /** 是否已配置在 Bridge 里 */
+    configured: boolean;
+    /** 是否在 SnowLuma 的账号目录里 */
+    inSnowLuma: boolean;
+}
+
+const activeAccounts = computed<ActiveAccount[]>(() => {
+    const out = new Map<string, ActiveAccount>();
+
+    // 1) Bridge 配置的账号
+    //
+    // key 优先用配置里的 uin，而不是 selfId：没连上时只有 uin，
+    // 连上后两者都在，用 selfId 做 key 会让同一个号在连上前后变成两条。
+    for (const acc of accounts.value) {
+        const uin = acc.uin || acc.selfId;
+        const key = uin || acc.id;
+        out.set(key, {
+            id: acc.id,
+            uin,
+            name: acc.name,
+            online: acc.connected,
+            configured: true,
+            inSnowLuma: false,
+        });
+    }
+
+    // 2) SnowLuma 数据目录里有的号（不代表在线，只说明 SnowLuma 见过这个号）
+    for (const item of probe.value?.accounts ?? []) {
+        const uin = String(item.uin);
+        const hit = out.get(uin);
+        if (hit) {
+            hit.inSnowLuma = true;
+        } else {
+            // SnowLuma 有、Bridge 没配 —— 这就是"漏接的号"
+            out.set(uin, {
+                id: '',
+                uin,
+                name: '',
+                online: false,
+                configured: false,
+                inSnowLuma: true,
+            });
+        }
+    }
+
+    // 3) 配置里 uin 留空、但实际连上后识别出了 selfId 的账号
+    //    （key 是账号 id 那条），补上真实号，避免显示成"(号未识别)"
+    for (const acc of accounts.value) {
+        if (acc.uin || !acc.selfId) continue;
+        const entry = out.get(acc.id);
+        if (entry) entry.uin = acc.selfId;
+    }
+
+    // 在线的排前面，其余按 QQ 号排序，扫一眼就知道谁在跑
+    return [...out.values()].sort((a, b) => {
+        if (a.online !== b.online) return a.online ? -1 : 1;
+        if (a.configured !== b.configured) return a.configured ? -1 : 1;
+        return a.uin.localeCompare(b.uin);
+    });
+});
+
+const onlineAccountCount = computed(() => activeAccounts.value.filter((a) => a.online).length);
+const unconfiguredAccounts = computed(() => activeAccounts.value.filter((a) => !a.configured));
+
+/** 一键把一个 SnowLuma 里已登录的号接进来 */
+function adoptAccount(uin: string): void {
+    snowUin.value = uin;
+    editingAccount.value = {
+        id: `qq_${uin}`,
+        uin,
+        name: `QQ ${uin}`,
+        enabled: true,
+        url: 'ws://127.0.0.1:3001',
+        token: '',
+    };
+    // 顺手读它的 OneBot 端点，省得手填端口和 token
+    void fillAccountFromSnowLuma();
+}
+
 /** 从 SnowLuma 的 onebot_<uin>.json 读取地址与 Token，回填到编辑表单 */
-async function fillAccountFromSnowLuma() {
-    const uin = snowUin.value.trim();
+async function fillAccountFromSnowLuma() {    const uin = snowUin.value.trim();
     if (!uin) {
         toast.warning('请先填写 QQ 号', '需要 QQ 号才能定位对应账号的配置');
         return;
@@ -663,6 +781,61 @@ async function toggleHook(enabled: boolean): Promise<void> {
                         <Plus class="size-4" />
                         添加账号
                     </UiButton>
+                </div>
+
+                <!-- 已接入 QQ 号汇总 -->
+                <div class="mb-3 rounded-md border border-border/60 bg-accent/15 px-3 py-2.5">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <p class="text-[11px] font-medium">已接入 QQ 号</p>
+                        <UiBadge :tone="onlineAccountCount > 0 ? 'success' : 'secondary'" dot class="text-micro">
+                            {{ onlineAccountCount }} / {{ activeAccounts.length }} 在线
+                        </UiBadge>
+                        <div class="flex-1" />
+                        <span v-if="unconfiguredAccounts.length > 0" class="text-[10px] text-warning">
+                            {{ unconfiguredAccounts.length }} 个号有记录但未接入
+                        </span>
+                    </div>
+
+                    <p v-if="activeAccounts.length === 0" class="mt-1.5 text-[11px] text-muted-foreground">
+                        还没有接入任何 QQ 号。填好上面的 QQ 号点「自动配置连接」即可接入。
+                    </p>
+
+                    <div v-else class="mt-1.5 flex flex-wrap gap-1.5">
+                        <span
+                            v-for="a in activeAccounts"
+                            :key="a.uin || a.id"
+                            class="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px]"
+                            :class="a.online
+                                ? 'border-success/40 bg-success/5'
+                                : (a.configured
+                                    ? 'border-border/60 bg-card'
+                                    : 'border-warning/40 bg-warning/5')"
+                        >
+                            <span
+                                class="size-1.5 shrink-0 rounded-full"
+                                :class="a.online
+                                    ? 'bg-success'
+                                    : (a.configured ? 'bg-muted-foreground/40' : 'bg-warning')"
+                            />
+                            <span class="font-mono">{{ a.uin || '(号未识别)' }}</span>
+                            <span v-if="a.name" class="text-muted-foreground">{{ a.name }}</span>
+                            <span v-if="!a.configured" class="text-warning">仅 SnowLuma 有记录</span>
+                            <button
+                                v-if="!a.configured && a.uin"
+                                type="button"
+                                class="ml-0.5 rounded px-1 text-[10px] text-primary transition-colors hover:bg-primary/10"
+                                :title="`接入 ${a.uin}`"
+                                @click="adoptAccount(a.uin)"
+                            >
+                                接入
+                            </button>
+                        </span>
+                    </div>
+
+                    <p class="mt-1.5 text-[10px] text-muted-foreground/70">
+                        绿点 = 上游连接在线；灰点 = 已配置但未连上；黄色 = SnowLuma 数据目录里有这个号，
+                        但 Bridge 还没接入
+                    </p>
                 </div>
 
                 <!-- 账号列表 -->
