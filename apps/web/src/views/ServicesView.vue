@@ -32,15 +32,45 @@ const applyResult = ref<SnowLumaApplyResult | null>(null);
 const discovering = ref(false);
 const discoverResult = ref<SnowLumaDiscoverResult | null>(null);
 
+/**
+ * 当前正在进行的 SnowLuma 操作。
+ *
+ * 为什么要单独记一份：`discovering` / `probing` / `applying` 只是布尔，
+ * 界面上只表现为按钮文字变了，用户要盯一会儿才发现"哦，在检测"。
+ * 这里额外维护「阶段 + 具体说明」，让它变成一个一眼可见的进度条。
+ */
+type SnowTask = 'idle' | 'discover' | 'probe' | 'apply';
+const snowTask = ref<SnowTask>('idle');
+/** 当前阶段的说明文字，随进度更新 */
+const snowHint = ref('');
+/** 当前阶段的标题 */
+const snowTaskTitle = computed(() => {
+    switch (snowTask.value) {
+        case 'discover': return '正在自动检测 SnowLuma';
+        case 'probe': return '正在读取 SnowLuma 配置';
+        case 'apply': return '正在写入 OneBot 配置';
+        default: return '';
+    }
+});
+
+/** 有任何 SnowLuma 操作在跑时为 true —— 期间锁住可交互区域 */
+const snowBusy = computed(() => snowTask.value !== 'idle');
+
+/** 首次进入、还没有任何结果时的"骨架"状态 */
+const snowInitialLoading = computed(() => snowBusy.value && !probe.value && !discoverResult.value);
+
 /** 自动检测 SnowLuma 目录 */
 async function doDiscover(opts: { silent?: boolean } = {}) {
     discovering.value = true;
+    snowTask.value = 'discover';
+    snowHint.value = '正在扫描运行中的进程与常见目录…';
     discoverResult.value = null;
     try {
         const r = await api.discoverSnowLuma(snowDir.value.trim());
         discoverResult.value = r;
 
         if (!r.found || r.candidates.length === 0) {
+            snowHint.value = '没有找到可用的 SnowLuma';
             if (!opts.silent) {
                 toast.warning(
                     '未自动找到 SnowLuma',
@@ -57,6 +87,7 @@ async function doDiscover(opts: { silent?: boolean } = {}) {
             r.candidates[0];
 
         if (best) {
+            snowHint.value = `找到 ${r.candidates.length} 个候选，正在读取 ${best.dir}`;
             snowDir.value = best.dir;
             if ((best.accounts ?? []).length > 0 && !snowUin.value) {
                 snowUin.value = (best.accounts ?? [])[0]!;
@@ -65,7 +96,9 @@ async function doDiscover(opts: { silent?: boolean } = {}) {
             if (!opts.silent) {
                 toast.success(`已定位 SnowLuma`, `${best.dir} · ${best.source}`);
             }
-            void doProbe({ silent: opts.silent });
+            // 探测会接管 snowTask，这里 await 保证阶段串联
+            await doProbe({ silent: opts.silent });
+            return;
         }
     } catch (e) {
         if (!opts.silent) {
@@ -73,6 +106,11 @@ async function doDiscover(opts: { silent?: boolean } = {}) {
         }
     } finally {
         discovering.value = false;
+        // 只有探测没接手时才收尾，否则会把探测的进度提前抹掉
+        if (snowTask.value === 'discover') {
+            snowTask.value = 'idle';
+            snowHint.value = '';
+        }
     }
 }
 
@@ -381,12 +419,16 @@ async function doProbe(opts: { keepResult?: boolean; silent?: boolean } = {}) {
         return;
     }
     probing.value = true;
+    // 探测是最终阶段，会覆盖掉「自动检测」的进度说明
+    snowTask.value = 'probe';
+    snowHint.value = `正在读取 ${snowDir.value.trim()} 的配置与账号…`;
     // 手动探测时清空上次结果；自动配置后刷新探测则保留结果面板
     if (!opts.keepResult) applyResult.value = null;
     try {
         const r = await api.probeSnowLuma(snowDir.value.trim(), snowWebuiPort.value);
         probe.value = r;
         if (!r.ok) {
+            snowHint.value = '目录探测失败';
             if (!opts.silent) toast.error('目录探测失败', r.error);
             return;
         }
@@ -405,6 +447,11 @@ async function doProbe(opts: { keepResult?: boolean; silent?: boolean } = {}) {
         if (!opts.silent) toast.error('探测失败', e instanceof Error ? e.message : String(e));
     } finally {
         probing.value = false;
+        // 只在没被别的阶段接手时收尾
+        if (snowTask.value === 'probe') {
+            snowTask.value = 'idle';
+            snowHint.value = '';
+        }
     }
 }
 
@@ -414,6 +461,8 @@ async function doApply(forceToken = false) {
         return;
     }
     applying.value = true;
+    snowTask.value = 'apply';
+    snowHint.value = `正在写入 onebot_${snowUin.value.trim()}.json…`;
     try {
         const r = await api.applySnowLuma({
             dir: snowDir.value.trim(),
@@ -432,11 +481,15 @@ async function doApply(forceToken = false) {
             toast.success('配置已就绪', `无需改动 · ${r.endpoint}`);
         }
         // 刷新探测状态（保留结果面板，静默避免叠加通知）
-        void doProbe({ keepResult: true, silent: true });
+        await doProbe({ keepResult: true, silent: true });
     } catch (e) {
         toast.error('自动配置失败', e instanceof Error ? e.message : String(e));
     } finally {
         applying.value = false;
+        if (snowTask.value === 'apply') {
+            snowTask.value = 'idle';
+            snowHint.value = '';
+        }
     }
 }
 
@@ -569,8 +622,28 @@ async function toggleHook(enabled: boolean): Promise<void> {
                 </div>
             </div>
 
+            <!-- 进行中的操作：进度条 + 明确说明，避免"看不出在检测" -->
+            <div
+                v-if="snowBusy"
+                class="border-b border-primary/20 bg-primary/5 px-5 py-2.5"
+            >
+                <div class="flex flex-wrap items-center gap-2">
+                    <Loader2 class="size-3.5 shrink-0 animate-spin text-primary" />
+                    <p class="text-xs font-medium text-primary">{{ snowTaskTitle }}</p>
+                    <span class="text-[11px] text-muted-foreground">{{ snowHint }}</span>
+                </div>
+                <!-- 不确定进度的滑动条：告诉用户"在动"，不是卡住 -->
+                <div class="mt-1.5 h-0.5 w-full overflow-hidden rounded-full bg-primary/15">
+                    <div class="h-full w-1/3 animate-[snowluma-progress_1.2s_ease-in-out_infinite] rounded-full bg-primary" />
+                </div>
+            </div>
+
             <!-- 路径配置 -->
-            <div class="grid gap-4 px-5 py-4">
+            <div
+                class="grid gap-4 px-5 py-4 transition-opacity"
+                :class="snowBusy ? 'pointer-events-none opacity-60' : ''"
+                :aria-busy="snowBusy"
+            >
                 <div>
                     <label class="text-xs font-medium text-muted-foreground">SnowLuma 目录</label>
                     <div class="mt-1.5 flex items-center gap-2">
@@ -580,18 +653,29 @@ async function toggleHook(enabled: boolean): Promise<void> {
                             mono
                             placeholder="例如 D:\WorkSpace\SnowLuma"
                         />
-                        <UiButton variant="secondary" size="sm" :disabled="discovering" @click="doDiscover">
+                        <UiButton variant="secondary" size="sm" :disabled="snowBusy" @click="doDiscover">
                             <Wand2 class="size-4" :class="discovering ? 'animate-pulse' : ''" />
                             {{ discovering ? '检测中…' : '自动检测' }}
                         </UiButton>
-                        <UiButton variant="outline" size="sm" :disabled="probing" @click="doProbe">
+                        <UiButton variant="outline" size="sm" :disabled="snowBusy || !snowDir" @click="doProbe">
                             <RefreshCw class="size-4" :class="probing ? 'animate-spin' : ''" />
-                            探测
+                            {{ probing ? '探测中…' : '探测' }}
                         </UiButton>
                     </div>
                     <p class="mt-1.5 text-xs text-muted-foreground">
                         填 SnowLuma 的根目录（含 <code class="font-mono">dist/</code> 或
                         <code class="font-mono">packages/core/</code> 的那一层），Bridge 会自动定位配置与账号
+                    </p>
+                </div>
+
+                <!-- 首次进入且正在检测：给个骨架，避免卡片只剩一个按钮 -->
+                <div
+                    v-if="snowInitialLoading"
+                    class="flex items-center gap-2 rounded-lg border border-border/50 bg-accent/10 px-3.5 py-3"
+                >
+                    <Loader2 class="size-4 shrink-0 animate-spin text-muted-foreground/60" />
+                    <p class="text-xs text-muted-foreground">
+                        正在查找 SnowLuma…<span class="opacity-70">首次检测要扫进程和几个常见目录，稍等几秒</span>
                     </p>
                 </div>
 
@@ -661,7 +745,10 @@ async function toggleHook(enabled: boolean): Promise<void> {
                                     另有 {{ probe.alternatives.length }} 套未采用的配置目录
                                 </p>
                                 <p class="mt-1 text-muted-foreground">
-                                    已登录账号：<span v-if="probe.accounts.length === 0" class="text-warning">无（请先在 SnowLuma 登录 QQ）</span>
+                                    SnowLuma 里有记录的账号：
+                                    <span v-if="probe.accounts.length === 0" class="text-warning">
+                                        无（请先在 SnowLuma 登录 QQ）
+                                    </span>
                                     <span v-else class="font-mono">{{ probe.accounts.map((a) => a.uin).join(', ') }}</span>
                                 </p>
                             </template>
@@ -746,16 +833,17 @@ async function toggleHook(enabled: boolean): Promise<void> {
                 <UiButton
                     variant="default"
                     size="sm"
-                    :disabled="applying || !snowDir"
+                    :disabled="snowBusy || !snowDir"
                     @click="doApply(false)"
                 >
-                    <Wand2 class="size-4" />
+                    <Loader2 v-if="applying" class="size-4 animate-spin" />
+                    <Wand2 v-else class="size-4" />
                     {{ applying ? '配置中…' : '自动配置连接' }}
                 </UiButton>
                 <UiButton
                     variant="outline"
                     size="sm"
-                    :disabled="applying || !snowDir"
+                    :disabled="snowBusy || !snowDir"
                     @click="doApply(true)"
                 >
                     <RefreshCw class="size-4" />
@@ -777,7 +865,7 @@ async function toggleHook(enabled: boolean): Promise<void> {
                             每个账号对应 SnowLuma 的一个 OneBot 端点，可以同时接多个 QQ 号
                         </p>
                     </div>
-                    <UiButton size="sm" variant="outline" @click="newAccount">
+                    <UiButton size="sm" variant="outline" :disabled="snowBusy" @click="newAccount">
                         <Plus class="size-4" />
                         添加账号
                     </UiButton>
