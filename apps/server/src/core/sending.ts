@@ -1,8 +1,8 @@
 /**
  * 消息发送层：把最终文本变成 QQ 消息。
  *
- * 这是 Bridge 的**唯一出口**，上游 OneBot 客户端只被它调用。
- * 职责：分段 → 动作标记转换 → 表情/图片解析 → 逐条发送（带延迟）。
+ * 这是 Bridge 的**唯一出口**，上游客户端只被它调用。
+ * 职责：选对账号 → 分段 → 动作标记转换 → 表情/图片解析 → 逐条发送（带延迟）。
  *
  * 分段与媒体解析全部来自 @bridge/core，不再自建实现。
  */
@@ -15,10 +15,13 @@ import {
 } from '@bridge/core';
 import type { SegmentationConfig } from '@bridge/shared';
 import type { OneBotClient } from '../upstream/onebot.ts';
+import type { UpstreamManager } from '../upstream/manager.ts';
 import type { SessionStore, SessionRoute } from '../core/sessions.ts';
 import { log } from '../core/logger.ts';
 
 export interface SendOptions {
+    /** 用哪个机器人账号发（多账号时必须精确，否则会用错号） */
+    accountId: string;
     messageType: 'private' | 'group';
     groupId: number | null;
     userId: number;
@@ -27,7 +30,7 @@ export interface SendOptions {
 }
 
 export interface SendContext {
-    onebot: OneBotClient;
+    upstreams: UpstreamManager;
     sessions: SessionStore;
     segmentation: () => SegmentationConfig;
     maxMessageLength: () => number;
@@ -47,6 +50,13 @@ export interface SendContext {
 export async function sendReply(ctx: SendContext, target: SendOptions, text: string): Promise<void> {
     const body = String(text ?? '').trim();
     if (!body) return;
+
+    // 账号必须先确定：没有它就不知道该用哪个号发，宁可不发也不要发错号
+    const client = ctx.upstreams.client(target.accountId);
+    if (!client) {
+        log(`QQ 发送跳过：账号 ${target.accountId || '(未指定)'} 的上游未启用`);
+        return;
+    }
 
     const segments = segmentText(body, ctx.segmentation(), ctx.maxMessageLength());
     if (segments.length === 0) return;
@@ -89,8 +99,11 @@ export async function sendReply(ctx: SendContext, target: SendOptions, text: str
         }
 
         try {
-            await sendOne(ctx.onebot, target, payload);
-            log(`分段 ${i + 1}/${segments.length} 已发往QQ → ${label} (${seg.text.length}字)`);
+            await sendOne(client, target, payload);
+            log(
+                `分段 ${i + 1}/${segments.length} 已发往QQ → ${label}`
+                + ` (${seg.text.length}字)${target.accountId ? ` [${target.accountId}]` : ''}`,
+            );
         } catch (e) {
             log(`QQ 发送失败(${label})：${e instanceof Error ? e.message : String(e)}`);
         }
@@ -103,7 +116,7 @@ export async function sendReply(ctx: SendContext, target: SendOptions, text: str
 
 /** 发送单条消息（文本或消息段数组） */
 async function sendOne(
-    onebot: OneBotClient,
+    client: OneBotClient,
     target: SendOptions,
     payload: string | Array<{ type: string; data: unknown }>,
 ): Promise<void> {
@@ -111,7 +124,7 @@ async function sendOne(
     const params = target.messageType === 'group'
         ? { group_id: target.groupId, message: payload }
         : { user_id: target.userId, message: payload };
-    await onebot.call(action, params);
+    await client.call(action, params);
 }
 
 /** 表情决策汇总：让"为什么没发表情"在日志里一目了然 */
@@ -137,6 +150,7 @@ function logFaceDecision(
 /** 从路由信息构造发送目标 */
 export function targetFromRoute(route: SessionRoute): SendOptions {
     return {
+        accountId: route.accountId,
         messageType: route.messageType,
         groupId: route.groupId,
         userId: route.userId,

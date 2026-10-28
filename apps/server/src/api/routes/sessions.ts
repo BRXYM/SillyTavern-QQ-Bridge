@@ -31,7 +31,6 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
             }),
         });
     });
-
     // ---------------- 更新单个会话 ----------------
     router.post('/api/sessions/:key', async ({ res, params, body }) => {
         const key = params.key ?? '';
@@ -45,6 +44,24 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
             const id = String(body.backendId);
             if (id !== '' && !app.config().downstreams.some((d) => d.id === id)) {
                 json(res, 400, { ok: false, error: `下游 ${id} 不存在` });
+                return;
+            }
+        }
+
+        // profileId 必须属于「当前生效的那个下游」：
+        // 否则会存下一个永远匹配不上的组合，界面上还会显示成已配置。
+        if (body.profileId !== undefined && String(body.profileId) !== '') {
+            const pid = String(body.profileId);
+            const backendId = body.backendId !== undefined
+                ? String(body.backendId)
+                : app.sessions.resolve(key).backendId;
+            const target = app.config().downstreams.find((d) => d.id === backendId);
+            if (!target) {
+                json(res, 400, { ok: false, error: `下游 ${backendId} 不存在` });
+                return;
+            }
+            if (!target.profiles.some((p) => p.id === pid)) {
+                json(res, 400, { ok: false, error: `下游 ${backendId} 下没有配置 ${pid}` });
                 return;
             }
         }
@@ -69,11 +86,28 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
             else patch.backendId = String(body.backendId);
         }
 
+        /**
+         * profileId 传空串 = 清除会话级配置，回到「继承默认配置」。
+         * 切了实例时如果没同时指定配置，旧配置多半不属于新实例，一并清掉，
+         * 避免留下"指向 A 实例配置、却绑定 B 实例"的脏数据。
+         */
+        if (body.profileId !== undefined) {
+            if (String(body.profileId) === '') app.sessions.clearField(key, 'profileId');
+            else patch.profileId = String(body.profileId);
+        } else if (body.backendId !== undefined && String(body.backendId) !== '') {
+            app.sessions.clearField(key, 'profileId');
+        }
+
         if (Object.keys(patch).length > 0) app.sessions.patch(key, patch);
 
         const resolved = app.sessions.resolve(key);
-        if (body.backendId !== undefined) {
-            log(`会话下游已更新 [${key}]：${resolved.backendId}${resolved.inherited ? '（继承）' : '（会话级）'}`);
+        if (body.backendId !== undefined || body.profileId !== undefined) {
+            log(
+                `会话下游已更新 [${key}]：${resolved.backendId}`
+                + (resolved.profileId ? ` / ${resolved.profileId}` : '')
+                + `${resolved.inherited ? '（继承实例）' : '（会话级实例）'}`
+                + `${resolved.profileInherited ? '（继承配置）' : '（会话级配置）'}`,
+            );
         }
         json(res, 200, { ok: true, sessionKey: key, resolved });
     });

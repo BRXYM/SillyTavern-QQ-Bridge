@@ -8,6 +8,10 @@
  *
  * ask() 的实现是：记下等待中的 requestId，把 qq_message 推给扩展，
  * 然后在超时内等扩展回包。多个扩展连上来时优先用最近握手的那一个。
+ *
+ * 命名配置：每个配置可以固定一张角色卡（+ 世界书），于是同一个酒馆
+ * 实例能被不同会话当成不同角色用。配置里的 character/world 优先于
+ * 会话级设置与会话默认值。
  */
 
 import { WebSocket } from 'ws';
@@ -39,12 +43,31 @@ export interface SillyTavernSettings {
     timeoutMs: number;
     /** 是否把会话级角色/世界书一起下发 */
     sendDefaults: boolean;
+    /** 配置里固定的角色卡；空 = 用会话级/默认 */
+    character: string;
+    /** 配置里固定的世界书；空 = 用会话级/默认 */
+    world: string;
 }
 
-const DEFAULT_SETTINGS: SillyTavernSettings = {
+export const DEFAULT_SETTINGS: SillyTavernSettings = {
     timeoutMs: 180000,
     sendDefaults: true,
+    character: '',
+    world: '',
 };
+
+/** 把宽松的 settings 收敛成 SillyTavernSettings */
+export function normalizeSillyTavernSettings(
+    raw: Record<string, unknown> | undefined,
+): SillyTavernSettings {
+    const s = (raw ?? {}) as Record<string, unknown>;
+    return {
+        timeoutMs: Number(s.timeoutMs) || DEFAULT_SETTINGS.timeoutMs,
+        sendDefaults: s.sendDefaults !== false,
+        character: String(s.character ?? ''),
+        world: String(s.world ?? ''),
+    };
+}
 
 interface Pending {
     resolve: (result: DownstreamResult) => void;
@@ -63,7 +86,7 @@ export class SillyTavernAdapter implements DownstreamAdapter {
     readonly kind = 'sillytavern' as const;
     readonly id: string;
     readonly name: string;
-    private readonly settings: SillyTavernSettings;
+    private settings: SillyTavernSettings;
     private readonly deps: SillyTavernDeps;
     private readonly clients = new Set<WebSocket>();
     private readonly pending = new Map<string, Pending>();
@@ -80,7 +103,7 @@ export class SillyTavernAdapter implements DownstreamAdapter {
         this.id = id;
         this.name = name;
         this.deps = deps;
-        this.settings = { ...DEFAULT_SETTINGS, ...(config.settings as Partial<SillyTavernSettings>) };
+        this.settings = normalizeSillyTavernSettings(config.settings);
     }
 
     async init(): Promise<void> {
@@ -186,9 +209,18 @@ export class SillyTavernAdapter implements DownstreamAdapter {
 
         const requestId = `${this.id}_${++this.reqSeq}`;
         const startedAt = Date.now();
-        const defaults = this.settings.sendDefaults
+
+        // 上层已按会话合并好配置；缺省时退回实例设置
+        const settings = req.settings
+            ? normalizeSillyTavernSettings(req.settings)
+            : this.settings;
+
+        // 优先级：配置固定角色 > 会话级/默认（sendDefaults 关闭时都不用）
+        const sessionDefaults = settings.sendDefaults
             ? this.deps.sessionDefaults(req.sessionKey)
             : { character: '', world: '' };
+        const character = settings.character || sessionDefaults.character;
+        const world = settings.world || sessionDefaults.world;
 
         return new Promise<DownstreamResult>((resolve) => {
             const timer = setTimeout(() => {
@@ -197,9 +229,9 @@ export class SillyTavernAdapter implements DownstreamAdapter {
                     ok: false,
                     text: '',
                     elapsedMs: Date.now() - startedAt,
-                    error: `酒馆 ${Math.round(this.settings.timeoutMs / 1000)}s 内未回复`,
+                    error: `酒馆 ${Math.round(settings.timeoutMs / 1000)}s 内未回复`,
                 });
-            }, this.settings.timeoutMs);
+            }, settings.timeoutMs);
 
             this.pending.set(requestId, { resolve, timer, startedAt });
 
@@ -210,8 +242,8 @@ export class SillyTavernAdapter implements DownstreamAdapter {
                     sessionKey: req.sessionKey,
                     sender: req.sender ?? 'QQ用户',
                     text: req.text,
-                    defaultCharacter: defaults.character,
-                    defaultWorld: defaults.world,
+                    defaultCharacter: character,
+                    defaultWorld: world,
                 }));
             } catch (e) {
                 this.pending.delete(requestId);

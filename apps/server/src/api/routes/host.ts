@@ -36,6 +36,7 @@ import {
     restoreRuntimeConfig,
     setHookAutoLoad,
 } from '../../upstream/snowluma-hook.ts';
+import { toUpstreamAccounts } from './config.ts';
 
 export interface HostRoutesDeps {
     /** 仓库根目录，用于扩展安装源与目录探测提示 */
@@ -94,10 +95,10 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
         const probe = probeSnowLuma(dir, activePort);
         const accounts = probe.ok ? listAccounts(probe.dataDir) : [];
 
-        // OneBot 端口监听状态：用当前上游配置里的端口
+        // OneBot 端口监听状态：用第一个账号的上游配置里的端口
         let onebotPort = 3001;
         try {
-            onebotPort = Number(new URL(cfg().upstream.url).port || 3001);
+            onebotPort = Number(new URL(cfg().accounts[0]?.upstream.url ?? '').port || 3001);
         } catch {
             /* 用默认值 */
         }
@@ -135,29 +136,55 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
                 forceToken,
             });
 
-            // 同步 Bridge 侧的上游连接参数
+            /**
+             * 写到哪个账号上？
+             *
+             * 优先找已经填了这个 uin 的账号（重复执行幂等）；
+             * 其次找 id 里带这个号的（`qq_<uin>`）；
+             * 都没有就新建一个 —— 这正是「加一个号」的主路径。
+             */
             const endpoint = result.endpoint;
-            const urlChanged = cfg().upstream.url !== endpoint;
-            const tokenChanged = cfg().upstream.token !== result.token;
+            const existing = cfg().accounts.find(
+                (a) => a.uin === uin || a.id === `qq_${uin}`,
+            );
+            const accountId = existing?.id ?? `qq_${uin}`;
 
             app.updateConfig((c) => {
-                c.upstream.url = endpoint;
-                c.upstream.token = result.token;
+                const acc = c.accounts.find((a) => a.id === accountId);
+                if (acc) {
+                    acc.uin = uin;
+                    acc.upstream.url = endpoint;
+                    acc.upstream.token = result.token;
+                    if (!acc.enabled) acc.enabled = true;
+                } else {
+                    c.accounts.push({
+                        id: accountId,
+                        uin,
+                        name: `QQ ${uin}`,
+                        enabled: true,
+                        upstream: {
+                            url: endpoint,
+                            token: result.token,
+                            reconnectMs: 5000,
+                            actionTimeoutMs: 15000,
+                        },
+                    });
+                }
                 // 记住安装位置，下次探测/刷新直接用，不必再手动指定
                 c.snowluma.dir = dir;
                 if (webuiPort) c.snowluma.webuiPort = webuiPort;
             });
 
-            if (urlChanged || tokenChanged) {
-                log('上游连接参数已由「自动配置」更新，正在重连 SnowLuma…');
-                app.onebot.dispose();
-                app.onebot.connect();
-            }
+            // 让上游按新配置重建连接
+            app.upstreams.apply(toUpstreamAccounts(cfg()));
+            log(`上游连接参数已由「自动配置」更新（账号 ${accountId}），正在重连 SnowLuma…`);
 
             log(`✓ SnowLuma 配置已写入：${result.path}（${result.changed ? '已更新' : '无变化'}）`);
 
             json(res, 200, {
                 ok: true,
+                accountId,
+                createdAccount: !existing,
                 changed: result.changed,
                 created: result.created,
                 path: result.path,

@@ -1,12 +1,17 @@
 /**
- * 会话状态：路由、计数、每个会话的下游选择。
+ * 会话状态：路由、计数、每个会话的下游与配置选择。
  *
- * 与旧版的区别：旧版把「会话选择」「路由」「统计」分散在三个 Map 和 sessions.json，
- * 且下游选择叫 backend（枚举）。现在统一成一个 SessionStore，
- * 下游选择改成 backendId（实例 id），语义与「角色/世界书」保持同一套继承规则：
+ * 会话的身份由三部分决定：**哪个机器人账号** + 群/人 + 谁在说话。
  *
- *   sessions[key].backendId 有值 → 用该实例
- *   sessions[key].backendId 缺失 → 用全局 defaultDownstreamId
+ * 为什么账号也进 key：同一个人在 A 号和 B 号私聊，是两个独立的关系 ——
+ * 两个号可能扮不同角色、各自记得自己的对话。若不区分账号，两个号的
+ * 上下文与下游绑定会互相覆盖，表现为"两个号说同一句话"。
+ *
+ * 选择的下游有两层：
+ *   sessions[key].backendId 有值   → 用该实例
+ *   sessions[key].backendId 缺失   → 用全局 defaultDownstreamId
+ *   sessions[key].profileId 有值   → 用该实例下的这个命名配置
+ *   sessions[key].profileId 缺失   → 「继承」
  */
 
 import fs from 'node:fs';
@@ -16,6 +21,8 @@ import { EventEmitter } from 'node:events';
 /** 一次消息的投递目标 */
 export interface SessionRoute {
     sessionKey: string;
+    /** 收发的机器人账号 id（多账号路由与发送都要它） */
+    accountId: string;
     messageType: 'private' | 'group';
     groupId: number | null;
     userId: number;
@@ -27,6 +34,11 @@ export interface SessionChoice {
     world?: string;
     /** 下游实例 id；缺失 = 继承全局默认 */
     backendId?: string;
+    /**
+     * 该下游实例下的命名配置 id；缺失 = 继承全局默认配置。
+     * 显式设为空串表示「明确不用任何配置」，与「缺失」不同。
+     */
+    profileId?: string;
     /** 回复处理管道覆盖；缺失 = 继承全局 */
     replyProcessors?: unknown[];
     createdAt?: string;
@@ -44,6 +56,18 @@ export interface ResolvedSession {
     backendId: string;
     /** true = 来自全局默认，false = 会话级指定 */
     inherited: boolean;
+    /** 实际生效的下游配置 id；空串 = 该实例的实例级设置 */
+    profileId: string;
+    /** true = 该配置来自全局默认（或没指定），false = 会话级指定 */
+    profileInherited: boolean;
+    character: string;
+    world: string;
+}
+
+/** 全局默认（由 index.ts 从配置里读，避免与 config store 循环依赖） */
+export interface SessionDefaults {
+    backendId: string;
+    profileId: string;
     character: string;
     world: string;
 }
@@ -68,53 +92,69 @@ export class SessionStore extends EventEmitter {
 
     /** 会话文件路径 */
     private readonly file: string;
-    /** 读取当前生效的全局默认，避免与 config store 循环依赖 */
-    private readonly readDefaults: () => { backendId: string; character: string; world: string };
+    /** 读取当前生效的全局默认 */
+    private readonly readDefaults: () => SessionDefaults;
 
-    constructor(
-        file: string,
-        readDefaults: () => { backendId: string; character: string; world: string },
-    ) {
+    constructor(file: string, readDefaults: () => SessionDefaults) {
         super();
         this.file = file;
         this.readDefaults = readDefaults;
     }
 
     load(): void {
+        let raw: Record<string, unknown> = {};
         try {
-            const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, SessionChoice>;
-            // 兼容旧版字段名 backend（'taver' | 'dsh'）
-            for (const [key, value] of Object.entries(raw)) {
-                if (key === '__pending') continue;
-                if (!value || typeof value !== 'object') continue;
-                const legacy = value as SessionChoice & { backend?: string };
-                if (legacy.backendId === undefined && typeof legacy.backend === 'string') {
-                    legacy.backendId = legacy.backend === 'dsh' ? 'dsh' : 'tavern';
-                    delete legacy.backend;
-                }
-                this.choices[key] = legacy;
-            }
+            raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, unknown>;
         } catch {
             this.choices = {};
+            return;
+        }
+
+        for (const [key, value] of Object.entries(raw)) {
+            if (key === '__pending') continue;
+            if (!value || typeof value !== 'object') continue;
+            const legacy = value as SessionChoice & { backend?: string };
+            // 兼容更早的枚举字段 backend（'taver' | 'dsh'）
+            if (legacy.backendId === undefined && typeof legacy.backend === 'string') {
+                legacy.backendId = legacy.backend === 'dsh' ? 'dsh' : 'tavern';
+                delete legacy.backend;
+            }
+            this.choices[key] = legacy;
         }
 
         // pending 存在单独的键里，避免与会话配置混淆
-        try {
-            const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as {
-                __pending?: Record<string, {
-                    userId: number;
-                    groupId: number | null;
-                    messageType: string;
-                    senderName: string;
-                    lastAt: string;
-                }>;
-            };
-            if (raw?.__pending && typeof raw.__pending === 'object') {
-                this.pending = raw.__pending;
-            }
-        } catch {
-            /* 忽略 */
+        const pending = raw.__pending;
+        if (pending && typeof pending === 'object') {
+            this.pending = pending as typeof this.pending;
         }
+    }
+
+    /**
+     * 旧会话 key 加上账号前缀。
+     *
+     * 升级前所有会话都属于唯一那个号，所以把它们挂到第一个账号下最稳妥 ——
+     * 既不会丢配置，也不会让用户看到一堆"新会话"。
+     * 只处理没有账号前缀的 key（`private_123` / `group_456_123`）。
+     */
+    adoptLegacyKeys(accountId: string): number {
+        if (!accountId) return 0;
+        const prefix = `${accountId}:`;
+        let migrated = 0;
+
+        for (const [key, value] of Object.entries(this.choices)) {
+            if (key.startsWith(prefix)) continue;
+            if (key.includes(':')) continue;
+            if (!/^(private|group)_/.test(key)) continue;
+            delete this.choices[key];
+            this.choices[`${prefix}${key}`] = value;
+            migrated += 1;
+        }
+
+        if (migrated > 0) {
+            this.scheduleSave();
+            this.emit('migrated', migrated);
+        }
+        return migrated;
     }
 
     /** 防抖落盘：500ms 内多次变更只写一次 */
@@ -229,9 +269,20 @@ export class SessionStore extends EventEmitter {
         const own = this.choices[sessionKey] ?? {};
         const def = this.readDefaults();
         const backendId = own.backendId ?? def.backendId;
+
+        // 配置归属：会话显式指定了实例时，不能用全局默认配置
+        // （全局默认配置属于全局默认实例，套到别的实例上会串味）。
+        const ownProfile = own.profileId;
+        const backendMatchesDefault = backendId === def.backendId;
+        const profileId = ownProfile !== undefined
+            ? ownProfile
+            : (backendMatchesDefault ? def.profileId : '');
+
         return {
             backendId,
             inherited: own.backendId === undefined,
+            profileId,
+            profileInherited: ownProfile === undefined,
             character: own.character || def.character,
             world: own.world || def.world,
         };
@@ -280,6 +331,22 @@ export function sessionKeyOf(
     userId: number,
 ): string {
     return messageType === 'group' ? `group_${groupId}_${userId}` : `private_${userId}`;
+}
+
+/**
+ * 带上账号维度后的完整会话 key。
+ *
+ * 格式 `<accountId>:<private|group>_...`。冒号作为分隔符，
+ * 是为了让已有的 `startsWith(accountId + ':')` 判断和日志 grep 都简单。
+ */
+export function scopedSessionKey(accountId: string, baseKey: string): string {
+    return accountId ? `${accountId}:${baseKey}` : baseKey;
+}
+
+/** 从完整 key 里取出账号 id（没有前缀时返回空串） */
+export function accountIdOfSession(sessionKey: string): string {
+    const i = String(sessionKey).indexOf(':');
+    return i > 0 ? String(sessionKey).slice(0, i) : '';
 }
 
 /** 路由 Map 的 key 规范化（避免 number/string 混用） */

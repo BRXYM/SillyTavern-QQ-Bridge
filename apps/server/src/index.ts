@@ -6,7 +6,7 @@
  *   2. 日志      —— 之后所有步骤都可能打日志
  *   3. 会话存储  —— 需要读配置里的默认下游
  *   4. 表情库    —— 发送层与 prompt 都要用
- *   5. 上游      —— 一启动就连，事件进 dispatch
+ *   5. 上游      —— 每个账号一条连接，事件进 dispatch
  *   6. 下游      —— 需要上游的 call 能力（发送）
  *   7. 入站 WS   —— 下游连进来
  *   8. HTTP API  —— 最后，保证前端一连上就能拿到完整状态
@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { logger, log } from './core/logger.ts';
 import { handleEventStream, publishStatus } from './api/events.ts';
 import { SessionStore } from './core/sessions.ts';
-import { OneBotClient, type OneBotEvent } from './upstream/onebot.ts';
+import { UpstreamManager, type AccountEvent } from './upstream/manager.ts';
 import { DownstreamManager } from './downstream/manager.ts';
 import { InboundServer, type InboundAdapter } from './downstream/inbound.ts';
 import { dispatchEvent, buildSystemPrompt, type DispatchDeps } from './core/dispatch.ts';
@@ -35,7 +35,7 @@ import type { AppContext } from './api/context.ts';
 import { registerStatusRoutes } from './api/routes/status.ts';
 import { registerDownstreamRoutes } from './api/routes/downstreams.ts';
 import { registerSessionRoutes } from './api/routes/sessions.ts';
-import { registerConfigRoutes } from './api/routes/config.ts';
+import { registerConfigRoutes, toUpstreamAccounts } from './api/routes/config.ts';
 import { registerDshRoutes } from './api/routes/dsh.ts';
 import { registerHostRoutes } from './api/routes/host.ts';
 import { loadConfigFile, saveConfigFile } from './config/store.ts';
@@ -76,10 +76,23 @@ let cfg: BridgeConfig = loaded.config;
 // 环境变量覆盖（便于多实例 / 端口冲突时切换）
 if (process.env.API_PORT) cfg.consolePort = Number(process.env.API_PORT);
 if (process.env.EXT_PORT) cfg.extPort = Number(process.env.EXT_PORT);
-if (process.env.ONEBOT_URL) cfg.upstream.url = process.env.ONEBOT_URL;
-if (process.env.ONEBOT_TOKEN) cfg.upstream.token = process.env.ONEBOT_TOKEN;
 if (process.env.ST_DATA_DIR) cfg.stDataDir = process.env.ST_DATA_DIR;
 if (process.env.BRIDGE_REGISTRATION_TOKEN) cfg.registrationToken = process.env.BRIDGE_REGISTRATION_TOKEN;
+
+/**
+ * 单账号环境变量覆盖。
+ *
+ * 旧版只支持一条上游，环境变量叫 ONEBOT_URL / ONEBOT_TOKEN。
+ * 新版把它们作用到第一个账号上，保持「不写配置文件也能临时改」的能力。
+ */
+if (process.env.ONEBOT_URL || process.env.ONEBOT_TOKEN) {
+    const first = cfg.accounts[0];
+    if (first) {
+        if (process.env.ONEBOT_URL) first.upstream.url = process.env.ONEBOT_URL;
+        if (process.env.ONEBOT_TOKEN) first.upstream.token = process.env.ONEBOT_TOKEN;
+        log(`ℹ 上游已由环境变量覆盖：[${first.id}] ${first.upstream.url}`);
+    }
+}
 
 /**
  * 首次运行自动生成注册 token。
@@ -110,22 +123,30 @@ function updateConfig(mutate: (c: BridgeConfig) => void): void {
 // ================= 2. 会话 =================
 const sessions = new SessionStore(SESSIONS_PATH, () => ({
     backendId: cfg.defaultDownstreamId || cfg.downstreams[0]?.id || '',
+    profileId: cfg.defaultDownstreamProfileId,
     character: cfg.defaults.character,
     world: cfg.defaults.world,
 }));
 sessions.load();
+
+/**
+ * 旧会话（无账号前缀）统一挂到第一个账号下。
+ *
+ * 升级前只有一个号，所以这些配置本来就属于它；不改的话，
+ * 第一个号上线后会看到一堆"新会话"，用户的下游/角色绑定全丢。
+ */
+const legacyAdopted = sessions.adoptLegacyKeys(cfg.accounts[0]?.id ?? '');
+if (legacyAdopted > 0) {
+    log(`ℹ 会话迁移：${legacyAdopted} 个旧会话已归属账号 ${cfg.accounts[0]?.id}`);
+}
+
 sessions.on('error', (e: unknown) => log(`✗ 会话持久化失败：${String(e)}`));
 sessions.on('changed', (key: string) => publishStatus('session', { sessionKey: key }));
 sessions.on('created', (key: string) => publishStatus('session', { sessionKey: key }));
 sessions.on('removed', (key: string) => publishStatus('session', { sessionKey: key }));
 
-// ================= 3. 上游 =================
-const onebot = new OneBotClient({
-    url: cfg.upstream.url,
-    token: cfg.upstream.token,
-    reconnectMs: cfg.upstream.reconnectMs,
-    actionTimeoutMs: cfg.upstream.actionTimeoutMs,
-});
+// ================= 3. 上游（多账号） =================
+const upstreams = new UpstreamManager();
 
 // ================= 4. 表情库 =================
 const FACES_DATA_DIR = process.env.BRIDGE_FACES_DIR
@@ -220,7 +241,7 @@ const ollamaDaemon = new OllamaDaemon({
 });
 
 // ================= 6. dsh 常驻服务 =================
-/** 从下游配置里读 dsh 实例的 settings */
+/** 从下游配置里读 dsh 实例的 settings（取第一个 dsh 实例作为服务基准） */
 function dshSettings(): DshSettings & {
     serviceProfile: string;
     servicePort: number;
@@ -290,15 +311,25 @@ const dshService = new DshService({
     log,
 });
 
-/** headless 客户端工厂（下游适配器按需创建） */
+/**
+ * headless 客户端工厂（下游适配器按需创建）。
+ *
+ * 历史文件按 profile 分开：两个配置指向不同 dsh profile 时，
+ * 共用一个 history.json 会让它们互相看到对方的对话。
+ */
 function makeHeadless(settings: DshSettings): DshClient {
+    const suffix = settings.profile && settings.profile !== 'headless'
+        ? `-${settings.profile.replace(/[^\w-]/g, '_')}`
+        : '';
     return new DshClient({
         exePath: settings.exePath,
         profile: settings.profile,
         workRoot: settings.workRoot,
         timeoutMs: settings.timeoutMs,
         historyTurns: settings.historyTurns,
-        historyFile: settings.persistHistory ? path.join(SERVER_ROOT, 'dsh-history.json') : '',
+        historyFile: settings.persistHistory
+            ? path.join(SERVER_ROOT, `dsh-history${suffix}.json`)
+            : '',
         concurrency: settings.concurrency,
         log,
     });
@@ -332,7 +363,7 @@ const downstreams = new DownstreamManager({
 
 // ================= 8. 发送与派发 =================
 const sending: SendContext = {
-    onebot,
+    upstreams,
     sessions,
     segmentation: () => cfg.segmentation,
     maxMessageLength: () => cfg.maxMessageLength,
@@ -344,19 +375,25 @@ const dispatchDeps: DispatchDeps = {
     sessions,
     sending,
     config: () => cfg,
-    adapter: (id) => downstreams.get(id),
+    resolveDownstream: (id, profileId) => downstreams.resolve(id, profileId),
     faceManifest,
-    selfId: () => onebot.stats.selfId,
+    selfId: (accountId: string) => upstreams.client(accountId)?.stats.selfId ?? '',
 };
 
 // 上游状态变化：连上/断开/重连/报错都立即推给前端，不等下一次轮询
-onebot.on('connected', () => publishStatus('upstream', { connected: true }));
-onebot.on('disconnected', () => publishStatus('upstream', { connected: false }));
-onebot.on('upstream-error', (message: string) => publishStatus('upstream', { connected: false, error: message }));
+upstreams.on('account-connected', (accountId: string) => {
+    publishStatus('upstream', { connected: true, accountId });
+});
+upstreams.on('account-disconnected', (accountId: string) => {
+    publishStatus('upstream', { connected: false, accountId });
+});
+upstreams.on('account-error', (accountId: string, error: string) => {
+    publishStatus('upstream', { connected: false, accountId, error });
+});
 
-onebot.on('event', (event: OneBotEvent) => {
+upstreams.on('event', (event: AccountEvent) => {
     void dispatchEvent(dispatchDeps, event).catch((e) => {
-        log(`✗ 派发异常：${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+        log(`✗ 派发异常 [${event.accountId}]：${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
     });
 });
 
@@ -406,7 +443,7 @@ const app: AppContext = {
     config: () => cfg,
     updateConfig,
     sessions,
-    onebot,
+    upstreams,
     downstreams,
     faces: () => faces,
     ollama: { client: ollamaClient, daemon: ollamaDaemon },
@@ -456,7 +493,12 @@ async function bootstrap(): Promise<void> {
     try {
         faces = new FaceService({
             dataDir: FACES_DATA_DIR,
-            callOnebot: (action: string, params: Record<string, unknown>) => onebot.call(action, params),
+            // 表情下载走第一个在线账号；没有账号时给个明确失败
+            callOnebot: async (action: string, params: Record<string, unknown>) => {
+                const client = activeUpstream();
+                if (!client) throw new Error('没有在线的上游账号，无法下载表情');
+                return client.call(action, params);
+            },
             log,
             onChanged: (reason: string) => log(`表情库已更新（${reason}）`),
             ollama: {
@@ -471,8 +513,8 @@ async function bootstrap(): Promise<void> {
         faces = null;
     }
 
-    // 上游
-    onebot.connect();
+    // 上游：按账号列表建立连接
+    upstreams.apply(toUpstreamAccounts(cfg));
 
     // 下游
     await downstreams.start();
@@ -489,20 +531,43 @@ async function bootstrap(): Promise<void> {
         });
     });
 
+    const accSummary = cfg.accounts
+        .map((a) => `${a.id}${a.enabled ? '' : '(停用)'}`)
+        .join(', ');
     log(
-        `连接器已启动: SnowLuma=${cfg.upstream.url} | 入站=${cfg.extPort} | 控制台=${port}`,
-        `| 默认下游=${cfg.defaultDownstreamId}`,
+        `连接器已启动: 账号=[${accSummary}] | 入站=${cfg.extPort} | 控制台=${port}`,
+        `| 默认下游=${cfg.defaultDownstreamId}${cfg.defaultDownstreamProfileId ? `/${cfg.defaultDownstreamProfileId}` : ''}`,
     );
 
     // 启动自检：把「静默失败」变成明确提示
     if (!cfg.registrationToken) {
         log('ℹ 未设置 registrationToken：dsh 插件自注册通道关闭（如需自动接入请设置）');
     }
-    if (!cfg.upstream.token) {
-        log('⚠ 上游 token 为空；若 SnowLuma 开了 Access Token 会返回 401');
+    const noToken = cfg.accounts.filter((a) => a.enabled && !a.upstream.token);
+    if (noToken.length > 0) {
+        log(
+            `⚠ 账号 ${noToken.map((a) => a.id).join(', ')} 的 token 为空；`
+            + '若 SnowLuma 开了 Access Token 会返回 401',
+        );
     }
 
     logEnvironment();
+}
+
+/**
+ * 取一个在线的上游客户端（表情下载这类与账号无关的操作用）。
+ *
+ * 优先按配置顺序取第一个在线账号，保证行为稳定、不随连接抖动乱跳。
+ */
+function activeUpstream() {
+    for (const acc of cfg.accounts) {
+        if (!acc.enabled) continue;
+        const client = upstreams.client(acc.id);
+        if (client?.stats.connected) return client;
+    }
+    // 都断着的时候宁可返回第一个，让调用方拿到"未连接"的真实错误
+    const first = cfg.accounts.find((a) => a.enabled);
+    return first ? upstreams.client(first.id) : undefined;
 }
 
 /**
@@ -542,7 +607,7 @@ async function shutdown(signal: string): Promise<void> {
     log(`收到 ${signal}，正在关闭…`);
     try {
         sessions.flush();
-        onebot.dispose();
+        upstreams.dispose();
         await downstreams.dispose();
         await inbound?.close();
         await new Promise<void>((resolve) => consoleServer.close(() => resolve()));

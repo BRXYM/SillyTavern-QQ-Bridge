@@ -2,22 +2,25 @@
  * 消息派发：QQ 事件进来之后、回复发出去之前的全部业务。
  *
  * 一条消息的完整路径：
- *   1. 过滤（请求事件 / 自身消息 / 触发规则 / 白名单）
+ *   0. 按 accountId 确认是哪个号收到的（多账号时必须先确定）
+ *   1. 过滤（请求事件 / 自身消息 / 触发规则 / 准入名单）
  *   2. 解析消息段，得到纯文本与是否 @ 机器人
- *   3. 计算 sessionKey，记录路由与计数，必要时建档
- *   4. 按会话解析下游（会话级优先，否则全局默认）
+ *   3. 计算 sessionKey（含账号维度），记录路由与计数，必要时建档
+ *   4. 按会话解析「下游实例 + 命名配置」
  *   5. 组装系统设定（QQ 约束 + 角色 + 表情词表 + 图片能力）
  *   6. 交给下游 ask()，拿到最终文本
- *   7. 过回复处理管道 → 发送层分段/表情 → QQ
+ *   7. 过回复处理管道 → 发送层分段/表情 → 用**同一个号**回出去
  *
  * 这里不认识任何具体下游类型，只面向 DownstreamAdapter 接口。
  */
 
 import { applyReplyProcessors } from '@bridge/core';
 import type { OneBotEvent } from '../upstream/onebot.ts';
+import type { AccountEvent } from '../upstream/manager.ts';
 import type { SessionStore, SessionRoute } from './sessions.ts';
-import { sessionKeyOf } from './sessions.ts';
+import { scopedSessionKey, sessionKeyOf } from './sessions.ts';
 import type { DownstreamAdapter, DownstreamConfig, ProgressEvent } from '../downstream/types.ts';
+import type { ResolvedDownstream } from '../downstream/manager.ts';
 import type { BridgeConfig, ProcessorRule } from '../config/schema.ts';
 import { log } from './logger.ts';
 import { sendReply, type SendContext } from './sending.ts';
@@ -28,12 +31,12 @@ export interface DispatchDeps {
     sending: SendContext;
     /** 当前配置（可变，热更新后指向新对象） */
     config: () => BridgeConfig;
-    /** 按 id 取下游；取不到返回 undefined */
-    adapter: (id: string) => DownstreamAdapter | undefined;
+    /** 按「实例 + 配置」解析下游（合并 settings） */
+    resolveDownstream: (downstreamId: string, profileId: string) => ResolvedDownstream | undefined;
     /** 表情词表，用于 prompt */
     faceManifest: () => { vocab: Record<string, string[]>; recent: string[] };
-    /** 机器人自身 QQ，用于判断是否 @ 自己 */
-    selfId: () => string;
+    /** 机器人自身 QQ，用于判断是否 @ 自己（按账号区分） */
+    selfId: (accountId: string) => string;
 }
 
 /** 解析后的一条入站消息 */
@@ -217,31 +220,34 @@ export function checkSessionAccess(
     return { allowed: true };
 }
 
-/** 组装下发给下游的系统设定 */
 /**
  * 组装下发给下游的 system 文本。
  *
  * 默认**返回空串**：Bridge 只转发用户原话，不夹带任何自己的说明。
- * 具体拼哪些内容由下游实例自己的 prompt 开关决定（见 PromptSettings），
- * 这样同一份配置里 dsh 与酒馆可以各自独立控制。
+ * 具体拼哪些内容由下游实例的 prompt 开关决定（见 PromptSettings），
+ * 多配置时用会话选中的那份配置里的开关。
  */
 export function buildSystemPrompt(
     config: BridgeConfig,
     sessionKey: string,
     deps: DispatchDeps,
     adapter?: DownstreamAdapter,
+    settings?: Record<string, unknown>,
 ): string {
     // 适配器自己会拼（dsh 有完整开关）
-    const composer = (adapter as unknown as { composeSystemPrompt?: (k: string) => string } | undefined)
-        ?.composeSystemPrompt;
+    const composer = (adapter as unknown as {
+        composeSystemPrompt?: (k: string, s?: Record<string, unknown>) => string;
+    } | undefined)?.composeSystemPrompt;
+
     if (typeof composer === 'function') {
-        return composer.call(adapter, sessionKey);
+        // dsh 的 composeSystemPrompt 接受合并后的原始 settings；
+        // 传入前先转成它认识的类型由适配器内部完成
+        return settings
+            ? composer.call(adapter, sessionKey, settings)
+            : composer.call(adapter, sessionKey);
     }
 
-    // 其它下游（酒馆）沿用实例 settings 里的开关，默认同样不发
-    const settings = (adapter && 'getSettings' in adapter)
-        ? (adapter as unknown as { getSettings: () => Record<string, unknown> }).getSettings()
-        : undefined;
+    // 其它下游（酒馆）沿用配置里的开关，默认同样不发
     const prompt = (settings?.prompt ?? {}) as Record<string, unknown>;
     if (prompt.qqBase !== true && prompt.character !== true) return '';
 
@@ -263,6 +269,7 @@ export function buildSystemPrompt(
     return parts.join('\n\n');
 }
 
+/** 把合并后的原始 settings 转成 dsh 认识的形状（只取提示词相关部分） */
 /** 取该会话该用的回复处理规则（会话级优先） */
 export function resolveReplyRules(
     config: BridgeConfig,
@@ -287,8 +294,15 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     }
     if (event.post_type !== 'message' || event.sub_type === 'bot') return;
 
+    const accountId = (event as AccountEvent).accountId ?? '';
+    if (!accountId) {
+        // 没有账号维度就无法决定回包用哪个号，宁可不处理
+        log('⚠ 收到没有 accountId 的上游事件，已忽略');
+        return;
+    }
+
     const config = deps.config();
-    const selfId = deps.selfId();
+    const selfId = deps.selfId(accountId);
     if (String(event.user_id) === selfId) return;
 
     const messageType = event.message_type;
@@ -304,7 +318,11 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     const blocked = checkTrigger(config, messageType, groupId, userId, parsed.atMe);
     if (blocked) return;
 
-    const sessionKey = sessionKeyOf(messageType, groupId, userId);
+    // 会话 key 带账号前缀：同一个用户在两个号下的会话互不干扰
+    const sessionKey = scopedSessionKey(
+        accountId,
+        sessionKeyOf(messageType, groupId, userId),
+    );
     const senderName = String(event.sender?.card || event.sender?.nickname || userId);
 
     // ---- 会话准入（QQ 黑白名单）----
@@ -317,7 +335,7 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
         if (verdict.reply) {
             await sendReply(
                 deps.sending,
-                { messageType, groupId, userId, sessionKey },
+                { accountId, messageType, groupId, userId, sessionKey },
                 verdict.reply,
             );
         }
@@ -327,32 +345,38 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
         return;
     }
 
-    const route: SessionRoute = { sessionKey, messageType, groupId, userId };
+    const route: SessionRoute = { sessionKey, accountId, messageType, groupId, userId };
     deps.sessions.rememberRoute(route);
     deps.sessions.bumpIn(sessionKey);
     deps.sessions.ensure(sessionKey);
 
-    // ---- 选下游 ----
+    // ---- 选「下游实例 + 配置」----
     const resolved = deps.sessions.resolve(sessionKey);
-    const adapter = deps.adapter(resolved.backendId);
-    if (!adapter) {
+    const target = deps.resolveDownstream(resolved.backendId, resolved.profileId);
+    if (!target) {
         log(`⚠ 会话 ${sessionKey} 指向的下游 ${resolved.backendId} 不存在，消息已丢弃`);
         return;
     }
+    const adapter = target.adapter;
+    if (!adapter) {
+        log(`⚠ 会话 ${sessionKey} 指向的下游 ${resolved.backendId} 未启用或启动失败，消息已丢弃`);
+        return;
+    }
 
+    const profileLabel = target.profile ? ` / ${target.profile.name}` : '';
     log(
-        `QQ消息 → ${adapter.name} [${sessionKey}]: [${senderName}] ${parsed.text}`
-        + (resolved.inherited ? '（继承全局下游）' : '（会话级下游）'),
+        `QQ消息 [${accountId}] → ${adapter.name}${profileLabel} [${sessionKey}]: [${senderName}] ${parsed.text}`
+        + (resolved.inherited ? '（继承全局下游）' : '（会话级下游）')
+        + (resolved.profileInherited ? '' : '（会话级配置）'),
     );
 
     // ---- 进度摘要转发 ----
-    const downstreamCfg = config.downstreams.find((d) => d.id === resolved.backendId);
-    // 只在需要时挂回调，避免无谓的对象创建与判断
-    const progressCfg = progressSettings(downstreamCfg);
+    // 用合并后的设置判断，否则会话选了「开启进度」的配置也不会生效
+    const progressCfg = progressSettings(target.settings);
     const onProgress = progressCfg.enabled
         ? makeProgressReporter({
             sending: deps.sending,
-            target: { messageType, groupId, userId, sessionKey },
+            target: { accountId, messageType, groupId, userId, sessionKey },
             cfg: progressCfg,
         })
         : undefined;
@@ -362,16 +386,19 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     const result = await adapter.ask({
         sessionKey,
         text: userText,
-        system: buildSystemPrompt(config, sessionKey, deps, adapter),
+        system: buildSystemPrompt(config, sessionKey, deps, adapter, target.settings),
         sender: senderName,
+        settings: target.settings,
+        profileId: target.profile?.id,
         onProgress,
     });
 
     if (!result.ok) {
         log(`下游 ${adapter.name} 处理失败 [${sessionKey}]：${result.error}`);
-        const fallback = errorReplyFor(config, adapter.id);
+        const fallback = errorReplyFor(target.settings);
         if (fallback) {
             await sendReply(deps.sending, {
+                accountId,
                 messageType,
                 groupId,
                 userId,
@@ -401,25 +428,14 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
         return;
     }
 
-    // ---- 发送 ----
-    await sendReply(deps.sending, { messageType, groupId, userId, sessionKey }, processed);
+    // ---- 发送（用收消息的那个号回，绝不串号）----
+    await sendReply(deps.sending, { accountId, messageType, groupId, userId, sessionKey }, processed);
 }
 
-/** 从下游实例的 settings 里读失败提示（找不到返回空） */
-function errorReplyFor(config: BridgeConfig, adapterId: string): string {
-    const ds = config.downstreams.find((d) => d.id === adapterId);
-    const val = ds?.settings?.errorReply;
+/** 从生效设置里读失败提示（找不到返回空） */
+function errorReplyFor(settings: Record<string, unknown>): string {
+    const val = settings.errorReply;
     return typeof val === 'string' ? val.trim() : '';
-}
-
-/** 准入被拒时的提示文案（空 = 静默） */
-function progressNotice(config: BridgeConfig, adapterId: string, kind: 'denied'): string {
-    const ds = config.downstreams.find((d) => d.id === adapterId);
-    const p = (ds?.settings?.progress ?? {}) as Record<string, unknown>;
-    if (kind === 'denied') {
-        return typeof p.deniedReply === 'string' ? p.deniedReply.trim() : '';
-    }
-    return '';
 }
 
 /** 进度转发的有效配置 */
@@ -443,9 +459,9 @@ const DEFAULT_PROGRESS: ProgressSettings = {
     prefix: '⏳ ',
 };
 
-/** 读下游的进度配置（默认关闭） */
-function progressSettings(cfg: DownstreamConfig | undefined): ProgressSettings {
-    const raw = (cfg?.settings?.progress ?? {}) as Record<string, unknown>;
+/** 读进度配置（默认关闭） */
+function progressSettings(settings: Record<string, unknown> | undefined): ProgressSettings {
+    const raw = (settings?.progress ?? {}) as Record<string, unknown>;
     const kinds = Array.isArray(raw.kinds)
         ? (raw.kinds.filter((k): k is ProgressSettings['kinds'][number] =>
             k === 'start' || k === 'tool' || k === 'stage' || k === 'done'))
@@ -472,7 +488,13 @@ function progressSettings(cfg: DownstreamConfig | undefined): ProgressSettings {
  */
 function makeProgressReporter(opts: {
     sending: SendContext;
-    target: { messageType: 'private' | 'group'; groupId: number | null; userId: number; sessionKey: string };
+    target: {
+        accountId: string;
+        messageType: 'private' | 'group';
+        groupId: number | null;
+        userId: number;
+        sessionKey: string;
+    };
     cfg: ProgressSettings;
 }): (event: ProgressEvent) => void {
     const { sending, target, cfg } = opts;

@@ -7,8 +7,9 @@
 
 import type { BridgeConfig } from '../config/schema.ts';
 import type { SessionStore } from '../core/sessions.ts';
-import type { OneBotClient } from '../upstream/onebot.ts';
+import type { UpstreamManager } from '../upstream/manager.ts';
 import type { DownstreamAdapter } from '../downstream/types.ts';
+import type { ResolvedDownstream } from '../downstream/manager.ts';
 import type { Logger } from '../core/logger.ts';
 import type { FaceService } from '../../faces-service.mjs';
 import type { OllamaClient, OllamaDaemon } from '../../ollama-service.mjs';
@@ -18,6 +19,8 @@ import type { DshService } from '../../dsh-profile-service.mjs';
 export interface DownstreamRuntime {
     list: () => DownstreamAdapter[];
     get: (id: string) => DownstreamAdapter | undefined;
+    /** 解析「实例 + 命名配置」，返回合并后的设置 */
+    resolve: (downstreamId: string, profileId: string) => ResolvedDownstream | undefined;
     /** 重新按配置构建（启停实例） */
     reload: () => Promise<{ ok: boolean; error?: string }>;
     /** 记录一次自注册（返回写入后的配置项） */
@@ -35,7 +38,8 @@ export interface AppContext {
     /** 修改配置并落盘；可选立即生效的回调由调用方触发 */
     updateConfig: (mutate: (cfg: BridgeConfig) => void) => void;
     sessions: SessionStore;
-    onebot: OneBotClient;
+    /** 多账号上游集合 */
+    upstreams: UpstreamManager;
     downstreams: DownstreamRuntime;
     faces: () => FaceService | null;
     ollama: { client: OllamaClient; daemon: OllamaDaemon };

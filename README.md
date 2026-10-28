@@ -64,20 +64,40 @@ cp apps/server/config.example.json apps/server/config.json
 
 ```jsonc
 {
-    "configVersion": 2,
-    "upstream": {
-        "url": "ws://127.0.0.1:3001",
-        "token": "你的 SnowLuma Access Token"
-    },
-    "downstreams": [
-        { "id": "dsh", "kind": "dsh-plugin", "enabled": true, "settings": {} },
-        { "id": "tavern", "kind": "sillytavern", "enabled": false, "settings": {} }
+    "configVersion": 3,
+    "accounts": [
+        {
+            "id": "main",
+            "uin": "",
+            "name": "主号",
+            "enabled": true,
+            "upstream": {
+                "url": "ws://127.0.0.1:3001",
+                "token": "你的 SnowLuma Access Token"
+            }
+        }
     ],
-    "defaultDownstreamId": "dsh"
+    "downstreams": [
+        { "id": "dsh", "kind": "dsh-plugin", "enabled": true, "settings": {}, "profiles": [] },
+        { "id": "tavern", "kind": "sillytavern", "enabled": false, "settings": {}, "profiles": [] }
+    ],
+    "defaultDownstreamId": "dsh",
+    "defaultDownstreamProfileId": ""
 }
 ```
 
-> 从旧版升级不必手改：旧的一层平铺配置会在启动时自动迁移成新结构。
+想同时接多个 QQ 号，就往 `accounts` 里再加一项
+（每个号的 OneBot 端口与 token 在 SnowLuma 里是独立的）：
+
+```jsonc
+"accounts": [
+    { "id": "main",  "uin": "1417434860", "enabled": true, "upstream": { "url": "ws://127.0.0.1:3001", "token": "..." } },
+    { "id": "qq_2",  "uin": "1234567890", "enabled": true, "upstream": { "url": "ws://127.0.0.1:3002", "token": "..." } }
+]
+```
+
+> 从旧版升级不必手改：旧配置会在启动时自动迁移
+> （v1 平铺 → v2 分组 → v3 多账号）。旧会话也会自动归属到第一个账号下。
 > `registrationToken` 首次运行自动生成，供 dsh 插件自注册使用。
 
 ### 启动
@@ -135,8 +155,8 @@ pnpm typecheck        # 类型检查
 | `WEB_PORT` | `5178` | 前端端口 |
 | `API_PORT` | `9510` | 后端 API 端口（仅 `/api/*`，无网页） |
 | `EXT_PORT` | `9500` | 酒馆扩展 WebSocket 端口 |
-| `ONEBOT_URL` | — | 覆盖 `config.json` 的 OneBot 地址 |
-| `ONEBOT_TOKEN` | — | 覆盖 `config.json` 的 OneBot token |
+| `ONEBOT_URL` | — | 覆盖第一个账号的 OneBot 地址 |
+| `ONEBOT_TOKEN` | — | 覆盖第一个账号的 OneBot token |
 | `ST_DATA_DIR` | 自动探测 | 酒馆数据目录 |
 | `BRIDGE_OPEN` | — | 设为 `1` 启动后自动开浏览器 |
 
@@ -255,7 +275,7 @@ SillyTavern-QQ-Bridge/
 │   │   │   ├── index.ts           # 装配与生命周期
 │   │   │   ├── config/            # 配置模型 + 旧版迁移
 │   │   │   ├── core/              # 日志 / 会话 / 派发 / 发送
-│   │   │   ├── upstream/          # OneBot v11 客户端（唯一上行源）
+│   │   │   ├── upstream/          # OneBot v11 客户端 + 多账号连接池
 │   │   │   ├── downstream/        # 下游适配器（dsh / 酒馆）+ 入站 WS
 │   │   │   └── api/routes/        # 状态 / 下游 / 会话 / 配置 / dsh / 本体
 │   │   ├── dsh-service.mjs        # dsh headless 调用与上下文
@@ -319,34 +339,45 @@ SillyTavern-QQ-Bridge/
 ## 架构
 
 ```
-                        ┌──────────────┐
-   QQ 用户 ──OneBot v11──▶│   SnowLuma   │ :3001
-                        └──────┬───────┘
-                               │ WebSocket（唯一上游）
-                               ▼
-                    ┌──────────────────────┐
-                    │  apps/server 后端     │
-                    │  upstream/onebot.ts  │
-                    │         │            │
-                    │  core/dispatch.ts    │  触发规则 / 选下游 / 组装 prompt
-                    │         │            │
-                    │  downstream/*.ts     │  dsh / 酒馆（可多实例）
-                    │         │            │
-                    │  core/sending.ts     │  分段 / 表情 / 管道
-                    └──────┬────────┬──────┘
-                           │        │ HTTP /api
-              WS 入站 :9500│        ▼
-                           │   apps/web 控制台 :5178
-                    ┌──────┴───────┐
-                    │  下游（连入） │
-                    │ dsh 插件      │
-                    │ 酒馆扩展      │
-                    └──────────────┘
+                     ┌──────────────┐
+   QQ 用户 ──OneBot v11─▶│   SnowLuma   │ :3001 / :3002 …（每个号一个端点）
+                     └──────┬───────┘
+                            │ 每号一条 WebSocket
+                            ▼
+                  ┌────────────────────────┐
+                  │  apps/server 后端       │
+                  │  upstream/manager.ts   │  多账号连接池
+                  │         │              │
+                  │  core/dispatch.ts      │  触发规则 / 选下游+配置 / 组装 prompt
+                  │         │              │
+                  │  downstream/*.ts       │  dsh / 酒馆（可多实例 × 多配置）
+                  │         │              │
+                  │  core/sending.ts       │  选账号 / 分段 / 表情 / 管道
+                  └──────┬──────────┬──────┘
+                         │          │ HTTP /api
+            WS 入站 :9500│          ▼
+                         │     apps/web 控制台 :5178
+                  ┌──────┴───────┐
+                  │  下游（连入） │
+                  │ dsh 插件      │
+                  │ 酒馆扩展      │
+                  └──────────────┘
 ```
 
-**核心约束**：上游唯一（只有 `upstream/onebot.ts` 收发 QQ），下游可扩展（新增一种后端 = 实现一个接口 + 注册一行）。
+**核心约束**：上游按账号隔离（`upstream/manager.ts` 每号一条连接，回复必须用同一个号），下游可扩展（新增一种后端 = 实现一个接口 + 注册一行）。
 
-**数据流**：QQ 消息 → SnowLuma → 触发规则过滤 → 按会话选下游 → 下游返回最终文本 → 回复处理管道 → 分段 / 表情解析 → SnowLuma → QQ。
+**数据流**：QQ 消息 → SnowLuma → 触发规则过滤 → 按会话选「下游 + 配置」→ 下游返回最终文本 → 回复处理管道 → 分段 / 表情解析 → SnowLuma → QQ。
+
+**三层配置**：
+
+| 层 | 例子 | 作用 |
+|---|---|---|
+| 账号 | `main` / `qq_123` | 每个 QQ 号一条连接，会话按号隔离 |
+| 下游实例 | `dsh` / `tavern` | 谁来回消息；同类型可配多个 |
+| 命名配置 | `鲸鱼娘` / `客服` | 同一实例下的不同人设、对话约束、角色卡 |
+
+会话绑定「实例 + 配置」，未指定时逐层继承全局默认。
+命名配置只写与实例设置的**差异**，改共享部分（如 dsh 可执行文件路径）不用逐个配置改。
 
 **下游两种传输**：
 - **dsh**：插件在线时在 dsh 进程内跑（复用模型选择 / MCP / 工具），离线回落到 `dsh --profile headless` 子进程

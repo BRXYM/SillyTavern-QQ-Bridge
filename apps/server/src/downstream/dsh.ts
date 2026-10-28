@@ -15,6 +15,9 @@
  *      实现在 dsh-service.mjs（已独立验证），这里只做编排。
  *
  * 这样「dsh 没装」「插件没连」「服务挂了」都只是降级，不会让 QQ 无人应答。
+ *
+ * 命名配置：同一个实例下可以有多个配置（不同人设、不同 profile 目录）。
+ * 会话传来的 `settings` 已由上层合并好，适配器只管用 —— 它不认识"配置"这个概念。
  */
 
 import { WebSocket } from 'ws';
@@ -83,7 +86,7 @@ export const DEFAULT_PROMPT_SETTINGS: PromptSettings = {
     extra: '',
 };
 
-const DEFAULT_SETTINGS: DshSettings = {
+export const DEFAULT_DSH_SETTINGS: DshSettings = {
     fallbackHeadless: true,
     exePath: '',
     profile: 'headless',
@@ -96,6 +99,33 @@ const DEFAULT_SETTINGS: DshSettings = {
     historyExtracts: [],
     prompt: { ...DEFAULT_PROMPT_SETTINGS },
 };
+
+/** 把宽松的 settings 收敛成 DshSettings（配置可能来自手写 JSON） */
+export function normalizeDshSettings(raw: Record<string, unknown> | undefined): DshSettings {
+    const s = (raw ?? {}) as Record<string, unknown>;
+    const p = (s.prompt ?? {}) as Record<string, unknown>;
+    return {
+        fallbackHeadless: s.fallbackHeadless !== false,
+        exePath: String(s.exePath ?? ''),
+        profile: String(s.profile ?? DEFAULT_DSH_SETTINGS.profile),
+        workRoot: String(s.workRoot ?? ''),
+        timeoutMs: Number(s.timeoutMs) || DEFAULT_DSH_SETTINGS.timeoutMs,
+        historyTurns: Number(s.historyTurns) || DEFAULT_DSH_SETTINGS.historyTurns,
+        persistHistory: s.persistHistory !== false,
+        concurrency: Number(s.concurrency) || DEFAULT_DSH_SETTINGS.concurrency,
+        errorReply: String(s.errorReply ?? ''),
+        historyExtracts: Array.isArray(s.historyExtracts)
+            ? (s.historyExtracts as DshSettings['historyExtracts'])
+            : [],
+        prompt: {
+            qqBase: p.qqBase === true,
+            character: p.character === true,
+            faces: p.faces === true,
+            images: p.images === true,
+            extra: typeof p.extra === 'string' ? p.extra : '',
+        },
+    };
+}
 
 interface Pending {
     resolve: (result: DownstreamResult) => void;
@@ -123,8 +153,8 @@ export class DshAdapter implements DownstreamAdapter {
     private readonly clients = new Set<WebSocket>();
     private readonly pending = new Map<string, Pending>();
     private reqSeq = 0;
-    /** 由外层注入的 headless 客户端（懒建） */
-    private headless: DshClient | null = null;
+    /** headless 客户端缓存：按 profile 分开，避免不同配置共用同一个子进程历史 */
+    private readonly headlessByProfile = new Map<string, DshClient>();
     /** 可用性变化回调（连上/断开时触发） */
     private changeListener: (() => void) | null = null;
 
@@ -140,7 +170,7 @@ export class DshAdapter implements DownstreamAdapter {
         this.name = name;
         this.deps = deps;
         this.makeHeadless = makeHeadless;
-        this.settings = { ...DEFAULT_SETTINGS, ...(config.settings as Partial<DshSettings>) };
+        this.settings = normalizeDshSettings(config.settings);
     }
 
     async init(): Promise<void> {
@@ -161,12 +191,13 @@ export class DshAdapter implements DownstreamAdapter {
             }
         }
         this.clients.clear();
+        this.headlessByProfile.clear();
     }
 
     /** 配置热更新：只换参数，不停连接 */
     reconfigure(config: DownstreamConfig): void {
-        this.settings = { ...DEFAULT_SETTINGS, ...(config.settings as Partial<DshSettings>) };
-        this.headless = null;
+        this.settings = normalizeDshSettings(config.settings);
+        this.headlessByProfile.clear();
     }
 
     status(): DownstreamStatus {
@@ -177,8 +208,9 @@ export class DshAdapter implements DownstreamAdapter {
             profile: this.settings.profile,
             timeoutMs: this.settings.timeoutMs,
         };
-        if (this.headless) {
-            const st = this.headless.status();
+        const headless = [...this.headlessByProfile.values()][0];
+        if (headless) {
+            const st = headless.status();
             detail.installed = st.installed;
             detail.version = st.version;
         }
@@ -289,19 +321,24 @@ export class DshAdapter implements DownstreamAdapter {
     }
 
     async ask(req: DownstreamAsk): Promise<DownstreamResult> {
+        // 上层已经按会话选好的配置合并过 settings；缺省时退回实例设置
+        const effective = req.settings
+            ? normalizeDshSettings(req.settings)
+            : this.settings;
+
         const plugin = this.pickSocket();
         if (plugin) {
-            const result = await this.askViaPlugin(plugin, req);
+            const result = await this.askViaPlugin(plugin, req, effective);
             if (result.ok) return result;
-            if (!this.settings.fallbackHeadless) return result;
+            if (!effective.fallbackHeadless) return result;
             log(`dsh 插件投递失败：${result.error}，回落到 headless`);
         }
 
-        if (!this.settings.fallbackHeadless) {
+        if (!effective.fallbackHeadless) {
             return { ok: false, text: '', elapsedMs: 0, error: '插件未连接，且已禁用 headless 兜底' };
         }
 
-        return this.askViaHeadless(req);
+        return this.askViaHeadless(req, effective);
     }
 
     async resetSession(sessionKey: string, opts?: { removeWorkDir?: boolean }): Promise<boolean> {
@@ -322,7 +359,9 @@ export class DshAdapter implements DownstreamAdapter {
             }
         }
         // headless 侧的历史一并清掉，避免切回子进程时还记得
-        this.headless?.clearHistory(sessionKey, { removeWorkDir: opts?.removeWorkDir === true });
+        for (const client of this.headlessByProfile.values()) {
+            client.clearHistory(sessionKey, { removeWorkDir: opts?.removeWorkDir === true });
+        }
         return sent;
     }
 
@@ -334,10 +373,14 @@ export class DshAdapter implements DownstreamAdapter {
         return last;
     }
 
-    private askViaPlugin(socket: WebSocket, req: DownstreamAsk): Promise<DownstreamResult> {
+    private askViaPlugin(
+        socket: WebSocket,
+        req: DownstreamAsk,
+        settings: DshSettings,
+    ): Promise<DownstreamResult> {
         const requestId = `${this.id}_${++this.reqSeq}`;
         const startedAt = Date.now();
-        const timeoutMs = this.settings.timeoutMs;
+        const timeoutMs = settings.timeoutMs;
 
         return new Promise<DownstreamResult>((resolve) => {
             const timer = setTimeout(() => {
@@ -375,16 +418,21 @@ export class DshAdapter implements DownstreamAdapter {
         });
     }
 
-    private async askViaHeadless(req: DownstreamAsk): Promise<DownstreamResult> {
-        if (!this.headless) {
-            this.headless = this.makeHeadless(this.settings);
+    private async askViaHeadless(req: DownstreamAsk, settings: DshSettings): Promise<DownstreamResult> {
+        // 不同配置可能指向不同 dsh profile / 工作目录，缓存键要带上它
+        const cacheKey = `${settings.profile}|${settings.workRoot}|${settings.exePath}`;
+        let client = this.headlessByProfile.get(cacheKey);
+        if (!client) {
+            client = this.makeHeadless(settings);
+            this.headlessByProfile.set(cacheKey, client);
         }
-        const result = await this.headless.ask({
+
+        const result = await client.ask({
             sessionKey: req.sessionKey,
             text: req.text,
             system: req.system,
             // 历史不整段发送，只按配置的正则提取参考片段
-            historyExtracts: this.settings.historyExtracts ?? [],
+            historyExtracts: settings.historyExtracts ?? [],
             // 把 reasoning 摘要节点透传给上游（是否转发由 dispatch 决定）
             onProgress: req.onProgress,
         });
@@ -410,13 +458,17 @@ export class DshAdapter implements DownstreamAdapter {
     }
 
     /**
-     * 按本实例的提示词开关组装 system 文本。
+     * 按某份设置里的提示词开关组装 system 文本。
      *
      * 默认全部关闭 → 返回空串 → 上层不发送任何提示词，只转发用户原话。
      * 每个开关独立生效，顺序固定（基础约束 → 人设 → 表情 → 图片 → 自定义）。
+     *
+     * `raw` 是合并后的原始 settings（可能来自会话选中的配置），
+     * 这里统一走 normalizeDshSettings，避免调用方拼出半成品形状。
      */
-    composeSystemPrompt(sessionKey: string): string {
-        const p = this.settings.prompt ?? DEFAULT_PROMPT_SETTINGS;
+    composeSystemPrompt(sessionKey: string, raw?: Record<string, unknown>): string {
+        const settings = raw ? normalizeDshSettings(raw) : this.settings;
+        const p = settings.prompt ?? DEFAULT_PROMPT_SETTINGS;
         const parts: string[] = [];
 
         if (p.qqBase) parts.push(QQ_BASE_PROMPT);

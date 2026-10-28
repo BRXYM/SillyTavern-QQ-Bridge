@@ -3,20 +3,27 @@
  *
  * 满足「可配置模式 / 未来自由增加」与「dsh 可自行注册接入」两条需求：
  *
- *   GET    /api/downstreams                 列表 + 状态 + 已知类型
- *   POST   /api/downstreams                 新增或整体替换一个实例
- *   DELETE /api/downstreams/:id             删除实例
- *   POST   /api/downstreams/:id/test        用一句话验证连通性
- *   POST   /api/downstreams/:id/reset       清空某会话（或全部）上下文
- *   POST   /api/downstreams/default         设置全局默认下游
- *   POST   /api/downstreams/register        **自注册通道**（需 token）
+ *   GET    /api/downstreams                       列表 + 状态 + 已知类型
+ *   POST   /api/downstreams                       新增或整体替换一个实例
+ *   DELETE /api/downstreams/:id                   删除实例
+ *   POST   /api/downstreams/:id/test              用一句话验证连通性
+ *   POST   /api/downstreams/:id/reset             清空某会话（或全部）上下文
+ *   POST   /api/downstreams/default               设置全局默认下游
+ *   POST   /api/downstreams/register              **自注册通道**（需 token）
+ *
+ * 命名配置（每个实例下多份）：
+ *   GET    /api/downstreams/:id/profiles          列出某实例的配置
+ *   POST   /api/downstreams/:id/profiles          新增或更新一份配置
+ *   DELETE /api/downstreams/:id/profiles/:pid     删除一份配置
+ *
+ * 配置里的 `settings` 只写与实例设置的差异，未出现的键沿用实例设置。
  */
 
 import type { Router } from '../router.ts';
 import { json } from '../router.ts';
 import type { AppContext } from '../context.ts';
 import { KNOWN_KINDS } from '../../downstream/registry.ts';
-import type { DownstreamConfig, DownstreamKind } from '../../downstream/types.ts';
+import type { DownstreamConfig, DownstreamKind, DownstreamProfile } from '../../downstream/types.ts';
 import { log } from '../../core/logger.ts';
 
 const VALID_KINDS = new Set<string>(KNOWN_KINDS.map((k) => k.kind));
@@ -28,6 +35,7 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
         json(res, 200, {
             ok: true,
             defaultDownstreamId: cfg.defaultDownstreamId,
+            defaultDownstreamProfileId: cfg.defaultDownstreamProfileId,
             registered: cfg.downstreams,
             status: app.downstreams.list().map((a) => a.status()),
             kinds: KNOWN_KINDS,
@@ -43,18 +51,26 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
         }
 
         const cfg = app.config();
-        const existingIndex = cfg.downstreams.findIndex((d) => d.id === parsed.value.id);
+        const existing = cfg.downstreams.find((d) => d.id === parsed.value.id);
 
         app.updateConfig((c) => {
-            if (existingIndex >= 0) {
-                c.downstreams[existingIndex] = parsed.value;
+            const index = c.downstreams.findIndex((d) => d.id === parsed.value.id);
+            if (index >= 0) {
+                // 保留已有配置：前端整体提交实例时不该顺手清掉它的命名配置
+                const keep = c.downstreams[index]!;
+                c.downstreams[index] = {
+                    ...parsed.value,
+                    profiles: Array.isArray(body.profiles)
+                        ? parsed.value.profiles
+                        : keep.profiles,
+                };
             } else {
                 c.downstreams.push(parsed.value);
             }
         });
 
         const reload = await app.downstreams.reload();
-        log(`下游已${existingIndex >= 0 ? '更新' : '新增'}：${parsed.value.id}（${parsed.value.kind}）`);
+        log(`下游已${existing ? '更新' : '新增'}：${parsed.value.id}（${parsed.value.kind}）`);
 
         json(res, 200, {
             ok: reload.ok,
@@ -81,40 +97,163 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
             return;
         }
 
+        // 该实例名下的会话绑定一起清掉，否则会指向一个不存在的下游
+        const affected = Object.entries(app.sessions.snapshot())
+            .filter(([, v]) => v.backendId === id)
+            .map(([k]) => k);
+        for (const key of affected) {
+            app.sessions.clearField(key, 'backendId');
+            app.sessions.clearField(key, 'profileId');
+        }
+
         app.updateConfig((c) => {
             c.downstreams = c.downstreams.filter((d) => d.id !== id);
             // 默认下游被删时回落到第一个
             if (c.defaultDownstreamId === id) {
                 c.defaultDownstreamId = c.downstreams[0]?.id ?? '';
+                c.defaultDownstreamProfileId = '';
             }
         });
 
         const reload = await app.downstreams.reload();
-        log(`下游已删除：${id}`);
-        json(res, 200, { ok: reload.ok, error: reload.error });
+        log(`下游已删除：${id}（${affected.length} 个会话回落默认）`);
+        json(res, 200, { ok: reload.ok, error: reload.error, affectedSessions: affected.length });
     });
 
     // ---------------- 设默认 ----------------
     router.post('/api/downstreams/default', ({ res, body }) => {
         const id = String(body.id ?? '').trim();
+        const profileId = body.profileId === undefined ? undefined : String(body.profileId ?? '');
         const cfg = app.config();
         if (!cfg.downstreams.some((d) => d.id === id)) {
             json(res, 404, { ok: false, error: `下游 ${id} 不存在` });
             return;
         }
+
+        // 指定了配置就顺带校验它属于这个实例
+        if (profileId) {
+            const target = cfg.downstreams.find((d) => d.id === id);
+            if (!target?.profiles.some((p) => p.id === profileId)) {
+                json(res, 400, { ok: false, error: `下游 ${id} 下没有配置 ${profileId}` });
+                return;
+            }
+        }
+
         app.updateConfig((c) => {
             c.defaultDownstreamId = id;
+            if (profileId !== undefined) c.defaultDownstreamProfileId = profileId;
+            // 换了实例且没指定新配置时，旧默认配置不再适用
+            else {
+                const target = c.downstreams.find((d) => d.id === id);
+                if (!target?.profiles.some((p) => p.id === c.defaultDownstreamProfileId)) {
+                    c.defaultDownstreamProfileId = '';
+                }
+            }
         });
-        log(`默认下游已设为：${id}`);
-        json(res, 200, { ok: true, defaultDownstreamId: id });
+
+        log(`默认下游已设为：${id}${profileId ? ` / ${profileId}` : ''}`);
+        json(res, 200, {
+            ok: true,
+            defaultDownstreamId: id,
+            defaultDownstreamProfileId: app.config().defaultDownstreamProfileId,
+        });
+    });
+
+    // ---------------- 命名配置 ----------------
+    // GET /api/downstreams/:id/profiles
+    router.get('/api/downstreams/:id/profiles', ({ res, params }) => {
+        const id = params.id ?? '';
+        const downstream = app.config().downstreams.find((d) => d.id === id);
+        if (!downstream) {
+            json(res, 404, { ok: false, error: `下游 ${id} 不存在` });
+            return;
+        }
+        json(res, 200, {
+            ok: true,
+            downstreamId: id,
+            profiles: downstream.profiles,
+            /** 实例自身设置，作为表单的基线 */
+            settings: downstream.settings,
+        });
+    });
+
+    // POST /api/downstreams/:id/profiles   新增或更新一份配置
+    router.post('/api/downstreams/:id/profiles', ({ res, params, body }) => {
+        const id = params.id ?? '';
+        const cfg = app.config();
+        if (!cfg.downstreams.some((d) => d.id === id)) {
+            json(res, 404, { ok: false, error: `下游 ${id} 不存在` });
+            return;
+        }
+
+        const parsed = parseProfileBody(body);
+        if ('error' in parsed) {
+            json(res, 400, { ok: false, error: parsed.error });
+            return;
+        }
+
+        let created = false;
+        app.updateConfig((c) => {
+            const target = c.downstreams.find((d) => d.id === id);
+            if (!target) return;
+            const index = target.profiles.findIndex((p) => p.id === parsed.value.id);
+            if (index >= 0) target.profiles[index] = parsed.value;
+            else {
+                target.profiles.push(parsed.value);
+                created = true;
+            }
+        });
+
+        log(`下游 ${id} 的配置已${created ? '新增' : '更新'}：${parsed.value.id}（${parsed.value.name}）`);
+        json(res, 200, { ok: true, profile: parsed.value, created });
+    });
+
+    // DELETE /api/downstreams/:id/profiles/:pid
+    router.delete('/api/downstreams/:id/profiles/:pid', ({ res, params }) => {
+        const id = params.id ?? '';
+        const pid = params.pid ?? '';
+        const cfg = app.config();
+        const target = cfg.downstreams.find((d) => d.id === id);
+        if (!target) {
+            json(res, 404, { ok: false, error: `下游 ${id} 不存在` });
+            return;
+        }
+        if (!target.profiles.some((p) => p.id === pid)) {
+            json(res, 404, { ok: false, error: `下游 ${id} 下没有配置 ${pid}` });
+            return;
+        }
+
+        // 用到这份配置的会话回落「继承」，否则它们会指向不存在的配置
+        const affected = Object.entries(app.sessions.snapshot())
+            .filter(([, v]) => v.profileId === pid && (v.backendId === id || v.backendId === undefined))
+            .map(([k]) => k);
+        for (const key of affected) app.sessions.clearField(key, 'profileId');
+
+        app.updateConfig((c) => {
+            const d = c.downstreams.find((x) => x.id === id);
+            if (d) d.profiles = d.profiles.filter((p) => p.id !== pid);
+            // 被删的正好是全局默认配置时清空，避免指向不存在的项
+            if (c.defaultDownstreamProfileId === pid && c.defaultDownstreamId === id) {
+                c.defaultDownstreamProfileId = '';
+            }
+        });
+
+        log(`下游 ${id} 的配置已删除：${pid}（${affected.length} 个会话回落继承）`);
+        json(res, 200, { ok: true, affectedSessions: affected.length });
     });
 
     // ---------------- 连通性测试 ----------------
     router.post('/api/downstreams/:id/test', async ({ res, params, body }) => {
         const id = params.id ?? '';
-        const adapter = app.downstreams.get(id);
+        const profileId = String(body.profileId ?? '');
+        const resolved = app.downstreams.resolve(id, profileId);
+        if (!resolved) {
+            json(res, 404, { ok: false, error: `下游 ${id} 不存在` });
+            return;
+        }
+        const adapter = resolved.adapter;
         if (!adapter) {
-            json(res, 404, { ok: false, error: `下游 ${id} 不存在或未启用` });
+            json(res, 404, { ok: false, error: `下游 ${id} 未启用或启动失败` });
             return;
         }
 
@@ -126,9 +265,17 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
             text,
             system: '',
             sender: 'test',
+            // 用选定配置测试，而不是实例设置 —— 否则测不出配置里的问题
+            settings: resolved.settings,
+            profileId: resolved.profile?.id,
         });
 
-        json(res, result.ok ? 200 : 400, { ...result, sessionKey, downstreamId: id });
+        json(res, result.ok ? 200 : 400, {
+            ...result,
+            sessionKey,
+            downstreamId: id,
+            profileId: resolved.profile?.id ?? '',
+        });
     });
 
     // ---------------- 清空上下文 ----------------
@@ -242,6 +389,11 @@ function parseDownstreamBody(
         return { error: 'settings 必须是对象' };
     }
 
+    // 只有显式传了 profiles 才覆盖（见调用处的保留逻辑）
+    const profiles = Array.isArray(body.profiles)
+        ? parseProfiles(body.profiles)
+        : [];
+
     return {
         value: {
             id,
@@ -249,7 +401,46 @@ function parseDownstreamBody(
             name: String(body.name ?? id).trim() || id,
             enabled: body.enabled === undefined ? true : body.enabled !== false,
             settings: (settings as Record<string, unknown>) ?? {},
+            profiles,
         },
     };
 }
 
+/** 批量规范化配置数组（整体提交实例时用） */
+function parseProfiles(raw: unknown[]): DownstreamProfile[] {
+    const out: DownstreamProfile[] = [];
+    const seen = new Set<string>();
+    for (const item of raw) {
+        if (!item || typeof item !== 'object') continue;
+        const parsed = parseProfileBody(item as Record<string, unknown>);
+        if ('error' in parsed) continue;
+        if (seen.has(parsed.value.id)) continue;
+        seen.add(parsed.value.id);
+        out.push(parsed.value);
+    }
+    return out;
+}
+
+/** 校验并规范化一份命名配置 */
+function parseProfileBody(
+    body: Record<string, unknown>,
+): { value: DownstreamProfile } | { error: string } {
+    const id = String(body.id ?? '').trim();
+    if (!id) return { error: '缺少配置 id' };
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(id)) {
+        return { error: '配置 id 只能包含字母、数字、下划线和短横线（1-32 位）' };
+    }
+
+    const settings = body.settings;
+    if (settings !== undefined && (typeof settings !== 'object' || settings === null || Array.isArray(settings))) {
+        return { error: 'settings 必须是对象' };
+    }
+
+    return {
+        value: {
+            id,
+            name: String(body.name ?? id).trim() || id,
+            settings: (settings as Record<string, unknown>) ?? {},
+        },
+    };
+}

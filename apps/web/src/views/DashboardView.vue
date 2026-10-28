@@ -57,6 +57,9 @@ const charCount = computed(() => status.value?.catalogs.characters.length ?? 0);
 const worldCount = computed(() => status.value?.catalogs.worlds.length ?? 0);
 
 const upstream = computed(() => status.value?.upstream);
+/** 每个上游账号的明细（多账号时在卡片底部展示） */
+const accounts = computed(() => status.value?.accounts ?? []);
+
 const proc = computed(() => status.value?.process);
 
 const upOnline = computed(() => upstream.value?.connected ?? store.onebotConnected);
@@ -326,6 +329,41 @@ async function retry() {
                         {{ upstream.lastError }}
                         <span class="ml-1 text-muted-foreground">{{ ago(upstream.lastErrorAt) }}</span>
                     </p>
+                </div>
+
+                <!-- 多账号明细：掉线时能一眼看出是哪个号 -->
+                <div
+                    v-if="(accounts?.length ?? 0) > 1"
+                    class="border-t border-border/40 px-5 py-3"
+                >
+                    <p class="ui-section-label mb-1.5">账号明细</p>
+                    <div class="flex flex-col gap-1">
+                        <div
+                            v-for="acc in accounts"
+                            :key="acc.id"
+                            class="flex flex-wrap items-center gap-2 text-[11px]"
+                        >
+                            <span
+                                class="size-1.5 shrink-0 rounded-full"
+                                :class="acc.connected ? 'bg-success' : 'bg-destructive/60'"
+                            />
+                            <span class="font-mono">{{ acc.id }}</span>
+                            <span class="text-muted-foreground">
+                                {{ acc.name || '—' }}<template v-if="acc.selfId"> · {{ acc.selfId }}</template>
+                            </span>
+                            <span class="flex-1" />
+                            <span class="font-mono tabular-nums text-muted-foreground">
+                                ↑{{ acc.eventsIn }} ↓{{ acc.actionsOut }}
+                            </span>
+                            <span
+                                v-if="acc.lastError"
+                                class="min-w-0 max-w-48 truncate text-destructive"
+                                :title="acc.lastError"
+                            >
+                                {{ acc.lastError }}
+                            </span>
+                        </div>
+                    </div>
                 </div>
             </UiCard>
 

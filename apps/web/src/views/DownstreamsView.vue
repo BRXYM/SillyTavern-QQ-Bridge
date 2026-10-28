@@ -37,6 +37,7 @@ const registered = ref<Array<{
     name: string;
     enabled: boolean;
     settings: Record<string, unknown>;
+    profiles?: Array<{ id: string; name: string; settings: Record<string, unknown> }>;
 }>>([]);
 
 const statuses = computed<DownstreamStatusDto[]>(() => store.status?.downstreams ?? []);
@@ -347,7 +348,14 @@ async function setDefault(id: string) {
 }
 
 async function toggleEnabled(
-    item: { id: string; enabled: boolean; kind: string; name: string; settings: Record<string, unknown> },
+    item: {
+        id: string;
+        enabled: boolean;
+        kind: string;
+        name: string;
+        settings: Record<string, unknown>;
+        profiles?: Array<{ id: string; name: string; settings: Record<string, unknown> }>;
+    },
     next: boolean,
 ) {
     saving.value = true;
@@ -495,6 +503,158 @@ async function removePlugin() {
 }
 
 onMounted(() => void load({ silent: true }));
+
+// ---------------- 命名配置（每个实例下多份） ----------------
+// 同一台 dsh 可以用不同人设/对话约束，同一个酒馆可以用不同角色卡。
+// 会话在「会话」页选其中之一。
+
+interface ProfileDraft {
+    id: string;
+    name: string;
+    /** 覆盖实例设置的字段（只存差异） */
+    settings: Record<string, unknown>;
+    /** 表单上的常用字段，保存时写回 settings */
+    prompt: {
+        qqBase: boolean;
+        character: boolean;
+        faces: boolean;
+        images: boolean;
+        extra: string;
+    };
+    /** 酒馆专用：固定角色卡 / 世界书 */
+    character: string;
+    world: string;
+    /** dsh 专用：用哪个 profile 目录 */
+    dshProfile: string;
+}
+
+const profileDrafts = reactive<Record<string, ProfileDraft | null>>({});
+const savingProfile = ref('');
+
+/** 某实例的配置列表 */
+function profilesOf(id: string): Array<{ id: string; name: string; settings: Record<string, unknown> }> {
+    return registered.value.find((d) => d.id === id)?.profiles ?? [];
+}
+
+/** 打开「新增配置」表单 */
+function newProfile(item: { id: string }): void {
+    profileDrafts[item.id] = {
+        id: `profile_${profilesOf(item.id).length + 1}`,
+        name: '',
+        settings: {},
+        prompt: { qqBase: false, character: false, faces: false, images: false, extra: '' },
+        character: '',
+        world: '',
+        dshProfile: '',
+    };
+}
+
+/** 打开「编辑配置」表单 */
+function editProfile(
+    item: { id: string; kind: string },
+    profile: { id: string; name: string; settings: Record<string, unknown> },
+): void {
+    const raw = (profile.settings.prompt ?? {}) as Partial<ProfileDraft['prompt']>;
+    profileDrafts[item.id] = {
+        id: profile.id,
+        name: profile.name,
+        settings: { ...profile.settings },
+        prompt: {
+            qqBase: raw.qqBase === true,
+            character: raw.character === true,
+            faces: raw.faces === true,
+            images: raw.images === true,
+            extra: typeof raw.extra === 'string' ? raw.extra : '',
+        },
+        character: String(profile.settings.character ?? ''),
+        world: String(profile.settings.world ?? ''),
+        dshProfile: String(profile.settings.profile ?? ''),
+    };
+}
+
+/** 保存配置：把表单字段合进 settings，空值不写入（保持继承） */
+async function saveProfile(
+    item: { id: string; kind: string },
+): Promise<void> {
+    const draft = profileDrafts[item.id];
+    if (!draft) return;
+
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(draft.id)) {
+        toast.error('配置 id 不合法', '只能包含字母、数字、下划线和短横线（1-32 位）');
+        return;
+    }
+
+    const settings: Record<string, unknown> = { ...draft.settings };
+    const isDshItem = isDshKind(item.kind);
+
+    if (isDshItem) {
+        settings.prompt = {
+            qqBase: draft.prompt.qqBase,
+            character: draft.prompt.character,
+            faces: draft.prompt.faces,
+            images: draft.prompt.images,
+            extra: draft.prompt.extra,
+        };
+        // 空 = 沿用实例的 profile 目录
+        if (draft.dshProfile.trim()) settings.profile = draft.dshProfile.trim();
+        else delete settings.profile;
+    } else {
+        // 酒馆：固定角色卡/世界书，空 = 用会话级或默认
+        if (draft.character.trim()) settings.character = draft.character.trim();
+        else delete settings.character;
+        if (draft.world.trim()) settings.world = draft.world.trim();
+        else delete settings.world;
+    }
+
+    savingProfile.value = `${item.id}:${draft.id}`;
+    try {
+        await api.saveDownstreamProfile(item.id, {
+            id: draft.id,
+            name: draft.name.trim() || draft.id,
+            settings,
+        });
+        profileDrafts[item.id] = null;
+        await load({ silent: true });
+        toast.success('配置已保存', `${item.id} / ${draft.name || draft.id}`);
+    } catch (e) {
+        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        savingProfile.value = '';
+    }
+}
+
+/** 删除配置 */
+async function removeProfile(item: { id: string }, profileId: string): Promise<void> {
+    savingProfile.value = `${item.id}:${profileId}`;
+    try {
+        const r = await api.deleteDownstreamProfile(item.id, profileId);
+        await load({ silent: true });
+        toast.success(
+            '配置已删除',
+            r.affectedSessions
+                ? `${r.affectedSessions} 个会话已回落继承`
+                : undefined,
+        );
+    } catch (e) {
+        toast.error('删除失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        savingProfile.value = '';
+    }
+}
+
+/** 把某配置设为全局默认（连同它所属的实例） */
+async function setDefaultProfile(item: { id: string }, profileId: string): Promise<void> {
+    saving.value = true;
+    try {
+        await api.setDefaultDownstream(item.id, profileId);
+        await store.refresh();
+        toast.success('已设为全局默认配置', `${item.id} / ${profileId}`);
+    } catch (e) {
+        toast.error('设置失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        saving.value = false;
+    }
+}
 </script>
 
 <template>
@@ -681,6 +841,184 @@ onMounted(() => void load({ silent: true }));
                             <p v-if="testResults[item.id]!.text" class="mt-1 whitespace-pre-wrap break-words text-xs">
                                 {{ testResults[item.id]!.text }}
                             </p>
+                        </div>
+
+                        <!-- 命名配置：同一实例下的多套人设 / 角色卡 -->
+                        <div class="mt-2 rounded-md border border-border/50 px-2.5 py-2">
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <p class="text-[11px] font-medium">
+                                    配置
+                                    <span class="ml-1 font-normal text-muted-foreground">
+                                        会话可选用，未选则用实例设置
+                                    </span>
+                                </p>
+                                <UiButton
+                                    variant="ghost"
+                                    size="sm"
+                                    :disabled="!item.enabled"
+                                    @click="newProfile(item)"
+                                >
+                                    <Plus class="size-3" />
+                                    新建配置
+                                </UiButton>
+                            </div>
+
+                            <p
+                                v-if="profilesOf(item.id).length === 0"
+                                class="mt-1 text-[10px] text-muted-foreground"
+                            >
+                                还没有配置。{{
+                                    isDshKind(item.kind)
+                                        ? '可建多套提示词开关 / 对话约束，供不同会话选用'
+                                        : '可建多套角色卡，供不同会话选用'
+                                }}
+                            </p>
+
+                            <div v-else class="mt-1.5 flex flex-wrap gap-1.5">
+                                <span
+                                    v-for="p in profilesOf(item.id)"
+                                    :key="p.id"
+                                    class="inline-flex items-center gap-1 rounded-md border border-border/60 bg-accent/30 py-1 pl-2 pr-1 text-[10px]"
+                                >
+                                    <span class="font-medium">{{ p.name || p.id }}</span>
+                                    <span class="font-mono text-muted-foreground/60">{{ p.id }}</span>
+                                    <button
+                                        type="button"
+                                        class="rounded px-1 text-muted-foreground/60 transition-colors hover:text-foreground"
+                                        :title="`编辑 ${p.id}`"
+                                        @click="editProfile(item, p)"
+                                    >
+                                        改
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-destructive/10 hover:text-destructive"
+                                        :title="`删除 ${p.id}`"
+                                        :disabled="savingProfile !== ''"
+                                        @click="removeProfile(item, p.id)"
+                                    >
+                                        <Trash2 class="size-2.5" />
+                                    </button>
+                                </span>
+                            </div>
+
+                            <!-- 配置编辑表单 -->
+                            <div
+                                v-if="profileDrafts[item.id]"
+                                class="mt-2 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-2"
+                            >
+                                <div class="grid gap-2 sm:grid-cols-2">
+                                    <div class="flex flex-col gap-1">
+                                        <label class="text-[10px] font-medium">配置 id</label>
+                                        <UiInput
+                                            v-model="profileDrafts[item.id]!.id"
+                                            mono
+                                            placeholder="默认 / 客服"
+                                            class="text-xs"
+                                        />
+                                    </div>
+                                    <div class="flex flex-col gap-1">
+                                        <label class="text-[10px] font-medium">显示名称</label>
+                                        <UiInput
+                                            v-model="profileDrafts[item.id]!.name"
+                                            placeholder="留空用 id"
+                                            class="text-xs"
+                                        />
+                                    </div>
+                                </div>
+
+                                <!-- dsh：提示词开关 + profile 目录 -->
+                                <template v-if="isDshKind(item.kind)">
+                                    <div class="mt-2 grid gap-1 sm:grid-cols-2">
+                                        <label
+                                            v-for="opt in PROMPT_OPTIONS"
+                                            :key="opt.key"
+                                            class="flex items-center justify-between gap-2 rounded border border-border/50 px-2 py-1"
+                                        >
+                                            <span class="text-[10px]">{{ opt.label }}</span>
+                                            <UiSwitch
+                                                :model-value="profileDrafts[item.id]!.prompt[opt.key]"
+                                                @update:model-value="(v: boolean) => {
+                                                    const d = profileDrafts[item.id];
+                                                    if (d) d.prompt[opt.key] = v;
+                                                }"
+                                            />
+                                        </label>
+                                    </div>
+                                    <div class="mt-2 flex flex-col gap-1">
+                                        <label class="text-[10px] font-medium">附加提示词</label>
+                                        <UiInput
+                                            v-model="profileDrafts[item.id]!.prompt.extra"
+                                            placeholder="对话约束，例如：只用短句，不要用敬语"
+                                            class="text-xs"
+                                        />
+                                    </div>
+                                    <div class="mt-2 flex flex-col gap-1">
+                                        <label class="text-[10px] font-medium">dsh profile 目录</label>
+                                        <UiInput
+                                            v-model="profileDrafts[item.id]!.dshProfile"
+                                            mono
+                                            placeholder="留空 = 沿用实例设置（例如 headless / web）"
+                                            class="text-xs"
+                                        />
+                                    </div>
+                                </template>
+
+                                <!-- 酒馆：固定角色卡 + 世界书 -->
+                                <template v-else>
+                                    <div class="mt-2 grid gap-2 sm:grid-cols-2">
+                                        <div class="flex flex-col gap-1">
+                                            <label class="text-[10px] font-medium">固定角色卡</label>
+                                            <UiInput
+                                                v-model="profileDrafts[item.id]!.character"
+                                                placeholder="留空 = 用会话所选角色"
+                                                class="text-xs"
+                                            />
+                                        </div>
+                                        <div class="flex flex-col gap-1">
+                                            <label class="text-[10px] font-medium">固定世界书</label>
+                                            <UiInput
+                                                v-model="profileDrafts[item.id]!.world"
+                                                placeholder="留空 = 用会话所选世界书"
+                                                class="text-xs"
+                                            />
+                                        </div>
+                                    </div>
+                                </template>
+
+                                <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                                    <UiButton
+                                        size="sm"
+                                        :disabled="savingProfile !== ''"
+                                        @click="saveProfile(item)"
+                                    >
+                                        <Loader2
+                                            v-if="savingProfile.startsWith(`${item.id}:`)"
+                                            class="size-3 animate-spin"
+                                        />
+                                        <Save v-else class="size-3" />
+                                        保存配置
+                                    </UiButton>
+                                    <UiButton
+                                        variant="ghost"
+                                        size="sm"
+                                        @click="profileDrafts[item.id] = null"
+                                    >
+                                        取消
+                                    </UiButton>
+                                    <div class="flex-1" />
+                                    <button
+                                        v-if="profileDrafts[item.id] && profilesOf(item.id).some(
+                                            (p) => p.id === profileDrafts[item.id]!.id
+                                        )"
+                                        type="button"
+                                        class="text-[10px] text-muted-foreground hover:text-primary"
+                                        @click="setDefaultProfile(item, profileDrafts[item.id]!.id)"
+                                    >
+                                        设为全局默认
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </div>
 

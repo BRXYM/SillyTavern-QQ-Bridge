@@ -39,18 +39,68 @@ export interface DownstreamStatusDto {
     detail?: Record<string, string | number | boolean>;
 }
 
+/**
+ * 下游的一个命名配置。
+ *
+ * 同一台 dsh 可以有多份（不同人设/不同 profile），
+ * 同一个酒馆可以有多份（不同角色卡）。会话选中其中之一。
+ */
+export interface DownstreamProfileDto {
+    id: string;
+    name: string;
+    /** 只写与实例设置的差异；未出现的键沿用实例设置 */
+    settings: Record<string, unknown>;
+}
+
 export interface SessionChoiceDto {
     character?: string;
     world?: string;
     replyProcessors?: unknown[];
     /** 会话级下游实例 id；缺失 = 继承全局 defaultDownstreamId */
     backendId?: string;
+    /** 会话级下游配置 id；缺失 = 继承全局默认配置 */
+    profileId?: string;
     createdAt?: string;
     updatedAt?: string;
 }
 
 /** 会话实际生效的下游实例 id */
 export type SessionBackendDto = string;
+
+/** 单个账号的运行时状态 */
+export interface AccountStatusDto {
+    id: string;
+    uin: string;
+    name: string;
+    connected: boolean;
+    endpoint: string;
+    selfId: string;
+    nickname: string;
+    connectedForSec: number;
+    connectedAt: number | null;
+    disconnectedAt: number | null;
+    reconnectCount: number;
+    eventsIn: number;
+    actionsOut: number;
+    actionErrors: number;
+    lastEventAt: number | null;
+    lastError: string;
+    lastErrorAt: number | null;
+}
+
+/** 一个上游账号的配置 */
+export interface AccountConfigDto {
+    id: string;
+    uin: string;
+    name: string;
+    enabled: boolean;
+    upstream: {
+        url: string;
+        token: string;
+        reconnectMs: number;
+        actionTimeoutMs: number;
+    };
+}
 
 export interface CatalogDto {
     characters: string[];
@@ -59,16 +109,23 @@ export interface CatalogDto {
 }
 
 export interface StatusDto {
+    /** 聚合视图：任一账号在线即为在线 */
     onebotConnected: boolean;
     stClients: number;
     selfId: string;
     sessions: Record<string, SessionStat>;
     sessionChoices: Record<string, SessionChoiceDto>;
-    /** 每个会话实际生效的下游：{ key: { backendId, inherited } } */
-    sessionBackends?: Record<string, { backendId: SessionBackendDto; inherited: boolean }>;
+    /** 每个会话实际生效的下游：{ key: { backendId, inherited, profileId } } */
+    sessionBackends?: Record<
+        string,
+        { backendId: SessionBackendDto; inherited: boolean; profileId?: string }
+    >;
     /** 下游实例与状态 */
     downstreams?: DownstreamStatusDto[];
     defaultDownstreamId?: string;
+    defaultDownstreamProfileId?: string;
+    /** 每个上游账号的明细 */
+    accounts?: AccountStatusDto[];
     catalogs: CatalogDto;
     config: Record<string, unknown>;
     generatedAt?: number;
@@ -249,7 +306,14 @@ export const api = {
                 sessionKey: string;
                 choice: SessionChoiceDto | null;
                 stat: SessionStat;
-                resolved: { backendId: string; inherited: boolean; character: string; world: string };
+                resolved: {
+                    backendId: string;
+                    inherited: boolean;
+                    profileId: string;
+                    profileInherited: boolean;
+                    character: string;
+                    world: string;
+                };
             }>;
         }>('/sessions'),
 
@@ -260,9 +324,20 @@ export const api = {
         replyProcessors?: unknown[];
         /** 下游实例 id；'' = 清除会话级设置，继承全局 */
         backendId?: SessionBackendDto | '';
+        /** 下游配置 id；'' = 清除会话级配置，继承默认配置 */
+        profileId?: string;
         reset?: boolean;
     }) =>
-        request<{ ok: boolean; sessionKey: string; resolved?: { backendId: string; inherited: boolean } }>(
+        request<{
+            ok: boolean;
+            sessionKey: string;
+            resolved?: {
+                backendId: string;
+                inherited: boolean;
+                profileId: string;
+                profileInherited: boolean;
+            };
+        }>(
             `/sessions/${encodeURIComponent(payload.sessionKey)}`,
             { method: 'POST', body: JSON.stringify(payload) },
         ),
@@ -313,12 +388,45 @@ export const api = {
             body: JSON.stringify(payload),
         }),
 
+    // ---------------- 上游账号 ----------------
+    accounts: () =>
+        request<{
+            ok: boolean;
+            accounts: Array<AccountConfigDto & {
+                running: boolean;
+                connected: boolean;
+                selfId: string;
+                nickname: string;
+                lastError: string;
+            }>;
+        }>('/accounts'),
+
+    saveAccount: (payload: AccountConfigDto) =>
+        request<{ ok: boolean; account: AccountConfigDto }>('/accounts', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        }),
+
+    deleteAccount: (id: string) =>
+        request<{ ok: boolean; removedSessions: number }>(
+            `/accounts/${encodeURIComponent(id)}`,
+            { method: 'DELETE' },
+        ),
+
     // ---------------- 下游 ----------------
     downstreams: () =>
         request<{
             ok: boolean;
             defaultDownstreamId: string;
-            registered: Array<{ id: string; kind: string; name: string; enabled: boolean; settings: Record<string, unknown> }>;
+            defaultDownstreamProfileId: string;
+            registered: Array<{
+                id: string;
+                kind: string;
+                name: string;
+                enabled: boolean;
+                settings: Record<string, unknown>;
+                profiles?: DownstreamProfileDto[];
+            }>;
             status: DownstreamStatusDto[];
             kinds: Array<{ kind: string; label: string; description: string }>;
         }>('/downstreams'),
@@ -329,6 +437,7 @@ export const api = {
         name?: string;
         enabled?: boolean;
         settings?: Record<string, unknown>;
+        profiles?: DownstreamProfileDto[];
     }) =>
         request<{ ok: boolean; error?: string; downstream: unknown; status: DownstreamStatusDto[] }>('/downstreams', {
             method: 'POST',
@@ -336,16 +445,54 @@ export const api = {
         }),
 
     deleteDownstream: (id: string) =>
-        request<{ ok: boolean; error?: string }>(`/downstreams/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+        request<{ ok: boolean; error?: string; affectedSessions?: number }>(
+            `/downstreams/${encodeURIComponent(id)}`,
+            { method: 'DELETE' },
+        ),
 
-    setDefaultDownstream: (id: string) =>
-        request<{ ok: boolean; defaultDownstreamId: string }>('/downstreams/default', {
-            method: 'POST',
-            body: JSON.stringify({ id }),
-        }),
+    setDefaultDownstream: (id: string, profileId?: string) =>
+        request<{ ok: boolean; defaultDownstreamId: string; defaultDownstreamProfileId?: string }>(
+            '/downstreams/default',
+            {
+                method: 'POST',
+                body: JSON.stringify(profileId === undefined ? { id } : { id, profileId }),
+            },
+        ),
 
-    testDownstream: (id: string, payload: { text?: string; sessionKey?: string } = {}) =>
-        request<{ ok: boolean; text: string; elapsedMs: number; error?: string; sessionKey: string }>(
+    // ---------------- 下游命名配置 ----------------
+    downstreamProfiles: (id: string) =>
+        request<{
+            ok: boolean;
+            downstreamId: string;
+            profiles: DownstreamProfileDto[];
+            /** 实例自身设置，作为配置表单的基线 */
+            settings: Record<string, unknown>;
+        }>(`/downstreams/${encodeURIComponent(id)}/profiles`),
+
+    saveDownstreamProfile: (
+        id: string,
+        payload: { id: string; name?: string; settings?: Record<string, unknown> },
+    ) =>
+        request<{ ok: boolean; profile: DownstreamProfileDto; created: boolean }>(
+            `/downstreams/${encodeURIComponent(id)}/profiles`,
+            { method: 'POST', body: JSON.stringify(payload) },
+        ),
+
+    deleteDownstreamProfile: (id: string, profileId: string) =>
+        request<{ ok: boolean; affectedSessions?: number }>(
+            `/downstreams/${encodeURIComponent(id)}/profiles/${encodeURIComponent(profileId)}`,
+            { method: 'DELETE' },
+        ),
+
+    testDownstream: (id: string, payload: { text?: string; sessionKey?: string; profileId?: string } = {}) =>
+        request<{
+            ok: boolean;
+            text: string;
+            elapsedMs: number;
+            error?: string;
+            sessionKey: string;
+            profileId?: string;
+        }>(
             `/downstreams/${encodeURIComponent(id)}/test`,
             { method: 'POST', body: JSON.stringify(payload) },
         ),

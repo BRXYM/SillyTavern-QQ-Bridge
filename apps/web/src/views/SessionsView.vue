@@ -346,12 +346,36 @@ const downstreamOptions = computed(() => [
 ]);
 
 /** 该会话实际生效的下游（后端已算好则直接用） */
-function effectiveDownstream(key: string): { backendId: string; inherited: boolean } {
+function effectiveDownstream(key: string): {
+    backendId: string;
+    inherited: boolean;
+    profileId: string;
+    profileInherited: boolean;
+} {
     const fromServer = store.status?.sessionBackends?.[key];
-    if (fromServer) return fromServer;
-    const own = store.status?.sessionChoices[key]?.backendId;
-    if (own) return { backendId: own, inherited: false };
-    return { backendId: globalDownstreamId.value, inherited: true };
+    if (fromServer) {
+        return {
+            backendId: fromServer.backendId,
+            inherited: fromServer.inherited,
+            profileId: fromServer.profileId ?? '',
+            profileInherited: store.status?.sessionChoices[key]?.profileId === undefined,
+        };
+    }
+    const own = store.status?.sessionChoices[key];
+    if (own?.backendId) {
+        return {
+            backendId: own.backendId,
+            inherited: false,
+            profileId: own.profileId ?? '',
+            profileInherited: own.profileId === undefined,
+        };
+    }
+    return {
+        backendId: globalDownstreamId.value,
+        inherited: true,
+        profileId: own?.profileId ?? '',
+        profileInherited: own?.profileId === undefined,
+    };
 }
 
 /** 该下游是否是 dsh（用于配色与文案） */
@@ -359,6 +383,99 @@ function isDsh(id: string): boolean {
     const hit = downstreamList.value.find((d) => d.id === id);
     return hit ? hit.kind.startsWith('dsh') : id.startsWith('dsh');
 }
+
+// ---------------- 下游命名配置 ----------------
+
+interface ProfileItem {
+    id: string;
+    name: string;
+    settings: Record<string, unknown>;
+}
+
+/** 从配置里读某个下游实例的所有命名配置 */
+function profilesOf(backendId: string): ProfileItem[] {
+    const list = (store.status?.config?.['downstreams'] ?? []) as Array<{
+        id: string;
+        profiles?: ProfileItem[];
+    }>;
+    const hit = list.find((d) => d.id === backendId);
+    return hit?.profiles ?? [];
+}
+
+/** 全局默认配置 id */
+const globalProfileId = computed(() => store.status?.defaultDownstreamProfileId ?? '');
+
+/** 配置下拉选项：继承 + 该实例下的所有配置 */
+function profileOptions(backendId: string): Array<{ value: string; label: string }> {
+    const profiles = profilesOf(backendId);
+    const inheritLabel = globalProfileId.value
+        ? `继承全局（${profileName(backendId, globalProfileId.value)}）`
+        : '继承全局（实例设置）';
+    return [
+        { value: '', label: inheritLabel },
+        ...profiles.map((p) => ({ value: p.id, label: p.name || p.id })),
+    ];
+}
+
+/** 配置显示名 */
+function profileName(backendId: string, profileId: string): string {
+    if (!profileId) return '';
+    const hit = profilesOf(backendId).find((p) => p.id === profileId);
+    return hit ? hit.name || hit.id : profileId;
+}
+
+/** 切换会话的下游配置 */
+async function setProfile(key: string, value: string): Promise<void> {
+    try {
+        await api.updateSession({ sessionKey: key, profileId: value });
+        await store.refresh();
+        if (value === '') {
+            toast.info('已改为继承全局配置');
+        } else {
+            const backendId = effectiveDownstream(key).backendId;
+            toast.success('该会话已切换配置', profileName(backendId, value));
+        }
+    } catch (e) {
+        toast.error('切换失败', e instanceof Error ? e.message : String(e));
+    }
+}
+
+// ---------------- 账号维度 ----------------
+
+/** 会话 key 里的账号前缀（`<accountId>:private_...`） */
+function accountOfSession(key: string): string {
+    const i = key.indexOf(':');
+    return i > 0 ? key.slice(0, i) : '';
+}
+
+/** 账号显示名（找不到时用 id 本身） */
+function accountName(accountId: string): string {
+    if (!accountId) return '';
+    const hit = (store.status?.accounts ?? []).find((a) => a.id === accountId);
+    return hit ? (hit.name || hit.id) : accountId;
+}
+
+/** 会话 key 去掉账号前缀后的部分（更易读） */
+function sessionShortKey(key: string): string {
+    const i = key.indexOf(':');
+    return i > 0 ? key.slice(i + 1) : key;
+}
+
+/** 按账号分组后的会话（同号排在一起，扫一眼就知道哪个号在用） */
+const groupedSessions = computed(() => {
+    const groups = new Map<string, string[]>();
+    for (const key of sessionKeys.value) {
+        const acc = accountOfSession(key) || '(无账号)';
+        const arr = groups.get(acc) ?? [];
+        arr.push(key);
+        groups.set(acc, arr);
+    }
+    return [...groups.entries()].map(([accountId, keys]) => ({
+        accountId,
+        keys,
+        name: accountName(accountId) || accountId,
+    }));
+});
 
 </script>
 
@@ -629,7 +746,7 @@ function isDsh(id: string): boolean {
                 <div class="min-w-0">
                     <h2 class="text-sm font-semibold tracking-tight">会话级配置</h2>
                     <p class="text-xs text-muted-foreground">
-                        每个 QQ 号可独立选择「回复后端」与角色 / 世界书。留空表示继承全局默认。
+                        每个 QQ 号可独立选择「回复下游」与「下游配置」（人设 / 对话约束 / 角色卡）。留空表示继承全局默认。
                     </p>
                 </div>
                 <UiBadge tone="outline" class="text-micro">
@@ -644,46 +761,96 @@ function isDsh(id: string): boolean {
             </div>
 
             <div v-else class="divide-y divide-border/50">
-                <div v-for="key in sessionKeys" :key="key" class="px-5 py-4">
-                    <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-                        <div class="flex flex-wrap items-center gap-2">
-                            <UiBadge tone="outline" class="font-mono text-micro">{{ key }}</UiBadge>
-                            <UiBadge v-if="!store.status?.sessionChoices[key]" tone="success">新</UiBadge>
-                            <UiBadge
-                                :tone="isDsh(effectiveDownstream(key).backendId) ? 'info' : 'success'"
-                                dot
-                                class="text-micro"
-                            >
-                                {{ downstreamName(effectiveDownstream(key).backendId) }}
-                                <span v-if="effectiveDownstream(key).inherited" class="opacity-70">（继承）</span>
-                            </UiBadge>
-                        </div>
-                        <button
-                            class="text-xs text-muted-foreground transition-colors hover:text-destructive"
-                            @click="clearAll(key)"
-                        >
-                            清除配置
-                        </button>
+                <template v-for="group in groupedSessions" :key="group.accountId">
+                    <!-- 账号分组标题 -->
+                    <div class="flex items-center gap-2 bg-accent/20 px-5 py-2">
+                        <UiBadge tone="outline" class="font-mono text-micro">
+                            {{ group.accountId || '(无账号)' }}
+                        </UiBadge>
+                        <span class="text-[11px] text-muted-foreground">
+                            {{ group.name }} · {{ group.keys.length }} 个会话
+                        </span>
                     </div>
 
-                    <!-- 回复后端：dsh / 酒馆角色对话 -->
-                    <div class="mb-3">
-                        <label class="text-xs font-medium text-muted-foreground">回复下游</label>
-                        <UiSelect
-                            :model-value="store.status?.sessionChoices[key]?.backendId ?? ''"
-                            :options="downstreamOptions"
-                            class="mt-1"
-                            @update:model-value="(v: string) => setDownstream(key, v)"
-                        />
-                        <p class="mt-1 text-[11px] text-muted-foreground/70">
-                            <template v-if="isDsh(effectiveDownstream(key).backendId)">
-                                该会话交给 dsh 直接回答，不使用下方角色卡；群聊 @ / 私聊开关与白名单仍然生效
-                            </template>
-                            <template v-else>
-                                该会话走酒馆角色对话，角色的语气与人设来自下方所选角色
-                            </template>
-                        </p>
-                    </div>
+                    <div v-for="key in group.keys" :key="key" class="px-5 py-4">
+                        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <UiBadge tone="outline" class="font-mono text-micro">
+                                    {{ sessionShortKey(key) }}
+                                </UiBadge>
+                                <UiBadge v-if="!store.status?.sessionChoices[key]" tone="success">新</UiBadge>
+                                <UiBadge
+                                    :tone="isDsh(effectiveDownstream(key).backendId) ? 'info' : 'success'"
+                                    dot
+                                    class="text-micro"
+                                >
+                                    {{ downstreamName(effectiveDownstream(key).backendId) }}
+                                    <span v-if="effectiveDownstream(key).inherited" class="opacity-70">（继承）</span>
+                                </UiBadge>
+                                <UiBadge
+                                    v-if="effectiveDownstream(key).profileId"
+                                    tone="outline"
+                                    class="text-micro"
+                                >
+                                    {{ profileName(
+                                        effectiveDownstream(key).backendId,
+                                        effectiveDownstream(key).profileId,
+                                    ) }}
+                                </UiBadge>
+                            </div>
+                            <button
+                                class="text-xs text-muted-foreground transition-colors hover:text-destructive"
+                                @click="clearAll(key)"
+                            >
+                                清除配置
+                            </button>
+                        </div>
+
+                        <!-- 回复下游：dsh / 酒馆角色对话 -->
+                        <div class="mb-3">
+                            <label class="text-xs font-medium text-muted-foreground">回复下游</label>
+                            <UiSelect
+                                :model-value="store.status?.sessionChoices[key]?.backendId ?? ''"
+                                :options="downstreamOptions"
+                                class="mt-1"
+                                @update:model-value="(v: string) => setDownstream(key, v)"
+                            />
+                            <p class="mt-1 text-[11px] text-muted-foreground/70">
+                                <template v-if="isDsh(effectiveDownstream(key).backendId)">
+                                    该会话交给 dsh 直接回答，不使用下方角色卡；群聊 @ / 私聊开关与白名单仍然生效
+                                </template>
+                                <template v-else>
+                                    该会话走酒馆角色对话，角色的语气与人设来自下方所选角色
+                                </template>
+                            </p>
+                        </div>
+
+                        <!-- 下游配置：同一实例下的不同预设 -->
+                        <div class="mb-3">
+                            <div class="flex items-center justify-between">
+                                <label class="text-xs font-medium text-muted-foreground">下游配置</label>
+                                <span
+                                    v-if="effectiveDownstream(key).profileInherited"
+                                    class="text-[10px] text-muted-foreground/70"
+                                >
+                                    继承全局
+                                </span>
+                            </div>
+                            <UiSelect
+                                :model-value="store.status?.sessionChoices[key]?.profileId ?? ''"
+                                :options="profileOptions(effectiveDownstream(key).backendId)"
+                                class="mt-1"
+                                @update:model-value="(v: string) => setProfile(key, v)"
+                            />
+                            <p class="mt-1 text-[11px] text-muted-foreground/70">
+                                <template v-if="profilesOf(effectiveDownstream(key).backendId).length === 0">
+                                    该下游还没有配置。可到「下游」页为它新建，例如不同人设或不同角色卡
+                                </template>
+                                <template v-else>
+                                    配置决定这个会话用哪套提示词 / 对话约束 / 角色卡
+                                </template>
+                            </p>
+                        </div>
 
                     <div
                         class="grid gap-3 sm:grid-cols-2"
@@ -745,7 +912,8 @@ function isDsh(id: string): boolean {
                             </span>
                         </template>
                     </p>
-                </div>
+                    </div>
+                </template>
             </div>
         </UiCard>
     </div>

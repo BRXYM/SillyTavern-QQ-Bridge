@@ -1,12 +1,24 @@
 {
-    "configVersion": 2,
+    "configVersion": 3,
     "consolePort": 9510,
     "extPort": 9500,
-    "upstream": {
-        "url": "ws://127.0.0.1:3001",
-        "token": "<YOUR_ONEBOT_TOKEN>",
-        "reconnectMs": 5000,
-        "actionTimeoutMs": 15000
+    "accounts": [
+        {
+            "id": "main",
+            "uin": "",
+            "name": "主号",
+            "enabled": true,
+            "upstream": {
+                "url": "ws://127.0.0.1:3001",
+                "token": "<YOUR_ONEBOT_TOKEN>",
+                "reconnectMs": 5000,
+                "actionTimeoutMs": 15000
+            }
+        }
+    ],
+    "snowluma": {
+        "dir": "",
+        "webuiPort": 5099
     },
     "downstreams": [
         {
@@ -21,12 +33,9 @@
                 "workRoot": "",
                 "timeoutMs": 180000,
                 "historyTurns": 6,
+                "errorReply": "",
                 "persistHistory": true,
                 "concurrency": 1,
-                "errorReply": "",
-                "serviceProfile": "web",
-                "servicePort": 3080,
-                "serviceLogFile": "",
                 "historyExtracts": [],
                 "prompt": {
                     "qqBase": false,
@@ -34,21 +43,31 @@
                     "faces": false,
                     "images": false,
                     "extra": ""
-                }
-            }
+                },
+                "serviceProfile": "web",
+                "servicePort": 3080,
+                "serviceLogFile": ""
+            },
+            "profiles": []
         },
         {
             "id": "tavern",
             "kind": "sillytavern",
             "name": "酒馆（SillyTavern）",
             "enabled": false,
-            "settings": {}
+            "settings": {
+                "stDataDir": ""
+            },
+            "profiles": []
         }
     ],
     "defaultDownstreamId": "dsh",
+    "defaultDownstreamProfileId": "",
     "trigger": {
         "atOnly": true,
-        "privateReply": true
+        "privateReply": true,
+        "allowedUsers": [],
+        "allowedGroups": []
     },
     "sessionAccess": {
         "denyUsers": [],

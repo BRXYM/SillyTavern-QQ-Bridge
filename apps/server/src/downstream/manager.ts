@@ -3,10 +3,13 @@
  *
  * 独立成模块的原因：适配器的构建 / 重建 / 自注册都要动配置，
  * 但 dispatch 层不该知道这些。这里是对外唯一的下游入口。
+ *
+ * 除了「实例」，它还负责「命名配置」的解析：会话最终要用哪一份 settings，
+ * 是实例设置与选中配置合并的结果。合并规则在 schema.mergeSettings 里。
  */
 
-import type { BridgeConfig } from '../config/schema.ts';
-import type { DownstreamConfig } from './types.ts';
+import { mergeSettings, type BridgeConfig } from '../config/schema.ts';
+import type { DownstreamConfig, DownstreamProfile } from './types.ts';
 import type { DownstreamAdapter } from './types.ts';
 import { buildAdapters, collectStatus, type AdapterDeps } from './registry.ts';
 import type { DownstreamRuntime } from '../api/context.ts';
@@ -19,6 +22,18 @@ export interface RuntimeOptions {
     /** 修改并落盘配置 */
     updateConfig: (mutate: (cfg: BridgeConfig) => void) => void;
     deps: AdapterDeps;
+}
+
+/** 某次调用实际生效的下游组合 */
+export interface ResolvedDownstream {
+    /** 实例（一定存在） */
+    config: DownstreamConfig;
+    /** 适配器；实例未启用或初始化失败时为 undefined */
+    adapter: DownstreamAdapter | undefined;
+    /** 会话选中的命名配置（未选中时为 undefined） */
+    profile: DownstreamProfile | undefined;
+    /** 合并后的设置 */
+    settings: Record<string, unknown>;
 }
 
 export class DownstreamManager implements DownstreamRuntime {
@@ -55,9 +70,34 @@ export class DownstreamManager implements DownstreamRuntime {
         return this.adapters.get(id);
     }
 
-    /** 状态快照（含未启用的配置项） */
-    status(): ReturnType<typeof collectStatus> {
-        return collectStatus(this.adapters, this.options.config().downstreams);
+    /**
+     * 解析「实例 + 配置」并算出实际生效的设置。
+     *
+     * `profileId` 是会话层已经算好的最终结果（含全局默认与归属判断），
+     * 这里不再二次套用默认值 —— 否则「会话显式选了空配置」会被默认值覆盖。
+     * 配置找不到时退回实例设置，并记日志，避免静默用错配置。
+     */
+    resolve(
+        downstreamId: string,
+        profileId: string,
+    ): ResolvedDownstream | undefined {
+        const cfg = this.options.config();
+        const downstream = cfg.downstreams.find((d) => d.id === downstreamId);
+        if (!downstream) return undefined;
+
+        const profile = profileId
+            ? downstream.profiles.find((p) => p.id === profileId)
+            : undefined;
+        if (profileId && !profile) {
+            log(`⚠ 下游 ${downstreamId} 下找不到配置 ${profileId}，已退回实例设置`);
+        }
+
+        return {
+            config: downstream,
+            adapter: this.adapters.get(downstreamId),
+            profile,
+            settings: mergeSettings(downstream.settings, profile?.settings),
+        };
     }
 
     /**
@@ -128,6 +168,7 @@ export class DownstreamManager implements DownstreamRuntime {
             name: entry.name,
             enabled: true,
             settings: entry.settings ?? {},
+            profiles: [],
         };
 
         this.options.updateConfig((c) => {

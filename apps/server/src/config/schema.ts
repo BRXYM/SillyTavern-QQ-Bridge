@@ -3,13 +3,15 @@
  *
  * 与旧版的区别：
  *   - 触发规则、分段、管道等**全局**设置保留在顶层。
- *   - 上游（SnowLuma）独立成 `upstream`。
+ *   - 上游从「一条连接」变成 `accounts` 数组：一个 Bridge 可以接多个 QQ 号，
+ *     每个号对应 SnowLuma 的一个 OneBot 端点（端口与 token 各自独立）。
  *   - 下游从「一个全局 backend 枚举」变成 `downstreams` 实例数组，
- *     会话用 `backendId` 指向其中一个实例。
+ *     每个实例下面还可以有多个**命名配置**（profiles），
+ *     会话用 `backendId` + `downstreamProfileId` 指向具体组合。
  *   - 旧配置的 `backend: 'taver' | 'dsh'` 会被 migrate 成等价的实例。
  */
 
-import type { DownstreamConfig } from '../downstream/types.ts';
+import type { DownstreamConfig, DownstreamProfile } from '../downstream/types.ts';
 import type { ProcessorRule, SegmentationConfig as SharedSegmentation } from '@bridge/shared';
 
 /** 复用 @bridge/shared 的规则类型，避免两处定义漂移 */
@@ -69,7 +71,14 @@ export interface DefaultsConfig {
     world: string;
 }
 
-export interface UpstreamConfig {
+/**
+ * 一个上游 QQ 号（= SnowLuma 的一个 OneBot 端点）。
+ *
+ * 为什么不是「一个全局 upstream」：SnowLuma 每个 QQ 号有独立的
+ * `onebot_<uin>.json`，WS 端口与 access token 都不同。要让 Bridge
+ * 同时服务多个号，就必须按号各连一条。
+ */
+export interface AccountUpstreamConfig {
     /** OneBot v11 WS 地址 */
     url: string;
     /** Access token，空则不拼 */
@@ -78,6 +87,21 @@ export interface UpstreamConfig {
     reconnectMs: number;
     /** 单次 action 超时 */
     actionTimeoutMs: number;
+}
+
+export interface AccountConfig {
+    /**
+     * 稳定标识。作为会话 key 前缀，一旦使用就不应再改 ——
+     * 改它等于把所有会话的下游绑定和历史切断。
+     */
+    id: string;
+    /** QQ 号；可以留空（连上后从 lifecycle 事件补），只用于显示 */
+    uin: string;
+    /** 备注名，如「主号」「测试号」 */
+    name: string;
+    enabled: boolean;
+    /** 该号对应的 SnowLuma OneBot 端点 */
+    upstream: AccountUpstreamConfig;
 }
 
 export interface FacesConfig {
@@ -96,18 +120,22 @@ export interface SnowLumaConfig {
 }
 
 export interface BridgeConfig {
+    /** 配置结构版本；用于判断要不要迁移 */
+    configVersion: number;
     /** HTTP API 端口（控制台） */
     consolePort: number;
     /** 下游入站 WS 端口（酒馆扩展 / dsh 插件都连这里） */
     extPort: number;
-    /** 上游 OneBot */
-    upstream: UpstreamConfig;
+    /** 上游 QQ 号列表；至少一个 */
+    accounts: AccountConfig[];
     /** 上游软件本体的安装信息 */
     snowluma: SnowLumaConfig;
     /** 下游实例列表 */
     downstreams: DownstreamConfig[];
     /** 会话未指定时使用的下游 id；空 = 用列表里第一个启用的 */
     defaultDownstreamId: string;
+    /** 会话未指定配置时，该下游使用的默认配置 id；空 = 用该下游的默认配置 */
+    defaultDownstreamProfileId: string;
     trigger: TriggerConfig;
     /** 会话准入：身份门槛（黑白名单） */
     sessionAccess: SessionAccessConfig;
@@ -143,15 +171,27 @@ export const DEFAULT_SEGMENTATION: SegmentationConfig = {
     delayMs: [300, 900],
 };
 
+/** 默认上游端口：与 SnowLuma 的 onebot_<uin>.json 默认一致 */
+export const DEFAULT_UPSTREAM_PORT = 3001;
+
 export const DEFAULT_CONFIG: BridgeConfig = {
+    configVersion: 3,
     consolePort: 9510,
     extPort: 9500,
-    upstream: {
-        url: 'ws://127.0.0.1:3001',
-        token: '',
-        reconnectMs: 5000,
-        actionTimeoutMs: 15000,
-    },
+    accounts: [
+        {
+            id: 'main',
+            uin: '',
+            name: '主号',
+            enabled: true,
+            upstream: {
+                url: `ws://127.0.0.1:${DEFAULT_UPSTREAM_PORT}`,
+                token: '',
+                reconnectMs: 5000,
+                actionTimeoutMs: 15000,
+            },
+        },
+    ],
     snowluma: {
         dir: '',
         webuiPort: 5099,
@@ -189,6 +229,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
                 servicePort: 3080,
                 serviceLogFile: '',
             },
+            profiles: [],
         },
         {
             id: 'tavern',
@@ -198,9 +239,11 @@ export const DEFAULT_CONFIG: BridgeConfig = {
             settings: {
                 stDataDir: '',
             },
+            profiles: [],
         },
     ],
     defaultDownstreamId: 'dsh',
+    defaultDownstreamProfileId: '',
     trigger: {
         atOnly: true,
         privateReply: true,
@@ -229,3 +272,43 @@ export const DEFAULT_CONFIG: BridgeConfig = {
     },
     registrationToken: '',
 };
+
+/** 下游实例的命名配置查找（找不到返回 undefined） */
+export function findProfile(
+    downstream: DownstreamConfig | undefined,
+    profileId: string,
+): DownstreamProfile | undefined {
+    if (!downstream || !profileId) return undefined;
+    return downstream.profiles?.find((p) => p.id === profileId);
+}
+
+/**
+ * 把实例设置与选定配置合并成实际生效的设置。
+ *
+ * 配置只覆盖它显式给出的键：没写的键继续用实例设置，
+ * 这样「实例设置」可以保存跨配置共用的部分（如 dsh 可执行文件路径），
+ * 而每个配置只描述差异（如人设、对话约束）。
+ */
+export function mergeSettings(
+    base: Record<string, unknown>,
+    override: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+    if (!override) return base;
+    const out: Record<string, unknown> = { ...base };
+    for (const [key, value] of Object.entries(override)) {
+        // 嵌套对象（如 prompt）逐键合并，避免配置只写一个开关就把其余抹掉
+        if (
+            value
+            && typeof value === 'object'
+            && !Array.isArray(value)
+            && out[key]
+            && typeof out[key] === 'object'
+            && !Array.isArray(out[key])
+        ) {
+            out[key] = { ...(out[key] as Record<string, unknown>), ...(value as Record<string, unknown>) };
+        } else {
+            out[key] = value;
+        }
+    }
+    return out;
+}

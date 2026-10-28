@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue';
 import {
     Server, Play, Square, RotateCw, Download, ExternalLink, FolderOpen, RefreshCw,
     Wand2, CheckCircle2, AlertTriangle, Info, Copy, Trash2, Save, Eye, EyeOff,
-    Plug,
+    Plug, Plus,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -90,48 +90,128 @@ const snowState = computed<'running' | 'stopped' | 'unknown'>(() => {
     return snowRunning.value ? 'running' : 'stopped';
 });
 
-// ---------------- OneBot 连接（原系统设置页迁入） ----------------
-const onebotUrl = ref('ws://127.0.0.1:3001');
-const onebotToken = ref('');
-const showToken = ref(false);
-const savingOnebot = ref(false);
+// ---------------- 上游账号（多账号） ----------------
+// 每一个账号对应 SnowLuma 的一个 OneBot 端点。这里只做增删改，
+// 地址与 Token 通常由下面的「自动配置连接」写入，不必手填。
+
 const loadingOnebot = ref(false);
-/** 已保存值的快照，用于判断脏状态 */
-const onebotSnapshot = ref('');
+
+interface AccountForm {
+    id: string;
+    uin: string;
+    name: string;
+    enabled: boolean;
+    url: string;
+    token: string;
+}
+
+const accounts = ref<Array<AccountForm & {
+    running: boolean;
+    connected: boolean;
+    selfId: string;
+    nickname: string;
+    lastError: string;
+}>>([]);
+const loadingAccounts = ref(false);
+const savingAccount = ref(false);
+/** 正在编辑的账号 id（空 = 新增表单收起） */
+const editingAccount = ref<AccountForm | null>(null);
 
 const upstreamConnected = computed(() => store.onebotConnected);
 
-const onebotDirty = computed(
-    () => `${onebotUrl.value}\u0000${onebotToken.value}` !== onebotSnapshot.value,
-);
-
-function syncOnebotFromStore() {
-    const c = store.status?.config as Record<string, unknown> | undefined;
-    if (!c) return;
-    onebotUrl.value = (c['onebotUrl'] as string) ?? 'ws://127.0.0.1:3001';
-    onebotToken.value = (c['onebotToken'] as string) ?? '';
-    onebotSnapshot.value = `${onebotUrl.value}\u0000${onebotToken.value}`;
-}
-
-async function saveOnebot() {
-    savingOnebot.value = true;
+async function loadAccounts(silent = false): Promise<void> {
+    loadingAccounts.value = true;
     try {
-        await api.updateConfig({
-            onebotUrl: onebotUrl.value.trim(),
-            onebotToken: onebotToken.value.trim(),
-        });
-        await store.refresh();
-        syncOnebotFromStore();
-        toast.success('连接配置已保存', '上游连接参数变更后会自动重连');
+        const r = await api.accounts();
+        accounts.value = r.accounts.map((a) => ({
+            id: a.id,
+            uin: a.uin,
+            name: a.name,
+            enabled: a.enabled,
+            url: a.upstream.url,
+            token: a.upstream.token,
+            running: a.running,
+            connected: a.connected,
+            selfId: a.selfId,
+            nickname: a.nickname,
+            lastError: a.lastError,
+        }));
     } catch (e) {
-        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+        if (!silent) toast.error('读取账号失败', e instanceof Error ? e.message : String(e));
     } finally {
-        savingOnebot.value = false;
+        loadingAccounts.value = false;
     }
 }
 
-/** 从 SnowLuma 的 onebot_<uin>.json 读取地址与 Token 并填入表单 */
-async function loadOnebotFromSnowLuma() {
+function newAccount(): void {
+    // id 用序号，用户可改；uin 留空也行（连上后自动识别）
+    editingAccount.value = {
+        id: `account_${accounts.value.length + 1}`,
+        uin: '',
+        name: '',
+        enabled: true,
+        url: 'ws://127.0.0.1:3001',
+        token: '',
+    };
+}
+
+function editAccount(a: AccountForm): void {
+    editingAccount.value = { ...a };
+}
+
+async function saveAccount(): Promise<void> {
+    const acc = editingAccount.value;
+    if (!acc) return;
+    if (!acc.url.trim()) {
+        toast.warning('请填写 OneBot 地址');
+        return;
+    }
+
+    savingAccount.value = true;
+    try {
+        await api.saveAccount({
+            id: acc.id.trim(),
+            uin: acc.uin.trim(),
+            name: acc.name.trim() || acc.uin.trim() || acc.id,
+            enabled: acc.enabled,
+            upstream: {
+                url: acc.url.trim(),
+                token: acc.token.trim(),
+                reconnectMs: 5000,
+                actionTimeoutMs: 15000,
+            },
+        });
+        editingAccount.value = null;
+        await loadAccounts(true);
+        await store.refresh();
+        toast.success('账号已保存', `${acc.id} · 配置变更后会立即重连`);
+    } catch (e) {
+        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        savingAccount.value = false;
+    }
+}
+
+async function removeAccount(id: string): Promise<void> {
+    if (accounts.value.length <= 1) {
+        toast.warning('不能删除', '至少要保留一个账号');
+        return;
+    }
+    try {
+        const r = await api.deleteAccount(id);
+        await loadAccounts(true);
+        await store.refresh();
+        toast.success(
+            '账号已删除',
+            r.removedSessions > 0 ? `连带清除了 ${r.removedSessions} 个会话配置` : undefined,
+        );
+    } catch (e) {
+        toast.error('删除失败', e instanceof Error ? e.message : String(e));
+    }
+}
+
+/** 从 SnowLuma 的 onebot_<uin>.json 读取地址与 Token，回填到编辑表单 */
+async function fillAccountFromSnowLuma() {
     const uin = snowUin.value.trim();
     if (!uin) {
         toast.warning('请先填写 QQ 号', '需要 QQ 号才能定位对应账号的配置');
@@ -151,9 +231,25 @@ async function loadOnebotFromSnowLuma() {
         const host = ws.host || '127.0.0.1';
         const port = ws.port ?? 3001;
         const p = ws.path && ws.path !== '/' ? ws.path : '';
-        onebotUrl.value = `ws://${host}:${port}${p}`;
-        if (ws.accessToken) onebotToken.value = ws.accessToken;
-        toast.success('已读取 SnowLuma 配置', `${onebotUrl.value} · ${ws.accessToken ? '含 Token' : '无 Token'}`);
+        const url = `ws://${host}:${port}${p}`;
+
+        // 有正在编辑的表单就回填它，否则给这个号新建一个
+        const target = editingAccount.value ?? {
+            id: `qq_${uin}`,
+            uin,
+            name: `QQ ${uin}`,
+            enabled: true,
+            url,
+            token: ws.accessToken ?? '',
+        };
+        target.url = url;
+        if (ws.accessToken) target.token = ws.accessToken;
+        editingAccount.value = { ...target };
+
+        toast.success(
+            '已读取 SnowLuma 配置',
+            `${url} · ${ws.accessToken ? '含 Token' : '无 Token'}`,
+        );
     } catch (e) {
         toast.error('读取失败', e instanceof Error ? e.message : String(e));
     } finally {
@@ -245,13 +341,14 @@ onMounted(async () => {
     await store.refresh();
     const cfg = store.status?.config as Record<string, unknown> | undefined;
 
-    // OneBot 连接表单
-    syncOnebotFromStore();
+    // 账号列表
+    void loadAccounts(true);
 
-    const saved = cfg?.['snowlumaDir'];
+    const sl = (cfg?.['snowluma'] ?? {}) as Record<string, unknown>;
+    const saved = sl['dir'];
     if (typeof saved === 'string' && saved) {
         snowDir.value = saved;
-        const p = cfg?.['snowlumaWebuiPort'];
+        const p = sl['webuiPort'];
         if (typeof p === 'number' && p > 0) snowWebuiPort.value = p;
         // 进入页面自动探测：静默，不弹通知
         void doProbe({ silent: true });
@@ -259,7 +356,10 @@ onMounted(async () => {
         // 首次使用：自动尝试定位 SnowLuma（静默）
         void doDiscover({ silent: true });
     }
-    const url = cfg?.['onebotUrl'];
+
+    // OneBot 端口：取第一个账号的地址
+    const firstAcc = (cfg?.['accounts'] as Array<{ upstream?: { url?: string } }> | undefined)?.[0];
+    const url = firstAcc?.upstream?.url;
     if (typeof url === 'string') {
         const m = url.match(/:(\d+)/);
         if (m) snowPort.value = Number(m[1]);
@@ -550,81 +650,125 @@ async function toggleHook(enabled: boolean): Promise<void> {
                 </UiButton>
             </div>
 
-            <!-- OneBot 连接（原系统设置页迁入） -->
+            <!-- 上游账号（多账号） -->
             <div class="border-t border-border/40 px-5 py-4">
-                <div class="mb-3 flex items-center justify-between">
+                <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <div>
-                        <h3 class="text-[13px] font-semibold tracking-tight">OneBot 连接</h3>
+                        <h3 class="text-[13px] font-semibold tracking-tight">上游账号</h3>
                         <p class="text-xs text-muted-foreground">
-                            Bridge 主动连接 SnowLuma 的 WebSocket 服务端
+                            每个账号对应 SnowLuma 的一个 OneBot 端点，可以同时接多个 QQ 号
                         </p>
                     </div>
-                    <UiBadge
-                        :tone="upstreamConnected ? 'success' : 'secondary'"
-                        dot
-                        :pulse="upstreamConnected"
-                        class="shrink-0"
-                    >
-                        {{ upstreamConnected ? '已连接' : '未连接' }}
-                    </UiBadge>
+                    <UiButton size="sm" variant="outline" @click="newAccount">
+                        <Plus class="size-4" />
+                        添加账号
+                    </UiButton>
                 </div>
 
-                <div class="grid gap-4 sm:grid-cols-2">
-                    <div>
-                        <label class="text-xs font-medium text-muted-foreground">WebSocket 地址</label>
-                        <UiInput v-model="onebotUrl" class="mt-1.5" mono placeholder="ws://127.0.0.1:3001" />
-                    </div>
-                    <div>
-                        <label class="text-xs font-medium text-muted-foreground">Access Token</label>
-                        <div class="mt-1.5 flex items-center gap-2">
-                            <UiInput
-                                v-model="onebotToken"
-                                :type="showToken ? 'text' : 'password'"
-                                class="flex-1"
-                                mono
-                                placeholder="留空 = 不鉴权"
-                            />
-                            <UiButton
-                                variant="ghost"
-                                size="icon"
-                                :title="showToken ? '隐藏 Token' : '显示 Token'"
-                                @click="showToken = !showToken"
+                <!-- 账号列表 -->
+                <div v-if="accounts.length === 0" class="rounded-md border border-dashed border-border/60 px-3 py-3">
+                    <p class="text-[11px] text-muted-foreground">
+                        还没有账号。填好上面的 QQ 号后点「自动配置连接」会自动创建一个。
+                    </p>
+                </div>
+
+                <div v-else class="flex flex-col gap-2">
+                    <div
+                        v-for="acc in accounts"
+                        :key="acc.id"
+                        class="rounded-md border border-border/60 px-3 py-2.5"
+                    >
+                        <div class="flex flex-wrap items-center gap-2">
+                            <UiBadge
+                                :tone="acc.connected ? 'success' : (acc.enabled ? 'secondary' : 'outline')"
+                                dot
+                                :pulse="acc.connected"
                             >
-                                <Eye v-if="!showToken" class="size-4" />
-                                <EyeOff v-else class="size-4" />
+                                {{ acc.connected ? '在线' : (acc.enabled ? '离线' : '已停用') }}
+                            </UiBadge>
+                            <span class="font-mono text-[12px]">{{ acc.id }}</span>
+                            <span class="text-[12px] text-muted-foreground">
+                                {{ acc.name }}<template v-if="acc.uin"> · {{ acc.uin }}</template>
+                                <template v-if="acc.selfId && acc.selfId !== acc.uin">
+                                    ● 实际 {{ acc.selfId }}
+                                </template>
+                            </span>
+                            <div class="flex-1" />
+                            <UiButton size="sm" variant="ghost" @click="editAccount(acc)">
+                                <Save class="size-3.5" />
+                                编辑
+                            </UiButton>
+                            <UiButton
+                                size="sm"
+                                variant="ghost"
+                                :disabled="accounts.length <= 1"
+                                @click="removeAccount(acc.id)"
+                            >
+                                <Trash2 class="size-3.5" />
                             </UiButton>
                         </div>
+                        <p class="mt-1 truncate font-mono text-[11px] text-muted-foreground/80">
+                            {{ acc.url }}
+                        </p>
+                        <p v-if="acc.lastError" class="mt-0.5 truncate text-[11px] text-destructive">
+                            {{ acc.lastError }}
+                        </p>
                     </div>
                 </div>
 
-                <div class="mt-3 flex flex-wrap items-center gap-2">
-                    <UiButton size="sm" :disabled="savingOnebot || !onebotDirty" @click="saveOnebot">
-                        <Save class="size-4" />
-                        {{ savingOnebot ? '保存中…' : '保存连接配置' }}
-                    </UiButton>
-                    <UiButton
-                        variant="outline"
-                        size="sm"
-                        :disabled="loadingOnebot || !snowDir"
-                        @click="loadOnebotFromSnowLuma"
-                    >
-                        <Download class="size-4" />
-                        {{ loadingOnebot ? '读取中…' : '从 SnowLuma 读取' }}
-                    </UiButton>
-                    <span v-if="onebotDirty" class="text-[11px] text-warning">有未保存的修改</span>
-                    <div class="flex-1" />
-                    <span class="hidden text-[11px] text-muted-foreground sm:block">
-                        端口须与上方 OneBot 端口一致
-                    </span>
-                </div>
-            </div>
+                <!-- 编辑 / 新增表单 -->
+                <div v-if="editingAccount" class="mt-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-3">
+                    <div class="grid gap-3 sm:grid-cols-2">
+                        <div>
+                            <label class="text-xs font-medium text-muted-foreground">账号 id</label>
+                            <UiInput v-model="editingAccount.id" class="mt-1.5" mono placeholder="qq_123456" />
+                            <p class="mt-1 text-[10px] text-muted-foreground/70">
+                                作为会话前缀，创建后不建议再改（改了等于断开它名下的会话）
+                            </p>
+                        </div>
+                        <div>
+                            <label class="text-xs font-medium text-muted-foreground">QQ 号</label>
+                            <UiInput v-model="editingAccount.uin" class="mt-1.5" mono placeholder="可留空，连上后自动识别" />
+                        </div>
+                        <div>
+                            <label class="text-xs font-medium text-muted-foreground">备注名</label>
+                            <UiInput v-model="editingAccount.name" class="mt-1.5" placeholder="主号 / 测试号" />
+                        </div>
+                        <div>
+                            <label class="text-xs font-medium text-muted-foreground">WebSocket 地址</label>
+                            <UiInput v-model="editingAccount.url" class="mt-1.5" mono placeholder="ws://127.0.0.1:3001" />
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="text-xs font-medium text-muted-foreground">Access Token</label>
+                            <UiInput v-model="editingAccount.token" class="mt-1.5" mono placeholder="留空 = 不鉴权" />
+                        </div>
+                    </div>
 
-            <div class="border-t border-border/40 px-5 py-3">
-                <p class="flex items-start gap-1.5 text-xs text-muted-foreground">
+                    <div class="mt-3 flex flex-wrap items-center gap-2">
+                        <UiButton size="sm" :disabled="savingAccount" @click="saveAccount">
+                            <Save class="size-4" />
+                            {{ savingAccount ? '保存中…' : '保存' }}
+                        </UiButton>
+                        <UiButton
+                            variant="outline"
+                            size="sm"
+                            :disabled="loadingOnebot || !snowDir"
+                            @click="fillAccountFromSnowLuma"
+                        >
+                            <Download class="size-4" />
+                            {{ loadingOnebot ? '读取中…' : '从 SnowLuma 读取' }}
+                        </UiButton>
+                        <UiButton variant="ghost" size="sm" @click="editingAccount = null">
+                            取消
+                        </UiButton>
+                    </div>
+                </div>
+
+                <p class="mt-3 flex items-start gap-1.5 text-xs text-muted-foreground">
                     <Info class="mt-0.5 size-3.5 shrink-0" />
                     「自动配置连接」会写入
                     <code class="mx-1 font-mono">config/onebot_&lt;QQ号&gt;.json</code>
-                    的 wsServer，并把地址与 Token 同步到 Bridge 的上游连接，无需手动复制粘贴
+                    的 wsServer，并为该号建立/复用对应账号，无需手动复制粘贴
                 </p>
             </div>
         </UiCard>
