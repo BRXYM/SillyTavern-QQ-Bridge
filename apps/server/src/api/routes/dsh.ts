@@ -17,6 +17,7 @@ import {
     PLUGIN_NAME,
     PLUGIN_ROW_ID,
     injectPlugin,
+    isExternallyManagedProfile,
     listProfileBundles,
     pluginTargetDir,
     probeInjection,
@@ -232,6 +233,39 @@ export function registerDshRoutes(router: Router, app: AppContext, deps: DshRout
             unrelated?: boolean;
             unrelatedReason?: string;
         } | null = null;
+
+        /**
+         * 外部应用（Electron 桌面版）独占管理的 profile：
+         * CLI 会直接拒绝 `--dump-config`，但文件本身可以被写入并由应用**热加载**。
+         *
+         * 所以这里不能校验、也不该回滚 —— 回滚会把插件从共享目录里删掉，
+         * 顺带把别的 profile（比如 web）也弄坏，这是已经踩过的一次。
+         * 正确做法：保留注入，提示用户重启该应用。
+         */
+        const external = isExternallyManagedProfile(profile, settings.exePath, dshHome());
+        if (external) {
+            log(`dsh：profile ${profile} 由外部应用管理，跳过 CLI 校验（文件已写入，应用会热加载）`);
+
+            const online = ((app.downstreams.get(settings.downstreamId ?? 'dsh') as unknown as {
+                onlineCount?: () => number;
+            } | undefined)?.onlineCount?.() ?? 0) > 0;
+
+            json(res, 200, {
+                ok: true,
+                stage: 'external-managed',
+                verified: null,
+                inject,
+                rolledBack: false,
+                restart: null,
+                online,
+                message: online
+                    ? `插件已写入 profile ${profile}，且已连上 Bridge。`
+                    : `插件已写入 profile ${profile}。该 profile 由 dsh 桌面版管理，`
+                        + 'CLI 无法校验；桌面版会热加载配置，稍等几秒或重启它即可生效。',
+            });
+            return;
+        }
+
         if (body.verify !== false) {
             const v = verifyInjection({ exePath: settings.exePath, profile, home: dshHome() });
             verified = v;

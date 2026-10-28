@@ -209,6 +209,39 @@ function readManifest(profileDir) {
     return JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
 }
 
+/**
+ * 该 profile 是否由外部应用（Electron 桌面版）独占管理。
+ *
+ * 桌面版在 `--dump-config` 时会直接拒绝：
+ *   profile "desktop" is managed exclusively by the Electron application
+ *
+ * 这类 profile 的配置文件仍然可以被写入并被应用**热加载**，
+ * 只是不能通过 CLI 校验。所以识别出来后应跳过校验、
+ * 保留注入，而不是把它当成"写坏了"去回滚。
+ *
+ * 为什么不写死 profile 名：谁能保证以后只有 desktop 这一个？
+ * 以 CLI 的实际报错为准更稳。
+ */
+export function isExternallyManagedProfile(profile, exePath, home) {
+    const exe = exePath || findDshExe();
+    if (!exe) return false;
+    try {
+        const { cmd, argv, useShell } = buildSpawnArgs(exe, ['--profile', profile, '--dump-config']);
+        execFileSync(cmd, argv, {
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 30000,
+            shell: useShell,
+            env: { ...process.env, DSH_HOME: home },
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        return false;
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return /managed exclusively by the Electron application/i.test(msg);
+    }
+}
+
 /** 原子写 profile 的 package.json（2 空格 + 结尾换行，与 dsh 自己一致） */
 function writeManifest(profileDir, manifest) {
     const file = path.join(profileDir, 'package.json');

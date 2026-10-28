@@ -172,6 +172,18 @@ declare module '*dsh-profile-service.mjs' {
         unrelatedReason?: string;
     };
 
+    /**
+     * 该 profile 是否由外部应用（Electron 桌面版）独占管理。
+     *
+     * 这类 profile 允许写文件、由应用热加载，但 CLI 拒绝 `--dump-config`，
+     * 因此不能校验，也不应回滚。
+     */
+    export function isExternallyManagedProfile(
+        profile: string,
+        exePath: string | undefined,
+        home: string,
+    ): boolean;
+
     export interface ServiceStatusInfo {
         profile: string;
         host: string;
