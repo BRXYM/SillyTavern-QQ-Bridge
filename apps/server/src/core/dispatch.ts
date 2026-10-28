@@ -118,7 +118,12 @@ export interface SessionAccess {
     /** 白名单：非空时只允许这些（用户与群分别判断） */
     allowUsers: number[];
     allowGroups: number[];
-    /** 新会话（未配置且不在任何名单里）的策略 */
+    /**
+     * 不在任何名单里时的策略。
+     *
+     * 对用户白名单与群白名单分别生效：某个名单为空时，
+     * 该维度的所有对象都算"不在名单里"，由这里决定放行还是拒绝。
+     */
     unknownPolicy: 'allow' | 'deny';
     /** 拒绝时回给 QQ 的一句话；空 = 静默 */
     denyReply: string;
@@ -139,7 +144,13 @@ export interface AccessVerdict {
     reason?: string;
     /** 回给 QQ 的提示（可能为空 = 静默） */
     reply?: string;
-    /** 是否属于"新会话未配置"这一情形 */
+    /**
+     * 是否属于「不在任何名单里」这一情形（值取自 unknownPolicy）。
+     *
+     * 注意：这与「这个会话以前有没有建过档」无关。以前用会话是否已存在
+     * 来判断，导致同一个陌生人第一次被拒、第二次就被当成"老会话"放行 ——
+     * 准入等于只生效一次。
+     */
     unknown?: boolean;
 }
 
@@ -148,14 +159,29 @@ const sameId = (a: unknown, b: unknown): boolean => String(a) === String(b);
 /**
  * 判断一条消息是否允许进入处理流程。
  *
- * @param access   会话准入配置
- * @param ids      本条消息归属的用户与群
- * @param configured 该会话是否已有配置（决定"新会话"策略是否生效）
+ * 判定只看**名单**，不看这个会话以前有没有来过：
+ *
+ *   - 命中黑名单            → 拒绝
+ *   - 在黑名单之外：
+ *       有白名单且命中      → 放行
+ *       有白名单但没命中    → 按 unknownPolicy（allow 放行 / deny 拒绝）
+ *       白名单为空          → 按 unknownPolicy（allow 放行 / deny 拒绝）
+ *
+ * 最后一条是这次修的重点：原实现只要白名单为空就无条件放行，
+ * 于是「白名单为空 + unknownPolicy=deny」这种配置形同虚设 ——
+ * 用户把新会话策略设成"拒绝"，实际一条都没拦住。
+ *
+ * 为什么不看「会话是否已建档」：
+ * dispatch 在处理任何一条消息时都会 ensure() 建档，所以只要这个人
+ * 成功说过一句话，之后他就永远是"已配置"，unknownPolicy 再也没机会生效。
+ * 那是把"来过"误当成"被授权"，不是准入该有的语义。
+ *
+ * @param access 会话准入配置
+ * @param ids    本条消息归属的用户与群
  */
 export function checkSessionAccess(
     access: SessionAccess | undefined,
     ids: { userId: number; groupId: number | null },
-    configured: boolean,
 ): AccessVerdict {
     const a = access ?? DEFAULT_SESSION_ACCESS;
 
@@ -164,57 +190,62 @@ export function checkSessionAccess(
     const allowUsers = Array.isArray(a.allowUsers) ? a.allowUsers : [];
     const allowGroups = Array.isArray(a.allowGroups) ? a.allowGroups : [];
 
-    // 黑名单优先：任一命中即拒
+    const denyReply = String(a.denyReply ?? '').trim();
+    const unknownDenied = a.unknownPolicy === 'deny';
+
+    // ---- 1. 黑名单：命中即拒（优先级最高）----
     if (denyUsers.some((u) => sameId(u, ids.userId))) {
         return {
             allowed: false,
             reason: `用户 ${ids.userId} 在会话黑名单里`,
-            reply: String(a.denyReply ?? '').trim(),
+            reply: denyReply,
         };
     }
     if (ids.groupId !== null && denyGroups.some((g) => sameId(g, ids.groupId))) {
         return {
             allowed: false,
             reason: `群 ${ids.groupId} 在会话黑名单里`,
-            reply: String(a.denyReply ?? '').trim(),
+            reply: denyReply,
         };
     }
 
-    // 白名单：非空时必须命中
-    const userListed = allowUsers.length > 0
-        ? allowUsers.some((u) => sameId(u, ids.userId))
-        : true;
-    const groupListed = allowGroups.length > 0 && ids.groupId !== null
-        ? allowGroups.some((g) => sameId(g, ids.groupId))
-        : true;
-
-    if (!userListed) {
-        // 不在白名单：区分"新会话"和"已知但被禁"
-        if (!configured) {
-            if (a.unknownPolicy === 'deny') {
-                return {
-                    allowed: false,
-                    unknown: true,
-                    reason: `新会话用户 ${ids.userId} 未在白名单，且策略为拒绝`,
-                    reply: String(a.denyReply ?? '').trim(),
-                };
-            }
-            // 未配置但策略放行 → 继续
-        } else {
+    // ---- 2. 用户白名单 ----
+    // 非空：必须命中；为空：交给 unknownPolicy
+    if (allowUsers.length > 0) {
+        if (!allowUsers.some((u) => sameId(u, ids.userId))) {
             return {
                 allowed: false,
                 reason: `用户 ${ids.userId} 不在会话白名单里`,
-                reply: String(a.denyReply ?? '').trim(),
+                reply: denyReply,
             };
         }
-    }
-
-    if (!groupListed) {
+    } else if (unknownDenied) {
         return {
             allowed: false,
-            reason: `群 ${ids.groupId} 不在会话白名单里`,
-            reply: String(a.denyReply ?? '').trim(),
+            unknown: true,
+            reason: `用户 ${ids.userId} 不在任何名单里，且新会话策略为拒绝`,
+            reply: denyReply,
         };
+    }
+
+    // ---- 3. 群白名单 ----
+    if (ids.groupId !== null) {
+        if (allowGroups.length > 0) {
+            if (!allowGroups.some((g) => sameId(g, ids.groupId))) {
+                return {
+                    allowed: false,
+                    reason: `群 ${ids.groupId} 不在会话白名单里`,
+                    reply: denyReply,
+                };
+            }
+        } else if (unknownDenied) {
+            return {
+                allowed: false,
+                unknown: true,
+                reason: `群 ${ids.groupId} 不在任何名单里，且新会话策略为拒绝`,
+                reply: denyReply,
+            };
+        }
     }
 
     return { allowed: true };
@@ -326,21 +357,21 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     const senderName = String(event.sender?.card || event.sender?.nickname || userId);
 
     // ---- 会话准入（QQ 黑白名单）----
-    // 必须在建档之前判断：一旦 ensure() 建了档，"新会话"就不存在了，
-    // unknownPolicy 也就永远不会生效。
-    const configured = Boolean(deps.sessions.get(sessionKey));
-    const verdict = checkSessionAccess(config.sessionAccess, { userId, groupId }, configured);
+    // 只看名单，不看这个会话以前是否来过：dispatch 处理任何消息都会 ensure()
+    // 建档，若用"是否已建档"判断准入，陌生人成功说过一句话之后就会被永久放行。
+    const verdict = checkSessionAccess(config.sessionAccess, { userId, groupId });
     if (!verdict.allowed) {
         log(`⛔ 会话 [${sessionKey}] 被拒：${verdict.reason}`);
+        // 被拒也要留痕，控制台才能"看到有人在敲门"并一键加白
+        if (verdict.unknown) {
+            deps.sessions.notePending(sessionKey, { userId, groupId, messageType, senderName });
+        }
         if (verdict.reply) {
             await sendReply(
                 deps.sending,
                 { accountId, messageType, groupId, userId, sessionKey },
                 verdict.reply,
             );
-        }
-        if (verdict.unknown) {
-            deps.sessions.notePending?.(sessionKey, { userId, groupId, messageType, senderName });
         }
         return;
     }

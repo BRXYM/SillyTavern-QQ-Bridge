@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { Users, Star, Save, RotateCcw, Info, SlidersHorizontal, ShieldCheck } from 'lucide-vue-next';
+import { Users, Star, Save, RotateCcw, Info, SlidersHorizontal, ShieldCheck, AlertTriangle } from 'lucide-vue-next';
 import { useStatusStore } from '@/stores/status';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
@@ -672,9 +672,9 @@ const groupedSessions = computed(() => {
             <div class="border-t border-border/40 px-5 py-4">
                 <div class="flex flex-wrap items-center justify-between gap-3">
                     <div class="min-w-0">
-                        <p class="text-sm">新会话（未配置过的对象）</p>
+                        <p class="text-sm">不在任何名单里时</p>
                         <p class="text-xs text-muted-foreground">
-                            白名单非空时，第一次来的陌生人怎么处理
+                            黑名单之外、又没被白名单命中的对象怎么处理（白名单为空时对所有人生效）
                         </p>
                     </div>
                     <UiSelect
@@ -696,6 +696,14 @@ const groupedSessions = computed(() => {
                     />
                     <p class="mt-1 text-[11px] text-muted-foreground/70">
                         例如「请先联系管理员授权」；留空则完全不回复
+                    </p>
+                    <p
+                        v-if="allowUsers.length === 0 && allowGroups.length === 0"
+                        class="mt-1.5 flex items-start gap-1 text-[11px] text-warning"
+                    >
+                        <AlertTriangle class="mt-0.5 size-3 shrink-0" />
+                        当前白名单为空，选「拒绝」意味着<strong>所有人都用不了</strong>。
+                        要放行特定的人，请先在上面加白名单
                     </p>
                 </div>
             </div>
