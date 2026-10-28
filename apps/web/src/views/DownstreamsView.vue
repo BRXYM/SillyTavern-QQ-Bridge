@@ -334,6 +334,45 @@ async function load(opts: { silent?: boolean } = {}) {
     }
 }
 
+/**
+ * 手动刷新。
+ *
+ * 与进入页面时的静默加载不同：这里要给出明确回执，否则点了按钮
+ * 却什么都没变（状态本来就一样）时，用户无法判断是否真的刷新了。
+ *
+ * 同时清掉测试结果缓存 —— 那是上一次调用的输出，刷新后继续显示
+ * 会让人以为它是当前状态。
+ */
+async function refreshDownstreams(): Promise<void> {
+    if (loading.value) return;
+
+    const before = registered.value
+        .map((d) => {
+            const st = statusOf(d.id);
+            return `${d.id}:${d.enabled}:${st?.available ? 1 : 0}`;
+        })
+        .join('|');
+
+    await load({ silent: true });
+    testResults.value = {};
+
+    const after = registered.value
+        .map((d) => {
+            const st = statusOf(d.id);
+            return `${d.id}:${d.enabled}:${st?.available ? 1 : 0}`;
+        })
+        .join('|');
+
+    const online = registered.value.filter((d) => statusOf(d.id)?.available).length;
+    const summary = `${registered.value.length} 个实例 · ${online} 个可用`;
+
+    if (before !== after) {
+        toast.success('状态已更新', summary);
+    } else {
+        toast.info('已刷新', `${summary}（与上次相同）`);
+    }
+}
+
 async function setDefault(id: string) {
     saving.value = true;
     try {
@@ -690,8 +729,14 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                         <Plus class="size-3.5" />
                         新增
                     </UiButton>
-                    <UiButton variant="ghost" size="sm" :disabled="loading" @click="load()">
+                    <UiButton
+                        variant="outline"
+                        size="sm"
+                        :disabled="loading"
+                        @click="refreshDownstreams"
+                    >
                         <RefreshCw class="size-3.5" :class="loading ? 'animate-spin' : ''" />
+                        {{ loading ? '刷新中…' : '刷新' }}
                     </UiButton>
                 </div>
             </div>
