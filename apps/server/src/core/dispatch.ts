@@ -22,6 +22,7 @@ import { scopedSessionKey, sessionKeyOf } from './sessions.ts';
 import type { DownstreamAdapter, DownstreamConfig, ProgressEvent } from '../downstream/types.ts';
 import type { ResolvedDownstream } from '../downstream/manager.ts';
 import type { BridgeConfig, ProcessorRule } from '../config/schema.ts';
+import { normalizeProgress, type ProgressSettings } from '../config/behavior.ts';
 import { log } from './logger.ts';
 import { sendReply, type SendContext } from './sending.ts';
 import { QQ_BASE_PROMPT, renderFaceInstruction, renderImageInstruction } from '../downstream/dsh.ts';
@@ -404,7 +405,7 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
 
     // ---- 进度摘要转发 ----
     // 用合并后的设置判断，否则会话选了「开启进度」的配置也不会生效
-    const progressCfg = progressSettings(target.settings);
+    const progressCfg = normalizeProgress(target.settings.progress);
     const onProgress = progressCfg.enabled
         ? makeProgressReporter({
             sending: deps.sending,
@@ -478,44 +479,6 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
 function errorReplyFor(settings: Record<string, unknown>): string {
     const val = settings.errorReply;
     return typeof val === 'string' ? val.trim() : '';
-}
-
-/** 进度转发的有效配置 */
-interface ProgressSettings {
-    enabled: boolean;
-    /** 最少间隔（毫秒）：太快会刷屏 */
-    minIntervalMs: number;
-    /** 最长只发这么多条 */
-    maxMessages: number;
-    /** 只发这些类型的节点 */
-    kinds: Array<'start' | 'tool' | 'stage' | 'done'>;
-    /** 消息前缀，便于识别这是进度而非正式回复 */
-    prefix: string;
-}
-
-const DEFAULT_PROGRESS: ProgressSettings = {
-    enabled: false,
-    minIntervalMs: 4000,
-    maxMessages: 3,
-    kinds: ['start', 'tool'],
-    prefix: '⏳ ',
-};
-
-/** 读进度配置（默认关闭） */
-function progressSettings(settings: Record<string, unknown> | undefined): ProgressSettings {
-    const raw = (settings?.progress ?? {}) as Record<string, unknown>;
-    const kinds = Array.isArray(raw.kinds)
-        ? (raw.kinds.filter((k): k is ProgressSettings['kinds'][number] =>
-            k === 'start' || k === 'tool' || k === 'stage' || k === 'done'))
-        : DEFAULT_PROGRESS.kinds;
-
-    return {
-        enabled: raw.enabled === true,
-        minIntervalMs: Math.max(0, Number(raw.minIntervalMs ?? DEFAULT_PROGRESS.minIntervalMs) || 0),
-        maxMessages: Math.max(0, Number(raw.maxMessages ?? DEFAULT_PROGRESS.maxMessages) || 0),
-        kinds: kinds.length > 0 ? kinds : DEFAULT_PROGRESS.kinds,
-        prefix: typeof raw.prefix === 'string' ? raw.prefix : DEFAULT_PROGRESS.prefix,
-    };
 }
 
 /**

@@ -52,6 +52,30 @@ export interface DownstreamProfileDto {
     settings: Record<string, unknown>;
 }
 
+/**
+ * 下游的行为设置（提示词 / 历史引用 / 进度转发）。
+ *
+ * 这些描述「下游怎么说话」，与「怎么连上它」分开：
+ * 连接属于实例（下游管理页），行为属于配置（会话页）。
+ */
+export interface BehaviorDto {
+    prompt: {
+        qqBase: boolean;
+        character: boolean;
+        faces: boolean;
+        images: boolean;
+        extra: string;
+    };
+    historyExtracts: Array<{ pattern: string; flags?: string; label?: string }>;
+    progress: {
+        enabled: boolean;
+        minIntervalMs: number;
+        maxMessages: number;
+        kinds?: string[];
+        prefix: string;
+    };
+}
+
 export interface SessionChoiceDto {
     character?: string;
     world?: string;
@@ -481,9 +505,17 @@ export const api = {
         request<{
             ok: boolean;
             downstreamId: string;
+            kind?: string;
             profiles: DownstreamProfileDto[];
             /** 实例自身设置，作为配置表单的基线 */
             settings: Record<string, unknown>;
+            /**
+             * 每份配置**实际生效**的行为设置（实例 + 配置合并后）。
+             * 前端直接用它渲染表单，不再自己算一遍合并。
+             */
+            behaviors?: Record<string, BehaviorDto>;
+            /** 不选配置时（纯实例设置）的行为 */
+            defaultBehavior?: BehaviorDto;
         }>(`/downstreams/${encodeURIComponent(id)}/profiles`),
 
     saveDownstreamProfile: (

@@ -3,8 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import {
     Boxes, RefreshCw, Plus, Trash2, Play, Loader2, CheckCircle2,
     AlertTriangle, Server, Star, Info, Power, RotateCw, Plug, PlugZap,
-    Terminal, FileText, ChevronDown, ChevronRight, MessageSquare, Save,
-    Activity,
+    Terminal, FileText, ChevronDown, ChevronRight, Save,
 } from 'lucide-vue-next';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -61,236 +60,6 @@ function kindLabel(kind: string): string {
 
 function isDshKind(kind: string): boolean {
     return kind.startsWith('dsh');
-}
-
-/**
- * 提示词开关项。
- *
- * 全部默认关闭：Bridge 只转发用户原话，不夹带任何说明。
- * 每一项都是独立开关，按需打开。
- */
-const PROMPT_OPTIONS = [
-    {
-        key: 'qqBase' as const,
-        label: 'QQ 聊天约束',
-        desc: '要求简短、口语化、不要 Markdown。开启后 AI 更像在聊天',
-    },
-    {
-        key: 'character' as const,
-        label: '角色人设',
-        desc: '把会话绑定的角色（含世界书名）作为人设告诉下游',
-    },
-    {
-        key: 'faces' as const,
-        label: '表情词表',
-        desc: '关闭时 AI 不会产出 [表情:标签]，表情包功能失效',
-    },
-    {
-        key: 'images' as const,
-        label: '图片能力',
-        desc: '允许 AI 用 [图片:URL] 发送网络图片',
-    },
-] as const;
-
-type PromptKey = (typeof PROMPT_OPTIONS)[number]['key'];
-
-interface PromptState {
-    qqBase: boolean;
-    character: boolean;
-    faces: boolean;
-    images: boolean;
-    extra: string;
-}
-
-/** 每个实例的提示词草稿（未保存的新值放这里，避免直接改 registered） */
-const promptDrafts = reactive<Record<string, PromptState>>({});
-
-/** 取某实例的提示词状态（优先草稿，否则读配置） */
-function promptOf(id: string): PromptState {
-    if (!promptDrafts[id]) {
-        const item = registered.value.find((d) => d.id === id);
-        const raw = (item?.settings?.prompt ?? {}) as Partial<PromptState>;
-        promptDrafts[id] = {
-            qqBase: raw.qqBase === true,
-            character: raw.character === true,
-            faces: raw.faces === true,
-            images: raw.images === true,
-            extra: typeof raw.extra === 'string' ? raw.extra : '',
-        };
-    }
-    return promptDrafts[id]!;
-}
-
-function promptEnabledCount(id: string): number {
-    const p = promptOf(id);
-    return PROMPT_OPTIONS.filter((o) => p[o.key] === true).length;
-}
-
-function setPromptFlag(id: string, key: PromptKey, value: boolean): void {
-    promptOf(id)[key] = value;
-}
-
-function setPromptExtra(id: string, value: string): void {
-    promptOf(id).extra = value;
-}
-
-// ---------------- 历史引用规则 ----------------
-
-interface HistoryRule {
-    pattern: string;
-    label?: string;
-}
-
-/** 每个实例的历史规则草稿 */
-const historyDrafts = reactive<Record<string, HistoryRule[]>>({});
-
-/** 取某实例的历史规则（优先草稿，否则读配置） */
-function historyOf(id: string): HistoryRule[] {
-    if (!historyDrafts[id]) {
-        const item = registered.value.find((d) => d.id === id);
-        const raw = item?.settings?.historyExtracts;
-        historyDrafts[id] = Array.isArray(raw)
-            ? raw.map((r) => ({
-                pattern: String((r as HistoryRule).pattern ?? ''),
-                label: String((r as HistoryRule).label ?? ''),
-            }))
-            : [];
-    }
-    return historyDrafts[id]!;
-}
-
-function addHistoryRule(id: string): void {
-    historyOf(id).push({ pattern: '', label: '' });
-}
-
-function removeHistoryRule(id: string, idx: number): void {
-    historyOf(id).splice(idx, 1);
-}
-
-function setHistoryRule(id: string, idx: number, patch: Partial<HistoryRule>): void {
-    const rule = historyOf(id)[idx];
-    if (rule) Object.assign(rule, patch);
-}
-
-// ---------------- 进度转发 ----------------
-
-interface ProgressState {
-    enabled: boolean;
-    minIntervalMs: number;
-    maxMessages: number;
-    prefix: string;
-}
-
-const progressDrafts = reactive<Record<string, ProgressState>>({});
-
-function progressOf(id: string): ProgressState {
-    if (!progressDrafts[id]) {
-        const item = registered.value.find((d) => d.id === id);
-        const raw = (item?.settings?.progress ?? {}) as Partial<ProgressState>;
-        progressDrafts[id] = {
-            enabled: raw.enabled === true,
-            minIntervalMs: Number(raw.minIntervalMs ?? 4000),
-            maxMessages: Number(raw.maxMessages ?? 3),
-            prefix: typeof raw.prefix === 'string' ? raw.prefix : '⏳ ',
-        };
-    }
-    return progressDrafts[id]!;
-}
-
-function setProgressFlag(id: string, key: 'enabled', value: boolean): void {
-    progressOf(id)[key] = value;
-}
-
-function setProgressNum(id: string, key: 'minIntervalMs' | 'maxMessages', value: string): void {
-    const n = Number(value);
-    progressOf(id)[key] = Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
-function setProgressText(id: string, key: 'prefix', value: string): void {
-    progressOf(id)[key] = value;
-}
-
-async function saveProgress(item: {
-    id: string;
-    kind: string;
-    name: string;
-    enabled: boolean;
-    settings: Record<string, unknown>;
-}): Promise<void> {
-    const p = progressOf(item.id);
-    working.value = `progress:${item.id}`;
-    try {
-        await api.saveDownstream({
-            id: item.id,
-            kind: item.kind,
-            name: item.name,
-            enabled: item.enabled,
-            settings: {
-                ...item.settings,
-                progress: {
-                    enabled: p.enabled,
-                    minIntervalMs: p.minIntervalMs,
-                    maxMessages: p.maxMessages,
-                    prefix: p.prefix,
-                },
-            },
-        });
-        delete progressDrafts[item.id];
-        await load({ silent: true });
-        toast.success('进度设置已保存', p.enabled ? '将转发分析摘要' : '已关闭');
-    } catch (e) {
-        toast.error('保存失败', e instanceof Error ? e.message : String(e));
-    } finally {
-        working.value = '';
-    }
-}
-
-/** 保存某实例的提示词设置 */
-async function savePrompt(item: {
-    id: string;
-    kind: string;
-    name: string;
-    enabled: boolean;
-    settings: Record<string, unknown>;
-}): Promise<void> {
-    const draft = promptOf(item.id);
-    const rules = historyOf(item.id).filter((r) => r.pattern.trim());
-    working.value = `prompt:${item.id}`;
-    try {
-        await api.saveDownstream({
-            id: item.id,
-            kind: item.kind,
-            name: item.name,
-            enabled: item.enabled,
-            settings: {
-                ...item.settings,
-                // 只存有效规则，空 pattern 直接丢弃
-                historyExtracts: rules.map((r) => ({
-                    pattern: r.pattern.trim(),
-                    ...(r.label?.trim() ? { label: r.label.trim() } : {}),
-                })),
-                prompt: {
-                    qqBase: draft.qqBase,
-                    character: draft.character,
-                    faces: draft.faces,
-                    images: draft.images,
-                    extra: draft.extra,
-                },
-            },
-        });
-        // 保存成功后让草稿失效，下次从配置重新读
-        delete promptDrafts[item.id];
-        delete historyDrafts[item.id];
-        await load({ silent: true });
-        toast.success(
-            '提示词已保存',
-            promptEnabledCount(item.id) > 0 ? '将按开启项注入' : '全部关闭，只转发原话',
-        );
-    } catch (e) {
-        toast.error('保存失败', e instanceof Error ? e.message : String(e));
-    } finally {
-        working.value = '';
-    }
 }
 
 /** 安装来源的中文名 */
@@ -552,14 +321,6 @@ interface ProfileDraft {
     name: string;
     /** 覆盖实例设置的字段（只存差异） */
     settings: Record<string, unknown>;
-    /** 表单上的常用字段，保存时写回 settings */
-    prompt: {
-        qqBase: boolean;
-        character: boolean;
-        faces: boolean;
-        images: boolean;
-        extra: string;
-    };
     /** 酒馆专用：固定角色卡 / 世界书 */
     character: string;
     world: string;
@@ -581,7 +342,6 @@ function newProfile(item: { id: string }): void {
         id: `profile_${profilesOf(item.id).length + 1}`,
         name: '',
         settings: {},
-        prompt: { qqBase: false, character: false, faces: false, images: false, extra: '' },
         character: '',
         world: '',
         dshProfile: '',
@@ -593,18 +353,10 @@ function editProfile(
     item: { id: string; kind: string },
     profile: { id: string; name: string; settings: Record<string, unknown> },
 ): void {
-    const raw = (profile.settings.prompt ?? {}) as Partial<ProfileDraft['prompt']>;
     profileDrafts[item.id] = {
         id: profile.id,
         name: profile.name,
         settings: { ...profile.settings },
-        prompt: {
-            qqBase: raw.qqBase === true,
-            character: raw.character === true,
-            faces: raw.faces === true,
-            images: raw.images === true,
-            extra: typeof raw.extra === 'string' ? raw.extra : '',
-        },
         character: String(profile.settings.character ?? ''),
         world: String(profile.settings.world ?? ''),
         dshProfile: String(profile.settings.profile ?? ''),
@@ -627,14 +379,7 @@ async function saveProfile(
     const isDshItem = isDshKind(item.kind);
 
     if (isDshItem) {
-        settings.prompt = {
-            qqBase: draft.prompt.qqBase,
-            character: draft.prompt.character,
-            faces: draft.prompt.faces,
-            images: draft.prompt.images,
-            extra: draft.prompt.extra,
-        };
-        // 空 = 沿用实例的 profile 目录
+        // 只写「连哪个 profile」；提示词等行为设置由「会话」页维护
         if (draft.dshProfile.trim()) settings.profile = draft.dshProfile.trim();
         else delete settings.profile;
     } else {
@@ -914,7 +659,7 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                             >
                                 还没有配置。{{
                                     isDshKind(item.kind)
-                                        ? '可建多套提示词开关 / 对话约束，供不同会话选用'
+                                        ? '可建多套（不同 dsh profile / 工作目录），供不同会话选用'
                                         : '可建多套角色卡，供不同会话选用'
                                 }}
                             </p>
@@ -972,32 +717,8 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                                     </div>
                                 </div>
 
-                                <!-- dsh：提示词开关 + profile 目录 -->
+                                <!-- dsh：只留「连哪个 profile」，提示词等已移到会话管理 -->
                                 <template v-if="isDshKind(item.kind)">
-                                    <div class="mt-2 grid gap-1 sm:grid-cols-2">
-                                        <label
-                                            v-for="opt in PROMPT_OPTIONS"
-                                            :key="opt.key"
-                                            class="flex items-center justify-between gap-2 rounded border border-border/50 px-2 py-1"
-                                        >
-                                            <span class="text-[10px]">{{ opt.label }}</span>
-                                            <UiSwitch
-                                                :model-value="profileDrafts[item.id]!.prompt[opt.key]"
-                                                @update:model-value="(v: boolean) => {
-                                                    const d = profileDrafts[item.id];
-                                                    if (d) d.prompt[opt.key] = v;
-                                                }"
-                                            />
-                                        </label>
-                                    </div>
-                                    <div class="mt-2 flex flex-col gap-1">
-                                        <label class="text-[10px] font-medium">附加提示词</label>
-                                        <UiInput
-                                            v-model="profileDrafts[item.id]!.prompt.extra"
-                                            placeholder="对话约束，例如：只用短句，不要用敬语"
-                                            class="text-xs"
-                                        />
-                                    </div>
                                     <div class="mt-2 flex flex-col gap-1">
                                         <label class="text-[10px] font-medium">dsh profile 目录</label>
                                         <UiInput
@@ -1006,6 +727,9 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                                             placeholder="留空 = 沿用实例设置（例如 headless / web）"
                                             class="text-xs"
                                         />
+                                        <p class="text-[10px] text-muted-foreground/70">
+                                            决定这条链路连哪个 dsh 实例；提示词与进度转发在「会话」页配置
+                                        </p>
                                     </div>
                                 </template>
 
@@ -1238,191 +962,6 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                             >{{ (dsh?.service?.logTail ?? []).slice(-12).join('\n') }}</pre>
                         </div>
 
-                        <!-- 提示词：默认全关，只转发用户原话 -->
-                        <div class="mt-2 rounded-md border border-border/60 bg-card/40 p-3">
-                            <div class="flex flex-wrap items-center justify-between gap-2">
-                                <div class="flex items-center gap-2">
-                                    <MessageSquare class="size-3.5 text-muted-foreground" />
-                                    <span class="text-xs font-medium">提示词注入</span>
-                                    <UiBadge
-                                        :tone="promptEnabledCount(item.id) > 0 ? 'info' : 'outline'"
-                                        class="text-micro"
-                                    >
-                                        {{ promptEnabledCount(item.id) > 0
-                                            ? `已开 ${promptEnabledCount(item.id)} 项`
-                                            : '全部关闭' }}
-                                    </UiBadge>
-                                </div>
-                                <UiButton
-                                    size="sm"
-                                    variant="outline"
-                                    :disabled="saving"
-                                    @click="savePrompt(item)"
-                                >
-                                    <Loader2 v-if="working === `prompt:${item.id}`" class="size-3.5 animate-spin" />
-                                    <Save v-else class="size-3.5" />
-                                    保存
-                                </UiButton>
-                            </div>
-
-                            <p class="mt-1.5 text-[10px] text-muted-foreground">
-                                默认不发送任何提示词，只把用户原话转发给下游。
-                                打开下面任意一项后，才会把对应内容拼进去。
-                            </p>
-
-                            <div class="mt-2 space-y-1.5">
-                                <label
-                                    v-for="opt in PROMPT_OPTIONS"
-                                    :key="opt.key"
-                                    class="flex items-start justify-between gap-3 rounded border border-border/40 px-2.5 py-1.5"
-                                >
-                                    <div class="min-w-0">
-                                        <p class="text-[11px] font-medium">{{ opt.label }}</p>
-                                        <p class="text-[10px] text-muted-foreground">{{ opt.desc }}</p>
-                                    </div>
-                                    <UiSwitch
-                                        :model-value="promptOf(item.id)[opt.key] === true"
-                                        class="shrink-0"
-                                        @update:model-value="(v: boolean) => setPromptFlag(item.id, opt.key, v)"
-                                    />
-                                </label>
-                            </div>
-
-                            <div class="mt-2">
-                                <label class="text-[10px] text-muted-foreground">附加文本（总是最后拼接）</label>
-                                <textarea
-                                    :value="promptOf(item.id).extra"
-                                    rows="3"
-                                    class="mt-1 w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 font-mono text-[11px] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/40"
-                                    placeholder="留空 = 不发送"
-                                    @input="(e: Event) => setPromptExtra(item.id, (e.target as HTMLTextAreaElement).value)"
-                                />
-                            </div>
-
-                            <!-- 历史引用：dsh 自己存 session，默认不发历史 -->
-                            <div class="mt-3 border-t border-border/40 pt-2.5">
-                                <div class="flex flex-wrap items-center justify-between gap-2">
-                                    <div class="flex items-center gap-2">
-                                        <span class="text-[11px] font-medium">历史引用</span>
-                                        <UiBadge
-                                            :tone="historyOf(item.id).length > 0 ? 'info' : 'outline'"
-                                            class="text-micro"
-                                        >
-                                            {{ historyOf(item.id).length > 0
-                                                ? `${historyOf(item.id).length} 条规则`
-                                                : '不发送历史' }}
-                                        </UiBadge>
-                                    </div>
-                                    <UiButton
-                                        variant="ghost"
-                                        size="sm"
-                                        @click="addHistoryRule(item.id)"
-                                    >
-                                        <Plus class="size-3.5" />
-                                        加规则
-                                    </UiButton>
-                                </div>
-                                <p class="mt-1 text-[10px] text-muted-foreground">
-                                    dsh 会按 session 自动保留上下文，所以默认不再重发历史。
-                                    这里只在需要引用上一轮片段（表情标签、数值等）时加正则；
-                                    命中的内容以「[参考]」附在本次消息前。
-                                </p>
-
-                                <div
-                                    v-for="(rule, idx) in historyOf(item.id)"
-                                    :key="idx"
-                                    class="mt-1.5 flex items-center gap-1.5"
-                                >
-                                    <UiInput
-                                        :model-value="rule.label ?? ''"
-                                        placeholder="名称"
-                                        class="max-w-24"
-                                        @update:model-value="(v: string) => setHistoryRule(item.id, idx, { label: v })"
-                                    />
-                                    <UiInput
-                                        :model-value="rule.pattern"
-                                        placeholder="正则，如 \[表情:([^\]]+)\]"
-                                        mono
-                                        class="flex-1"
-                                        @update:model-value="(v: string) => setHistoryRule(item.id, idx, { pattern: v })"
-                                    />
-                                    <UiButton
-                                        variant="ghost"
-                                        size="sm"
-                                        @click="removeHistoryRule(item.id, idx)"
-                                    >
-                                        <Trash2 class="size-3.5" />
-                                    </UiButton>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 进度转发：把分析摘要发到 QQ -->
-                        <div class="mt-2 rounded-md border border-border/60 bg-card/40 p-3">
-                            <div class="flex flex-wrap items-center justify-between gap-2">
-                                <div class="flex items-center gap-2">
-                                    <Activity class="size-3.5 text-muted-foreground" />
-                                    <span class="text-xs font-medium">进度转发</span>
-                                    <UiBadge :tone="progressOf(item.id).enabled ? 'info' : 'outline'" class="text-micro">
-                                        {{ progressOf(item.id).enabled ? '已开启' : '关闭' }}
-                                    </UiBadge>
-                                </div>
-                                <div class="flex items-center gap-2">
-                                    <UiSwitch
-                                        :model-value="progressOf(item.id).enabled"
-                                        class="shrink-0"
-                                        @update:model-value="(v: boolean) => setProgressFlag(item.id, 'enabled', v)"
-                                    />
-                                    <UiButton
-                                        size="sm"
-                                        variant="outline"
-                                        :disabled="saving"
-                                        @click="saveProgress(item)"
-                                    >
-                                        <Loader2 v-if="working === `progress:${item.id}`" class="size-3.5 animate-spin" />
-                                        <Save v-else class="size-3.5" />
-                                        保存
-                                    </UiButton>
-                                </div>
-                            </div>
-
-                            <p class="mt-1.5 text-[10px] text-muted-foreground">
-                                把 dsh 的分析摘要（开始处理、读取、搜索、执行命令等）发到 QQ，
-                                让用户知道进行到哪一步。默认关闭；开启后会限流，不会刷屏。
-                            </p>
-
-                            <div v-if="progressOf(item.id).enabled" class="mt-2 grid gap-2 sm:grid-cols-3">
-                                <div>
-                                    <label class="text-[10px] text-muted-foreground">最小间隔（毫秒）</label>
-                                    <UiInput
-                                        :model-value="String(progressOf(item.id).minIntervalMs)"
-                                        type="number"
-                                        mono
-                                        class="mt-1"
-                                        @update:model-value="(v: string) => setProgressNum(item.id, 'minIntervalMs', v)"
-                                    />
-                                </div>
-                                <div>
-                                    <label class="text-[10px] text-muted-foreground">最多几条</label>
-                                    <UiInput
-                                        :model-value="String(progressOf(item.id).maxMessages)"
-                                        type="number"
-                                        mono
-                                        class="mt-1"
-                                        @update:model-value="(v: string) => setProgressNum(item.id, 'maxMessages', v)"
-                                    />
-                                </div>
-                                <div>
-                                    <label class="text-[10px] text-muted-foreground">消息前缀</label>
-                                    <UiInput
-                                        :model-value="progressOf(item.id).prefix"
-                                        class="mt-1"
-                                        placeholder="⏳ "
-                                        @update:model-value="(v: string) => setProgressText(item.id, 'prefix', v)"
-                                    />
-                                </div>
-                            </div>
-                        </div>
                     </div>
                 </div>
             </div>

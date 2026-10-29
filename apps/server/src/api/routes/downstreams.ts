@@ -24,6 +24,12 @@ import { json } from '../router.ts';
 import type { AppContext } from '../context.ts';
 import { KNOWN_KINDS } from '../../downstream/registry.ts';
 import type { DownstreamConfig, DownstreamKind, DownstreamProfile } from '../../downstream/types.ts';
+import { mergeSettings } from '../../config/schema.ts';
+import {
+    normalizeHistoryExtracts,
+    normalizeProgress,
+    normalizePrompt,
+} from '../../config/behavior.ts';
 import { log } from '../../core/logger.ts';
 
 const VALID_KINDS = new Set<string>(KNOWN_KINDS.map((k) => k.kind));
@@ -171,9 +177,32 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
         json(res, 200, {
             ok: true,
             downstreamId: id,
+            kind: downstream.kind,
             profiles: downstream.profiles,
             /** 实例自身设置，作为表单的基线 */
             settings: downstream.settings,
+            /**
+             * 每份配置**实际生效**的行为设置（实例 + 配置合并后）。
+             *
+             * 前端要按值渲染表单，而不是自己再算一遍合并 ——
+             * 两处各算一套迟早会不一致，行为设置尤其容易漏掉嵌套的 prompt。
+             */
+            behaviors: Object.fromEntries(
+                downstream.profiles.map((p) => {
+                    const merged = mergeSettings(downstream.settings, p.settings);
+                    return [p.id, {
+                        prompt: normalizePrompt(merged.prompt),
+                        historyExtracts: normalizeHistoryExtracts(merged.historyExtracts),
+                        progress: normalizeProgress(merged.progress),
+                    }];
+                }),
+            ),
+            /** 不选配置时（用实例设置）的行为 */
+            defaultBehavior: {
+                prompt: normalizePrompt(downstream.settings.prompt),
+                historyExtracts: normalizeHistoryExtracts(downstream.settings.historyExtracts),
+                progress: normalizeProgress(downstream.settings.progress),
+            },
         });
     });
 

@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
-import { Users, Star, Save, RotateCcw, Info, SlidersHorizontal, ShieldCheck } from 'lucide-vue-next';
+import { computed, onMounted, reactive, ref } from 'vue';
+import {
+    Users, Star, Save, RotateCcw, Info, SlidersHorizontal, ShieldCheck, Settings2,
+} from 'lucide-vue-next';
 import { useStatusStore } from '@/stores/status';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
@@ -8,6 +10,9 @@ import UiSelect from '@/components/ui/UiSelect.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiInput from '@/components/ui/UiInput.vue';
 import IdListEditor from '@/components/ui/IdListEditor.vue';
+import DownstreamBehaviorEditor, {
+    type BehaviorSettings,
+} from '@/components/ui/DownstreamBehaviorEditor.vue';
 import UiSwitch from '@/components/ui/UiSwitch.vue';
 import { api } from '@/api/client';
 import { useToastStore } from '@/stores/toast';
@@ -440,6 +445,100 @@ async function setProfile(key: string, value: string): Promise<void> {
     }
 }
 
+// ---------------- 下游配置的行为设置 ----------------
+// 提示词注入 / 历史引用 / 进度转发属于「配置」而非「连接」，
+// 所以编辑入口在这里，而不是下游管理页。
+
+/** 正在编辑行为设置的组合 key：`<backendId>:<profileId>` */
+const editingBehaviorOf = ref('');
+/** 保存中的组合 key */
+const savingBehavior = ref('');
+
+/** 行为设置草稿（按组合 key 存） */
+const behaviorDrafts = reactive<Record<string, BehaviorSettings>>({});
+
+/** 空白的默认行为 */
+function emptyBehavior(): BehaviorSettings {
+    return {
+        prompt: { qqBase: false, character: false, faces: false, images: false, extra: '' },
+        historyExtracts: [],
+        progress: { enabled: false, minIntervalMs: 4000, maxMessages: 3, prefix: '⏳ ' },
+    };
+}
+
+/** 某下游实例的 kind（决定是否显示 dsh 专属项） */
+function kindOf(backendId: string): string {
+    return downstreamList.value.find((d) => d.id === backendId)?.kind ?? '';
+}
+
+/**
+ * 打开行为设置编辑器。
+ *
+ * 从后端取的 `behaviors[profileId]` 是**合并后**的实际值（实例 + 配置），
+ * 这样表单显示的就是真正生效的设置，不会因为只看到配置层的差异而误判。
+ */
+async function openBehavior(backendId: string, profileId: string): Promise<void> {
+    if (!profileId) {
+        toast.info('该会话正使用实例设置', '请先在上面选一个具体配置再编辑');
+        return;
+    }
+
+    const combo = `${backendId}:${profileId}`;
+    if (editingBehaviorOf.value === combo) {
+        editingBehaviorOf.value = '';
+        return;
+    }
+
+    try {
+        const r = await api.downstreamProfiles(backendId);
+        const b = r.behaviors?.[profileId];
+        if (!b) {
+            toast.warning('读不到该配置', '可能已被删除，刷新后重试');
+            return;
+        }
+        behaviorDrafts[combo] = b;
+        editingBehaviorOf.value = combo;
+    } catch (e) {
+        toast.error('读取配置失败', e instanceof Error ? e.message : String(e));
+    }
+}
+
+/** 保存行为设置到该配置 */
+async function saveBehavior(backendId: string, profileId: string): Promise<void> {
+    const combo = `${backendId}:${profileId}`;
+    const draft = behaviorDrafts[combo];
+    if (!draft) return;
+
+    /** 进度设置的 kinds 由后端保留默认，这里只提交可见字段 */
+    const profile = profilesOf(backendId).find((p) => p.id === profileId);
+    if (!profile) {
+        toast.warning('配置不存在', '可能已被删除，刷新后重试');
+        return;
+    }
+
+    savingBehavior.value = combo;
+    try {
+        await api.saveDownstreamProfile(backendId, {
+            id: profileId,
+            name: profile.name,
+            settings: {
+                ...profile.settings,
+                prompt: draft.prompt,
+                historyExtracts: draft.historyExtracts.filter((r) => r.pattern.trim()),
+                progress: draft.progress,
+            },
+        });
+        editingBehaviorOf.value = '';
+        delete behaviorDrafts[combo];
+        await store.refresh();
+        toast.success('设置已保存', `${backendId} / ${profile.name || profileId}`);
+    } catch (e) {
+        toast.error('保存失败', e instanceof Error ? e.message : String(e));
+    } finally {
+        savingBehavior.value = '';
+    }
+}
+
 // ---------------- 账号维度 ----------------
 
 /** 会话 key 里的账号前缀（`<accountId>:private_...`） */
@@ -841,12 +940,74 @@ const groupedSessions = computed(() => {
                             />
                             <p class="mt-1 text-[11px] text-muted-foreground/70">
                                 <template v-if="profilesOf(effectiveDownstream(key).backendId).length === 0">
-                                    该下游还没有配置。可到「下游」页为它新建，例如不同人设或不同角色卡
+                                    该下游还没有配置。先到「下游」页新建一个，
+                                    然后回到这里选它，就能设置提示词 / 历史引用 / 进度转发
                                 </template>
                                 <template v-else>
-                                    配置决定这个会话用哪套提示词 / 对话约束 / 角色卡
+                                    配置决定这个会话用哪套提示词 / 对话约束 / 角色卡；
+                                    选中配置后可展开编辑它的行为设置
                                 </template>
                             </p>
+
+                            <!-- 编辑该配置的行为设置（提示词 / 历史引用 / 进度转发） -->
+                            <div
+                                v-if="effectiveDownstream(key).profileId"
+                                class="mt-1.5"
+                            >
+                                <UiButton
+                                    variant="ghost"
+                                    size="sm"
+                                    @click="openBehavior(
+                                        effectiveDownstream(key).backendId,
+                                        effectiveDownstream(key).profileId,
+                                    )"
+                                >
+                                    <Settings2 class="size-3.5" />
+                                    {{
+                                        editingBehaviorOf === `${effectiveDownstream(key).backendId}:${effectiveDownstream(key).profileId}`
+                                            ? '收起设置'
+                                            : '编辑该配置的提示词与行为'
+                                    }}
+                                </UiButton>
+                            </div>
+
+                            <!-- 行为设置：属于配置，不属于连接 -->
+                            <div
+                                v-if="editingBehaviorOf === `${effectiveDownstream(key).backendId}:${effectiveDownstream(key).profileId}`"
+                                class="mt-2 rounded-md border border-primary/30 bg-primary/5 p-2.5"
+                            >
+                                <DownstreamBehaviorEditor
+                                    v-if="behaviorDrafts[editingBehaviorOf]"
+                                    :model-value="behaviorDrafts[editingBehaviorOf]!"
+                                    :kind="kindOf(effectiveDownstream(key).backendId)"
+                                    :disabled="savingBehavior === editingBehaviorOf"
+                                    @update:model-value="(v) => { behaviorDrafts[editingBehaviorOf] = v; }"
+                                />
+                                <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                                    <UiButton
+                                        size="sm"
+                                        :disabled="savingBehavior === editingBehaviorOf"
+                                        @click="saveBehavior(
+                                            effectiveDownstream(key).backendId,
+                                            effectiveDownstream(key).profileId,
+                                        )"
+                                    >
+                                        <Save class="size-3.5" />
+                                        保存设置
+                                    </UiButton>
+                                    <UiButton
+                                        variant="ghost"
+                                        size="sm"
+                                        @click="editingBehaviorOf = ''"
+                                    >
+                                        取消
+                                    </UiButton>
+                                    <div class="flex-1" />
+                                    <span class="text-[10px] text-muted-foreground/70">
+                                        影响所有使用该配置的会话
+                                    </span>
+                                </div>
+                            </div>
                         </div>
 
                     <div
