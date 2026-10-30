@@ -1,5 +1,7 @@
 {
     "configVersion": 3,
+    "conversationProfiles": [],
+    "defaultConversationId": "",
     "consolePort": 9510,
     "extPort": 9500,
     "accounts": [

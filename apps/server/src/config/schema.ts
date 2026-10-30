@@ -12,6 +12,7 @@
  */
 
 import type { DownstreamConfig, DownstreamProfile } from '../downstream/types.ts';
+import type { ConversationConfig } from './conversations.ts';
 import type { ProcessorRule, SegmentationConfig as SharedSegmentation } from '@bridge/shared';
 
 /** 复用 @bridge/shared 的规则类型，避免两处定义漂移 */
@@ -132,6 +133,8 @@ export interface SnowLumaConfig {
 }
 
 export interface BridgeConfig {
+    conversationProfiles: ConversationConfig[];
+    defaultConversationId: string;
     /** 配置结构版本；用于判断要不要迁移 */
     configVersion: number;
     /** HTTP API 端口（控制台） */
@@ -187,6 +190,8 @@ export const DEFAULT_SEGMENTATION: SegmentationConfig = {
 export const DEFAULT_UPSTREAM_PORT = 3001;
 
 export const DEFAULT_CONFIG: BridgeConfig = {
+    conversationProfiles: [],
+    defaultConversationId: '',
     configVersion: 3,
     consolePort: 9510,
     extPort: 9500,

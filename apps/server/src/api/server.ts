@@ -1,4 +1,6 @@
 import http from 'node:http';
+import { registerConversationRoutes } from './routes/conversations.ts';
+import { registerUpstreamConnectionRoutes } from './routes/upstream-connection.ts';
 import path from 'node:path';
 import { Router, json } from './router.ts';
 import type { AppContext } from './context.ts';
@@ -22,6 +24,8 @@ export function createApiServer(app: AppContext, paths: AppPaths,
     registerStatusRoutes(router, app);
     registerDownstreamRoutes(router, app);
     registerSessionRoutes(router, app);
+    registerConversationRoutes(router, app);
+    registerUpstreamConnectionRoutes(router, app);
     registerConfigRoutes(router, app);
 
     // dsh 专属接口（服务管理 + 插件注入），复用已独立验证的实现

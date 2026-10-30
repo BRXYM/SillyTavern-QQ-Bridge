@@ -15,6 +15,7 @@
  */
 
 import { applyReplyProcessors } from '@bridge/core';
+import { resolveConversation } from '../config/conversations.ts';
 import type { OneBotEvent } from '../upstream/onebot.ts';
 import type { AccountEvent } from '../upstream/manager.ts';
 import type { SessionStore, SessionRoute } from './sessions.ts';
@@ -415,13 +416,20 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
         : undefined;
 
     // ---- 询问下游 ----
-    const userText = messageType === 'group' ? `[群成员 ${senderName}] ${parsed.text}` : parsed.text;
+    const selectedConversation = resolveConversation(config, deps.sessions, sessionKey);
+    // 旧会话在用户保存新配置前，继续采用原来的提示词开关和处理链。
+    const preserveLegacy = selectedConversation?.legacyRef?.preserveBehavior && deps.sessions.get(sessionKey)?.conversationId === undefined && !config.defaultConversationId;
+    const conversation = preserveLegacy ? undefined : selectedConversation;
+    const useConversation = !preserveLegacy && (!!conversation || deps.sessions.get(sessionKey)?.conversationId !== undefined || !!config.defaultConversationId);
+    const inputText = conversation ? conversation.inputPrefix + applyReplyProcessors(parsed.text, conversation.inputRules) + conversation.inputSuffix : parsed.text;
+    if (!inputText.trim()) return;
+    const userText = messageType === 'group' ? `[群成员 ${senderName}] ${inputText}` : inputText;
     const result = await adapter.ask({
         sessionKey,
         text: userText,
-        system: buildSystemPrompt(config, sessionKey, deps, adapter, target.settings),
+        system: useConversation ? conversation?.systemPrompt ?? '' : buildSystemPrompt(config, sessionKey, deps, adapter, target.settings),
         sender: senderName,
-        settings: target.settings,
+        settings: useConversation ? { ...target.settings, systemPrompt: conversation?.systemPrompt ?? '' } : target.settings,
         profileId: target.profile?.id,
         onProgress,
     });
@@ -463,7 +471,8 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     );
 
     // ---- 处理管道 ----
-    const { rules, source } = resolveReplyRules(config, deps.sessions, sessionKey);
+    const legacyRules = resolveReplyRules(config, deps.sessions, sessionKey);
+    const { rules, source } = useConversation ? { rules: conversation?.replyRules ?? [], source: '会话配置' } : legacyRules;
     if (rules.length > 0) log(`处理管道来源: ${source} (${rules.length} 条规则)`);
     const processed = applyReplyProcessors(reply, rules);
     if (!processed) {

@@ -75,6 +75,14 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
         }
 
         const patch: Partial<SessionChoice> = {};
+        if (body.conversationId !== undefined) {
+            const id = body.conversationId;
+            if (id !== null && (typeof id !== 'string' || (id && !app.config().conversationProfiles.some(p => p.id === id)))) {
+                json(res, 400, { error: '会话配置不存在' }); return;
+            }
+            if (id === null) app.sessions.clearField(key, 'conversationId');
+            else patch.conversationId = id as string;
+        }
         if (body.character !== undefined) patch.character = String(body.character);
         if (body.world !== undefined) patch.world = String(body.world);
         if (body.replyProcessors !== undefined) {

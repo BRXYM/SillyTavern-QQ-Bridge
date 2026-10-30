@@ -30,6 +30,8 @@ export interface SessionRoute {
 
 /** 会话级配置（持久化到 sessions.json） */
 export interface SessionChoice {
+    /** 独立会话配置：缺失继承，空字符串明确不使用。 */
+    conversationId?: string;
     character?: string;
     world?: string;
     /** 下游实例 id；缺失 = 继承全局默认 */

@@ -46,3 +46,8 @@ pnpm --filter @bridge/server test
 首版支持同步 HTTP GET/POST、JSON 或纯文本响应。接口资料不足会列出待补问题，特殊协议暂不自动实现。认证通过请求头中的环境变量引用（例如 `Bearer {{env.MY_API_KEY}}`）提供；后端启动环境需设置相应变量。
 
 任务保存在 `data/adaptations/`。完整协议和 API 见架构文档中的「dsh 下游适配助手」。
+
+
+## 当前控制台职责
+
+上游连接只读取已有 SnowLuma OneBot 端点并发起连接，不修改注入开关。下游连接只维护连接与协议映射；会话配置独立管理前置提示词与消息处理；会话管理只负责下游 / 配置绑定与默认值。旧版高级配置保留兼容，核心页面不再重复编辑。详见仓库根 README 和 ARCHITECTURE.md。

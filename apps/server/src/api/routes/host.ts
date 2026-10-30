@@ -33,8 +33,6 @@ import {
 import { log } from '../../core/logger.ts';
 import {
     readSnowLumaRuntime,
-    restoreRuntimeConfig,
-    setHookAutoLoad,
 } from '../../upstream/snowluma-hook.ts';
 import { toUpstreamAccounts } from './config.ts';
 
@@ -455,89 +453,9 @@ export function registerHostRoutes(router: Router, app: AppContext, deps: HostRo
         });
     });
 
-    // POST /api/snowluma/hook   开启 / 关闭自动注入
-    router.post('/api/snowluma/hook', ({ res, body }) => {
-        const dir = cfg().snowluma.dir;
-        if (!dir) {
-            json(res, 400, { ok: false, error: '请先在页面上填写并保存 SnowLuma 目录' });
-            return;
-        }
+    router.post('/api/snowluma/hook', ({ res }) => json(res, 410, { error: '自动注入功能已移除，请在 SnowLuma 中手动注入 QQ' }));
+    router.post('/api/snowluma/hook/restore', ({ res }) => json(res, 410, { error: '控制台不再修改 SnowLuma 注入配置' }));
 
-        const enabled = body.enabled === true;
-        const r = setHookAutoLoad(dir, enabled);
-        if (!r.ok) {
-            log(`SnowLuma 自动注入设置失败：${r.error}`);
-            json(res, 400, { ok: false, error: r.error, backup: r.backup });
-            return;
-        }
-
-        log(
-            `SnowLuma 自动注入已${enabled ? '开启' : '关闭'}（${r.runtimePath}）`
-            + '；需重启 SnowLuma 生效',
-        );
-
-        json(res, 200, {
-            ok: true,
-            runtimePath: r.runtimePath,
-            before: r.before,
-            after: r.after,
-            backup: r.backup,
-            /** 提示前端：必须重启 SnowLuma */
-            needsRestart: true,
-        });
-    });
-
-    // POST /api/snowluma/hook/restore   从备份还原 runtime.json
-    router.post('/api/snowluma/hook/restore', ({ res }) => {
-        const dir = cfg().snowluma.dir;
-        if (!dir) {
-            json(res, 400, { ok: false, error: '请先配置 SnowLuma 目录' });
-            return;
-        }
-        const r = restoreRuntimeConfig(dir);
-        if (!r.ok) {
-            json(res, 400, { ok: false, error: r.error });
-            return;
-        }
-        log(`SnowLuma runtime.json 已从备份还原（${r.runtimePath}）`);
-        json(res, 200, { ok: true, runtimePath: r.runtimePath, needsRestart: true });
-    });
-
-    // ================= 角色 / 世界书清单 =================
-
-    router.get('/api/catalog/refresh', ({ res }) => {
-        const stData = cfg().stDataDir;
-        const out: { characters: string[]; worlds: string[]; updatedAt: string } = {
-            characters: [],
-            worlds: [],
-            updatedAt: new Date().toISOString(),
-        };
-
-        if (stData) {
-            try {
-                for (const f of fs.readdirSync(path.join(stData, 'characters'))) {
-                    if (/\.(png|json)$/i.test(f)) out.characters.push(f.replace(/\.(png|json)$/i, ''));
-                }
-            } catch {
-                /* 目录不存在时忽略 */
-            }
-            try {
-                for (const f of fs.readdirSync(path.join(stData, 'worlds'))) {
-                    if (/\.json$/i.test(f)) out.worlds.push(f.replace(/\.json$/i, ''));
-                }
-            } catch {
-                /* 目录不存在时忽略 */
-            }
-        }
-
-        out.characters = [...new Set(out.characters)].sort();
-        out.worlds = [...new Set(out.worlds)].sort();
-
-        json(res, 200, {
-            ok: true,
-            catalogs: out,
-        });
-    });
 }
 
 /**

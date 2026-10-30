@@ -21,9 +21,11 @@ async function waitFor<T>(get: () => Promise<T> | T, done: (value: T) => boolean
 
 test('dsh plugin → generated HTTP draft → test → save → QQ reply works end to end', { timeout: 15000 }, async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-adapt-flow-'));
+    let lastBody: { message: string; system?: string } | undefined;
     const target = http.createServer(async (req, res) => {
         let raw = ''; for await (const chunk of req) raw += chunk;
         const body = JSON.parse(raw);
+        lastBody = body;
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ answer: 'Reply: ' + body.message }));
     });
@@ -64,7 +66,7 @@ test('dsh plugin → generated HTTP draft → test → save → QQ reply works e
                 const input = JSON.parse(msg.text);
                 const draft = { id: input.id, name: input.name,
                     connection: { url: endpoint, method: 'POST', headers: {}, timeoutMs: 1000, response: { format: 'json', path: 'answer' } },
-                    conversation: { systemPrompt: '', requestBody: { message: '{{input.text}}', session_id: '{{input.sessionKey}}' } } };
+                    conversation: { systemPrompt: '', requestBody: { message: '{{input.text}}', system: '{{input.system}}', session_id: '{{input.sessionKey}}' } } };
                 plugin!.send(JSON.stringify({ type: 'downstream_reply', requestId: msg.requestId,
                     text: JSON.stringify({ status: 'ready', summary: 'echo API', questions: [], draft }) }));
             }
@@ -98,6 +100,19 @@ test('dsh plugin → generated HTTP draft → test → save → QQ reply works e
         await waitFor(() => sent, Boolean);
         assert.equal(sent!.params.user_id, 123);
         assert.match(JSON.stringify(sent!.params.message), /Reply: hello/);
+        assert.equal((await post('/conversations', { id: 'clean', name: 'Clean', systemPrompt: 'Be concise', inputPrefix: 'prefix:', inputSuffix: '!', inputRules: [{ type: 'replace', pattern: 'hello', replacement: 'hi' }], replyRules: [{ type: 'replace', pattern: '^Reply: ', replacement: 'DONE: ' }] })).status, 200);
+        assert.equal((await post('/conversation-defaults', { backendId: 'echo-api', conversationId: 'clean' })).status, 200);
+        sent = undefined;
+        upstreamSocket!.send(JSON.stringify({ post_type: 'message', message_type: 'private', user_id: 123, self_id: 999, message: [{ type: 'text', data: { text: 'hello' } }], sender: { nickname: 'Test' } }));
+        await waitFor(() => sent, Boolean);
+        assert.match(JSON.stringify(sent!.params.message), /DONE: prefix:hi!/);
+        assert.equal(lastBody?.system, 'Be concise');
+        assert.equal((await post('/sessions/' + encodeURIComponent('main:private_123'), { conversationId: '' })).status, 200);
+        sent = undefined;
+        upstreamSocket!.send(JSON.stringify({ post_type: 'message', message_type: 'private', user_id: 123, self_id: 999, message: [{ type: 'text', data: { text: 'hello' } }], sender: { nickname: 'Test' } }));
+        await waitFor(() => sent, Boolean);
+        assert.match(JSON.stringify(sent!.params.message), /Reply: hello/);
+        assert.equal(lastBody?.system, '');
         const reloaded = loadConfigFile(path.join(root, 'config.json')).config;
         assert.equal(reloaded.downstreams.find((d) => d.id === 'echo-api')?.kind, 'http-json');
         // HTTP adapters must never be treated as inbound plugin adapters.

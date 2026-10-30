@@ -13,5 +13,5 @@ export const adaptationApi = {
     create: (input: AdaptationInput) => post<{ job: AdaptationJob }>('/adaptations', input),
     get: (id: string) => request<{ job: AdaptationJob }>(`/adaptations/${id}`),
     test: (id: string, draft: unknown, text: string) => post<{ ok: boolean; text: string; error?: string; elapsedMs: number }>(`/adaptations/${id}/test`, { draft, text }),
-    apply: (id: string, draft: unknown) => post<{ id: string; warning?: string; runtime?: { ok: boolean; error?: string } }>(`/adaptations/${id}/apply`, { draft }),
+    apply: (id: string, draft: unknown) => post<{ id: string; warning?: string; runtime?: { ok: boolean; error?: string } }>(`/adaptations/${id}/apply`, { draft, connectionOnly: true }),
 };

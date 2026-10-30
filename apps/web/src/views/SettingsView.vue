@@ -1,13 +1,20 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue';
+import { onMounted, computed, ref } from 'vue';
 import { Info, Cable, Database, Palette, Boxes } from 'lucide-vue-next';
 import { useStatusStore } from '@/stores/status';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
+import UiSwitch from '@/components/ui/UiSwitch.vue';
+import UiButton from '@/components/ui/UiButton.vue';
+import { api } from '@/api/client';
 
 const store = useStatusStore();
 
-onMounted(() => void store.refresh());
+const trigger = ref({ atOnly: true, privateReply: true });
+const saving = ref(false);
+const triggerNotice = ref('');
+onMounted(async () => { await store.refresh(); try { const r = await api.trigger(); trigger.value = { atOnly: r.trigger.atOnly !== false, privateReply: r.trigger.privateReply !== false }; } catch (e) { triggerNotice.value = String(e); } });
+async function saveTrigger() { saving.value = true; try { await api.updateTrigger({ trigger: trigger.value }); triggerNotice.value = '触发规则已保存'; await store.refresh(); } catch(e) { triggerNotice.value = String(e); } finally { saving.value = false; } }
 
 const frontendOrigin = computed(() => window.location.origin);
 const frontendRouteMode = computed(() => (window.location.hash ? 'hash' : 'history'));
@@ -31,16 +38,17 @@ function fmt(v: unknown, fallback = '—'): string {
                         业务配置已按功能拆分到对应页面：
                     </p>
                     <ul class="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
-                        <li>• <strong class="text-foreground">OneBot 连接 / 上游配置</strong> → SnowLuma 接入</li>
-                        <li>• <strong class="text-foreground">默认角色 / 世界书</strong> → 会话</li>
-                        <li>• <strong class="text-foreground">触发规则 / 消息限制</strong> → 会话（酒馆与 dsh 共用）</li>
-                        <li>• <strong class="text-foreground">下游实例 / dsh 服务与插件</strong> → 下游管理</li>
+                        <li>• <strong class="text-foreground">OneBot 连接 / 上游配置</strong> → 上游连接</li>
+                        <li>• <strong class="text-foreground">默认下游 / 默认会话配置</strong> → 会话管理</li>
+                        <li>• <strong class="text-foreground">前置提示词 / 消息处理</strong> → 会话配置</li>
+                        <li>• <strong class="text-foreground">下游实例 / dsh 服务与插件</strong> → 下游连接</li>
                         <li>• <strong class="text-foreground">回复分段 / 图片表情</strong> → 对应页面</li>
                     </ul>
                 </div>
             </div>
         </UiCard>
 
+        <UiCard class="space-y-4 p-5"><h2 class="text-sm font-semibold">消息触发</h2><div class="flex items-center justify-between gap-3 text-sm"><label for="trigger-private">允许私聊回复</label><UiSwitch id="trigger-private" v-model="trigger.privateReply" :disabled="saving" /></div><div class="flex items-center justify-between gap-3 text-sm"><label for="trigger-at">群聊仅在 @ 机器人时回复</label><UiSwitch id="trigger-at" v-model="trigger.atOnly" :disabled="saving" /></div><UiButton size="sm" :disabled="saving" @click="saveTrigger">保存触发规则</UiButton><p v-if="triggerNotice" role="status" class="text-xs text-muted-foreground">{{ triggerNotice }}</p></UiCard>
         <!-- 前端 -->
         <UiCard>
             <div class="flex items-center gap-3 border-b border-border/60 px-5 py-4">

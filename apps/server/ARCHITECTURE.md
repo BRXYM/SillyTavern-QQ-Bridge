@@ -296,12 +296,21 @@ v2 → v3 映射：
 
 适配器错误、资料缺失、任务生成失败、真实调用失败和运行时加载失败分别反馈，不会用配置加载成功冒充接口调用成功。集成测试使用模拟 dsh 插件和 OneBot 上游，并真实调用本地 HTTP 服务，覆盖生成、测试、保存、会话绑定与 QQ 回包；真实模型生成质量需用已连接的 dsh 验证。
 
-## 控制台信息结构
+## 控制台职责与独立会话配置
 
-产品定位为「多 QQ、多下游的自由控制台」。QQ 账号维护入口连接，下游连接维护服务实例，对话配置页面编辑实例下的 profiles，会话路由选择实例与配置。当前保存格式仍为 configVersion 3；配置尚未成为跨下游的独立实体。
+- 下游连接：只维护服务实例、地址、认证与协议映射。HTTP requestBody 是协议字段映射，输入用 input.text，前置提示词用 input.system。
+- 会话配置：顶层 conversationProfiles，包含 id/name/systemPrompt/inputPrefix/inputSuffix/inputRules/replyRules；不包含地址、认证或下游 ID。API 严格拒绝连接字段。
+- 会话管理：defaultDownstreamId 与 defaultConversationId 独立生效；会话用 backendId 与 conversationId 覆盖。conversationId 缺失或 API 传 null 表示继承，显式空字符串表示不用配置。
+- 消息链路：输入规则 → 前后缀 → 下游（携带 system）→ 回复规则 → 原账号发送。默认配置可跨下游复用；明确不使用配置时不套用旧提示词和规则。
+- 兼容：旧 profiles 保留在运行文件中，导入独立配置带只读 legacyRef。尚未编辑且仍沿用旧绑定的会话走原处理链；编辑保存后解除 preserveBehavior 标记。原连接覆盖与协议参数不被导入到新会话配置。
+- 删除配置只清理相关配置绑定，保留下游绑定；默认配置被删则回落不指定。
 
-- 总览集中展示 QQ 账号、下游连接、对话配置和会话数量，以及每条入口 / 出口的状态。
-- 对话配置支持按下游选择、新建、编辑 JSON 参数、查看使用数、主动测试及删除。测试使用独立于 QQ 的会话标识，并携带合并后的配置和系统提示。
-- 会话与路由优先展示真实生效关系，支持按账号、下游、关键词筛选并保存绑定。继承关系以服务端解析结果为准。
-- 删除配置按实际下游归属清理会话，避免不同实例下同名配置互相影响。
-- 当前继承层级为全局默认 → 会话覆盖。账号级默认路由、任意脚本执行与更多协议不属于已实现能力。
+新增 API：GET/POST /api/conversations、DELETE /api/conversations/:id、POST /api/conversations/preview（纯文本预览）、POST /api/conversation-defaults。原下游命名配置 API 仅保留兼容，核心界面不再调用。
+
+## SnowLuma 核心连接
+
+GET /api/snowluma/connection 读取现有账号、OneBot 端点和注入诊断。POST /api/snowluma/connect 只将现有连接信息保存到 Bridge 并发起连接，不写入 SnowLuma 配置。POST /api/accounts/:id/connect 重新连接已保存账号。
+
+注入诊断优先读取本机 WebUI /api/processes 中明确的 injected 状态；Windows 下可只读枚举 QQ 主进程与 mojo.<pid>.control 管道作补充。管道检测无法确认账号归属时只提示 PID。无权限、接口不兼容、未登录或不可访问时保留未知，不能由 OneBot 断线推断未注入。
+
+原 POST /api/snowluma/hook 与 hook/restore 返回 410，不再更改注入开关。旧 apply API 保留兼容，但上游页面不再调用；页面只提供检测、连接、断开与手动参数。

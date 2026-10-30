@@ -26,11 +26,20 @@ let alive = true;
 const active = computed(() => job.value?.status === 'generating');
 const stateLabels = { generating: 'dsh 正在分析', ready: '草稿已就绪', 'needs-input': '需要补充资料', failed: '生成失败', applied: '已保存为下游' };
 const textareaClass = 'w-full min-w-0 rounded-lg border border-border bg-background px-3 py-2 text-xs leading-relaxed outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-60';
+function connectionDraft(raw?: Record<string, unknown>) {
+    if (!raw) return '';
+    const conversation = raw.conversation as { requestBody?: unknown } | undefined;
+    return JSON.stringify({ id: raw.id, name: raw.name, connection: raw.connection, requestBody: conversation?.requestBody }, null, 2);
+}
+function requestDraft() {
+    const value = JSON.parse(draftText.value);
+    return { id: value.id, name: value.name, connection: value.connection, conversation: { systemPrompt: '', requestBody: value.requestBody } };
+}
 function selectJob(value: AdaptationJob) {
     clearTimeout(timer);
     job.value = value;
     Object.assign(form, value.input);
-    draftText.value = value.draft ? JSON.stringify(value.draft, null, 2) : '';
+    draftText.value = connectionDraft(value.draft);
     result.value = null;
     error.value = '';
     open.value = true;
@@ -44,7 +53,7 @@ async function poll() {
         job.value = value;
         error.value = '';
         if (value.status !== 'generating') {
-            draftText.value = value.draft ? JSON.stringify(value.draft, null, 2) : '';
+            draftText.value = connectionDraft(value.draft);
             recent.value = (await adaptationApi.list()).jobs;
         }
     } catch (e) { error.value = e instanceof Error ? e.message : String(e); }
@@ -63,7 +72,7 @@ async function generate() {
 async function test() {
     if (!job.value) return;
     busy.value = 'test'; error.value = ''; result.value = null;
-    try { result.value = await adaptationApi.test(job.value.id, JSON.parse(draftText.value), testText.value); }
+    try { result.value = await adaptationApi.test(job.value.id, requestDraft(), testText.value); }
     catch (e) { error.value = e instanceof Error ? e.message : String(e); }
     finally { busy.value = ''; }
 }
@@ -71,7 +80,7 @@ async function apply() {
     if (!job.value) return;
     busy.value = 'save'; error.value = '';
     try {
-        const saved = await adaptationApi.apply(job.value.id, JSON.parse(draftText.value));
+        const saved = await adaptationApi.apply(job.value.id, requestDraft());
         job.value = (await adaptationApi.get(job.value.id)).job;
         recent.value = (await adaptationApi.list()).jobs;
         emit('applied');
@@ -98,8 +107,8 @@ onUnmounted(() => { alive = false; clearTimeout(timer); });
         <button type="button" class="flex w-full items-center gap-3 px-5 py-4 text-left transition-colors hover:bg-primary/5" :aria-expanded="open" @click="open = !open">
             <span class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"><WandSparkles class="size-5" /></span>
             <span class="min-w-0 flex-1">
-                <span class="block text-sm font-semibold">用 dsh 适配新下游</span>
-                <span class="mt-1 block text-xs leading-relaxed text-muted-foreground">描述要接入的服务，生成连接与对话配置草稿</span>
+                <span class="block text-sm font-semibold">AI 辅助配置连接</span>
+                <span class="mt-1 block text-xs leading-relaxed text-muted-foreground">描述要接入的服务，生成连接参数与协议字段映射草稿</span>
             </span>
             <UiBadge v-if="active" tone="info">生成中</UiBadge>
             <component :is="open ? ChevronDown : ChevronRight" class="size-4 shrink-0 text-muted-foreground" />
@@ -131,7 +140,7 @@ onUnmounted(() => { alive = false; clearTimeout(timer); });
                 <ul v-if="job.questions.length" class="list-disc space-y-1 pl-5 text-xs text-warning"><li v-for="question in job.questions" :key="question">{{ question }}</li></ul>
                 <p v-if="job.error" class="text-xs text-destructive">{{ job.error }}</p>
                 <template v-if="job.draft">
-                    <label class="block space-y-1.5 text-xs font-medium">连接与对话配置
+                    <label class="block space-y-1.5 text-xs font-medium">连接参数与协议字段映射
                         <textarea v-model="draftText" :class="[textareaClass, 'font-mono']" rows="15" spellcheck="false" :readonly="job.status === 'applied'" :disabled="!!busy" @input="result = null" />
                     </label>
                     <div class="flex flex-wrap items-center gap-2">
@@ -139,7 +148,7 @@ onUnmounted(() => { alive = false; clearTimeout(timer); });
                         <UiButton size="sm" variant="outline" :disabled="!!busy" @click="test"><Loader2 v-if="busy === 'test'" class="size-3.5 animate-spin" /><Play v-else class="size-3.5" />测试草稿</UiButton>
                         <UiButton v-if="job.status === 'ready'" size="sm" :disabled="!!busy" @click="apply"><Loader2 v-if="busy === 'save'" class="size-3.5 animate-spin" /><Save v-else class="size-3.5" />保存为新下游</UiButton>
                     </div>
-                    <p class="text-[11px] text-muted-foreground">保存后新增实例与默认对话配置；在会话中选择该实例即可使用。</p>
+                    <p class="text-[11px] text-muted-foreground">这里只保存连接与接口字段映射，不创建会话配置。添加后在会话管理中绑定。</p>
                     <div v-if="result" class="rounded-lg border p-3 text-xs" :class="result.ok ? 'border-success/30 bg-success/5' : 'border-destructive/30 bg-destructive/5'">
                         <p class="font-medium">{{ result.ok ? '真实调用成功' : '真实调用失败' }} · {{ (result.elapsedMs / 1000).toFixed(1) }}s</p>
                         <p class="mt-1 whitespace-pre-wrap break-words">{{ result.ok ? result.text : result.error }}</p>

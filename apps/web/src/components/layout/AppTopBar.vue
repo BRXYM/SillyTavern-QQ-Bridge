@@ -23,9 +23,7 @@ const iconMap: Record<string, unknown> = {
 const iconComp = computed(() => iconMap[props.icon] ?? LayoutDashboard);
 
 const onebotOnline = computed(() => status.onebotConnected);
-const extOnline = computed(() => (status.status?.stClients ?? 0) > 0);
-/** 当前回复后端：taver（酒馆）/ dsh */
-const backend = computed(() => status.status?.config?.backend === 'dsh' ? 'dsh' : 'taver');
+const available = computed(() => status.downstreams.filter(d => d.enabled && d.available).length);
 </script>
 
 <template>
@@ -45,7 +43,7 @@ const backend = computed(() => status.status?.config?.backend === 'dsh' ? 'dsh' 
         <div class="hidden items-center gap-2 md:flex">
             <div
                 class="flex items-center gap-1.5 rounded-full border border-border/70 bg-card/60 px-2.5 py-1"
-                :title="onebotOnline ? 'SnowLuma 上游已连接' : 'SnowLuma 上游未连接'"
+                :title="onebotOnline ? '上游已连接' : '上游未连接'"
             >
                 <span
                     :class="[
@@ -61,21 +59,17 @@ const backend = computed(() => status.status?.config?.backend === 'dsh' ? 'dsh' 
 
             <div
                 class="flex items-center gap-1.5 rounded-full border border-border/70 bg-card/60 px-2.5 py-1"
-                :title="backend === 'dsh'
-                    ? '当前走 dsh（DeepSeek Harness）'
-                    : (extOnline ? '酒馆扩展已接入' : '酒馆扩展未接入')"
+                :title="`可用下游 ${available} / ${status.downstreams.length}`"
             >
                 <span
                     :class="[
                         'size-1.5 rounded-full',
-                        backend === 'dsh'
-                            ? 'bg-primary animate-pulse'
-                            : (extOnline ? 'bg-aurora animate-pulse' : 'bg-muted-foreground/50'),
+                        available > 0 ? 'bg-success' : 'bg-muted-foreground/50',
                     ]"
                 />
                 <Boxes class="size-3 text-muted-foreground" />
                 <span class="text-[11px] font-medium tabular-nums">
-                    {{ backend === 'dsh' ? 'dsh 后端' : `酒馆 ${status.status?.stClients ?? 0}` }}
+                    下游 {{ available }} / {{ status.downstreams.length }}
                 </span>
             </div>
         </div>

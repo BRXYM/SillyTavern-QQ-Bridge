@@ -242,6 +242,7 @@ export class SillyTavernAdapter implements DownstreamAdapter {
                     sessionKey: req.sessionKey,
                     sender: req.sender ?? 'QQ用户',
                     text: req.text,
+                    system: req.system,
                     defaultCharacter: character,
                     defaultWorld: world,
                 }));

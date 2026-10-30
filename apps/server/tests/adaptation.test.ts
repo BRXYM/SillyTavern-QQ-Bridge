@@ -42,6 +42,23 @@ test('only structured supported drafts are accepted; missing facts become questi
     const target = draftToDownstream(parseDraft(draft));
     assert.equal(target.kind, 'http-json'); assert.equal(target.profiles[0]?.settings.systemPrompt, 'test');
     assert.equal(target.profiles[0]?.settings.url, undefined);
+    const connection = draftToDownstream(parseDraft(draft), true);
+    assert.equal(connection.profiles.length, 0);
+    assert.equal(connection.settings.systemPrompt, undefined);
+    assert.deepEqual(connection.settings.requestBody, draft.conversation.requestBody);
+});
+
+test('connection-only adaptation saves protocol mapping without creating dialogue configuration', async () => {
+    const f = fixture();
+    try {
+        const job = f.service.create({ ...input });
+        await settled(f.service, job.id);
+        await f.service.apply(job.id, draft, true);
+        const target = f.deps.config().downstreams.find(d => d.id === input.id)!;
+        assert.deepEqual(target.profiles, []);
+        assert.equal(target.settings.systemPrompt, undefined);
+        assert.equal(f.deps.config().conversationProfiles.length, 0);
+    } finally { await f.cleanup(); }
 });
 
 test('generation uses an isolated dsh request, persists it, applies without changing default, and is idempotent', async () => {

@@ -24,7 +24,7 @@ export function registerAdaptationRoutes(router: Router, app: AppContext, dataDi
         json(res, 200, result);
     }));
     router.post('/api/adaptations/:id/apply', handle(async ({ res, params, body }) => {
-        json(res, 200, { ok: true, ...await service.apply(params.id!, body.draft) });
+        json(res, 200, { ok: true, ...await service.apply(params.id!, body.draft, body.connectionOnly === true) });
     }));
     return service;
 }

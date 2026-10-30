@@ -5,8 +5,8 @@ import {
     AlertTriangle, Server, Star, Info, Power, RotateCw, Plug, PlugZap,
     Terminal, FileText, ChevronDown, ChevronRight, Save,
 } from 'lucide-vue-next';
-import HttpConnectionEditor from '@/components/downstream/HttpConnectionEditor.vue';
 import AdaptationAssistant from '@/components/downstream/AdaptationAssistant.vue';
+import HttpConnectionEditor from '@/components/downstream/HttpConnectionEditor.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
@@ -50,6 +50,7 @@ const dsh = ref<DshStatus | null>(null);
 
 /** 新增表单 */
 const showForm = ref(false);
+const httpSettings = ref(JSON.stringify({ url: 'http://127.0.0.1:8000/chat', method: 'POST', headers: {}, timeoutMs: 30000, response: { format: 'json', path: 'answer' }, requestBody: { message: '{{input.text}}', system: '{{input.system}}', session_id: '{{input.sessionKey}}' } }, null, 2));
 const form = ref({ id: '', kind: 'dsh-plugin', name: '', timeoutMs: 180000 });
 
 function statusOf(id: string): DownstreamStatusDto | undefined {
@@ -144,19 +145,6 @@ async function refreshDownstreams(): Promise<void> {
     }
 }
 
-async function setDefault(id: string) {
-    saving.value = true;
-    try {
-        await api.setDefaultDownstream(id);
-        await store.refresh();
-        toast.success('已设为默认下游', id);
-    } catch (e) {
-        toast.error('设置失败', e instanceof Error ? e.message : String(e));
-    } finally {
-        saving.value = false;
-    }
-}
-
 async function toggleEnabled(
     item: {
         id: string;
@@ -232,7 +220,7 @@ async function create() {
             kind: form.value.kind,
             name: form.value.name.trim() || id,
             enabled: true,
-            settings: isDshKind(form.value.kind)
+            settings: form.value.kind === 'http-json' ? JSON.parse(httpSettings.value) : isDshKind(form.value.kind)
                 ? { timeoutMs: Number(form.value.timeoutMs) || 180000 }
                 : {},
         });
@@ -314,142 +302,6 @@ async function removePlugin() {
 
 onMounted(() => void load({ silent: true }));
 
-// ---------------- 命名配置（每个实例下多份） ----------------
-// 同一台 dsh 可以用不同人设/对话约束，同一个酒馆可以用不同角色卡。
-// 会话在「会话」页选其中之一。
-
-interface ProfileDraft {
-    id: string;
-    name: string;
-    /** 覆盖实例设置的字段（只存差异） */
-    settings: Record<string, unknown>;
-    /** 酒馆专用：固定角色卡 / 世界书 */
-    character: string;
-    world: string;
-    /** dsh 专用：用哪个 profile 目录 */
-    dshProfile: string;
-    httpSettings: string;
-}
-
-const profileDrafts = reactive<Record<string, ProfileDraft | null>>({});
-const savingProfile = ref('');
-
-/** 某实例的配置列表 */
-function profilesOf(id: string): Array<{ id: string; name: string; settings: Record<string, unknown> }> {
-    return registered.value.find((d) => d.id === id)?.profiles ?? [];
-}
-
-/** 打开「新增配置」表单 */
-function newProfile(item: { id: string }): void {
-    profileDrafts[item.id] = {
-        id: `profile_${profilesOf(item.id).length + 1}`,
-        name: '',
-        settings: {},
-        character: '',
-        world: '',
-        dshProfile: '',
-        httpSettings: JSON.stringify({ systemPrompt: '', requestBody: { message: '{{input.text}}' } }, null, 2),
-    };
-}
-
-/** 打开「编辑配置」表单 */
-function editProfile(
-    item: { id: string; kind: string },
-    profile: { id: string; name: string; settings: Record<string, unknown> },
-): void {
-    profileDrafts[item.id] = {
-        id: profile.id,
-        name: profile.name,
-        settings: { ...profile.settings },
-        character: String(profile.settings.character ?? ''),
-        world: String(profile.settings.world ?? ''),
-        dshProfile: String(profile.settings.profile ?? ''),
-        httpSettings: JSON.stringify(profile.settings, null, 2),
-    };
-}
-
-/** 保存配置：把表单字段合进 settings，空值不写入（保持继承） */
-async function saveProfile(
-    item: { id: string; kind: string },
-): Promise<void> {
-    const draft = profileDrafts[item.id];
-    if (!draft) return;
-
-    if (!/^[A-Za-z0-9_-]{1,32}$/.test(draft.id)) {
-        toast.error('配置 id 不合法', '只能包含字母、数字、下划线和短横线（1-32 位）');
-        return;
-    }
-
-    let settings: Record<string, unknown> = { ...draft.settings };
-    const isDshItem = isDshKind(item.kind);
-
-    if (item.kind === 'http-json') {
-        try {
-            const parsed = JSON.parse(draft.httpSettings);
-            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('对话配置须为 JSON 对象');
-            settings = parsed;
-        } catch (e) { toast.error('配置格式错误', e instanceof Error ? e.message : String(e)); return; }
-    } else if (isDshItem) {
-        // 只写「连哪个 profile」；提示词等行为设置由「会话」页维护
-        if (draft.dshProfile.trim()) settings.profile = draft.dshProfile.trim();
-        else delete settings.profile;
-    } else {
-        // 酒馆：固定角色卡/世界书，空 = 用会话级或默认
-        if (draft.character.trim()) settings.character = draft.character.trim();
-        else delete settings.character;
-        if (draft.world.trim()) settings.world = draft.world.trim();
-        else delete settings.world;
-    }
-
-    savingProfile.value = `${item.id}:${draft.id}`;
-    try {
-        await api.saveDownstreamProfile(item.id, {
-            id: draft.id,
-            name: draft.name.trim() || draft.id,
-            settings,
-        });
-        profileDrafts[item.id] = null;
-        await load({ silent: true });
-        toast.success('配置已保存', `${item.id} / ${draft.name || draft.id}`);
-    } catch (e) {
-        toast.error('保存失败', e instanceof Error ? e.message : String(e));
-    } finally {
-        savingProfile.value = '';
-    }
-}
-
-/** 删除配置 */
-async function removeProfile(item: { id: string }, profileId: string): Promise<void> {
-    savingProfile.value = `${item.id}:${profileId}`;
-    try {
-        const r = await api.deleteDownstreamProfile(item.id, profileId);
-        await load({ silent: true });
-        toast.success(
-            '配置已删除',
-            r.affectedSessions
-                ? `${r.affectedSessions} 个会话已回落继承`
-                : undefined,
-        );
-    } catch (e) {
-        toast.error('删除失败', e instanceof Error ? e.message : String(e));
-    } finally {
-        savingProfile.value = '';
-    }
-}
-
-/** 把某配置设为全局默认（连同它所属的实例） */
-async function setDefaultProfile(item: { id: string }, profileId: string): Promise<void> {
-    saving.value = true;
-    try {
-        await api.setDefaultDownstream(item.id, profileId);
-        await store.refresh();
-        toast.success('已设为全局默认配置', `${item.id} / ${profileId}`);
-    } catch (e) {
-        toast.error('设置失败', e instanceof Error ? e.message : String(e));
-    } finally {
-        saving.value = false;
-    }
-}
 </script>
 
 <template>
@@ -459,20 +311,19 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
             <div class="flex items-start gap-3 px-5 py-4">
                 <Info class="mt-0.5 size-4 shrink-0 text-info" />
                 <div class="min-w-0 text-xs leading-relaxed text-muted-foreground">
-                    <p class="font-medium text-foreground">下游 = 谁来回这条 QQ 消息</p>
+                    <p class="font-medium text-foreground">连接外部服务</p>
                     <p class="mt-1">
                         QQ 通过 OneBot v11 接入；下游可以有多个实例（dsh、酒馆、自建 HTTP 服务）。
-                        每个 QQ 会话可单独选一个，未指定时用「默认下游」。
-                        新下游可以在这里手动添加，也可以由插件调用注册接口自动登记。
+                        这里只维护连接地址、认证与协议映射。会话使用哪个下游，在「会话管理」中选择。
+                        支持手动添加 HTTP 接口，或由连接插件注册服务。
                     </p>
                 </div>
             </div>
         </UiCard>
 
-        <AdaptationAssistant
-            :sources="registered.filter((item) => item.enabled && isDshKind(item.kind))"
-            @applied="load({ silent: true })"
-        />
+
+
+        <AdaptationAssistant :sources="registered.filter(item => item.enabled && isDshKind(item.kind))" @applied="load({ silent: true })" />
 
         <!-- 实例之间保留独立边界，展开内容始终属于当前实例。 -->
         <section class="flex flex-col gap-5" aria-labelledby="downstream-list-title">
@@ -514,7 +365,7 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                         <label class="text-xs font-medium">类型</label>
                         <UiSelect
                             v-model="form.kind"
-                            :options="kinds.filter((k) => k.kind !== 'http-json').map((k) => ({ value: k.kind, label: k.label }))"
+                            :options="kinds.map((k) => ({ value: k.kind, label: k.label }))"
                         />
                         <p class="text-[11px] text-muted-foreground">
                             {{ kinds.find((k) => k.kind === form.kind)?.description }}
@@ -529,6 +380,7 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                         <UiInput v-model.number="form.timeoutMs" type="number" mono />
                     </div>
                 </div>
+                <label v-if="form.kind === 'http-json'" class="mt-4 block space-y-2 text-xs">HTTP 协议映射<textarea v-model="httpSettings" rows="13" spellcheck="false" class="w-full rounded-lg border border-border bg-background p-3 font-mono text-xs" /></label>
                 <div class="mt-3 flex items-center gap-2">
                     <UiButton size="sm" :disabled="saving" @click="create">
                         <Loader2 v-if="saving" class="size-3.5 animate-spin" />
@@ -600,16 +452,7 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                                 <component :is="expanded[item.id] ? ChevronDown : ChevronRight" class="size-3.5" />
                                 {{ expanded[item.id] ? '收起详情' : '连接详情' }}
                             </UiButton>
-                            <UiButton
-                                v-if="defaultId !== item.id"
-                                variant="ghost"
-                                size="sm"
-                                :disabled="saving || !item.enabled"
-                                @click="setDefault(item.id)"
-                            >
-                                <Star class="size-3.5" />
-                                设为默认
-                            </UiButton>
+
                             <UiButton
                                 variant="ghost"
                                 size="sm"
@@ -677,167 +520,6 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                             </p>
                         </div>
 
-                        <RouterLink to="/profiles" class="text-xs text-primary">前往对话配置：统一创建、编辑与测试 →</RouterLink>
-                        <!-- 对话配置：连接与行为分开管理。 -->
-                        <div class="rounded-lg border border-border/60 px-4 py-3">
-                            <div class="flex flex-wrap items-center justify-between gap-2">
-                                <p class="text-[11px] font-medium">
-                                    对话配置
-                                    <span class="ml-1 font-normal text-muted-foreground">
-                                        供会话复用，未选则使用实例设置
-                                    </span>
-                                </p>
-                                <UiButton
-                                    variant="ghost"
-                                    size="sm"
-                                    :disabled="!item.enabled"
-                                    @click="newProfile(item)"
-                                >
-                                    <Plus class="size-3" />
-                                    新建配置
-                                </UiButton>
-                            </div>
-
-                            <p
-                                v-if="profilesOf(item.id).length === 0"
-                                class="mt-1 text-[10px] text-muted-foreground"
-                            >
-                                还没有配置。{{
-                                    isDshKind(item.kind)
-                                        ? '可建多套（不同 dsh profile / 工作目录），供不同会话选用'
-                                        : item.kind === 'http-json' ? '可建多套请求模板和提示词，供不同会话选用' : '可建多套角色卡，供不同会话选用'
-                                }}
-                            </p>
-
-                            <div v-else class="mt-1.5 flex flex-wrap gap-1.5">
-                                <span
-                                    v-for="p in profilesOf(item.id)"
-                                    :key="p.id"
-                                    class="inline-flex items-center gap-1 rounded-md border border-border/60 bg-accent/30 py-1 pl-2 pr-1 text-[10px]"
-                                >
-                                    <span class="font-medium">{{ p.name || p.id }}</span>
-                                    <span class="font-mono text-muted-foreground/60">{{ p.id }}</span>
-                                    <button
-                                        type="button"
-                                        class="rounded px-1 text-muted-foreground/60 transition-colors hover:text-foreground"
-                                        :title="`编辑 ${p.id}`"
-                                        @click="editProfile(item, p)"
-                                    >
-                                        改
-                                    </button>
-                                    <button
-                                        type="button"
-                                        class="rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-destructive/10 hover:text-destructive"
-                                        :title="`删除 ${p.id}`"
-                                        :disabled="savingProfile !== ''"
-                                        @click="removeProfile(item, p.id)"
-                                    >
-                                        <Trash2 class="size-2.5" />
-                                    </button>
-                                </span>
-                            </div>
-
-                            <!-- 配置编辑表单 -->
-                            <div
-                                v-if="profileDrafts[item.id]"
-                                class="mt-2 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-2"
-                            >
-                                <div class="grid gap-2 sm:grid-cols-2">
-                                    <div class="flex flex-col gap-1">
-                                        <label class="text-[10px] font-medium">配置 id</label>
-                                        <UiInput
-                                            v-model="profileDrafts[item.id]!.id"
-                                            mono
-                                            placeholder="默认 / 客服"
-                                            class="text-xs"
-                                        />
-                                    </div>
-                                    <div class="flex flex-col gap-1">
-                                        <label class="text-[10px] font-medium">显示名称</label>
-                                        <UiInput
-                                            v-model="profileDrafts[item.id]!.name"
-                                            placeholder="留空用 id"
-                                            class="text-xs"
-                                        />
-                                    </div>
-                                </div>
-
-                                <!-- dsh：只留「连哪个 profile」，提示词等已移到会话管理 -->
-                                <template v-if="item.kind === 'http-json'">
-                                    <label class="mt-3 block text-xs font-medium">对话参数（systemPrompt / requestBody）</label>
-                                    <textarea v-model="profileDrafts[item.id]!.httpSettings" rows="8" spellcheck="false" class="mt-2 w-full rounded-lg border border-border bg-background p-3 font-mono text-xs" />
-                                </template>
-                                <template v-else-if="isDshKind(item.kind)">
-                                    <div class="mt-2 flex flex-col gap-1">
-                                        <label class="text-[10px] font-medium">dsh profile 目录</label>
-                                        <UiInput
-                                            v-model="profileDrafts[item.id]!.dshProfile"
-                                            mono
-                                            placeholder="留空 = 沿用实例设置（例如 headless / web）"
-                                            class="text-xs"
-                                        />
-                                        <p class="text-[10px] text-muted-foreground/70">
-                                            决定这条链路连哪个 dsh 实例；提示词与进度转发在「会话」页配置
-                                        </p>
-                                    </div>
-                                </template>
-
-                                <!-- 酒馆：固定角色卡 + 世界书 -->
-                                <template v-else>
-                                    <div class="mt-2 grid gap-2 sm:grid-cols-2">
-                                        <div class="flex flex-col gap-1">
-                                            <label class="text-[10px] font-medium">固定角色卡</label>
-                                            <UiInput
-                                                v-model="profileDrafts[item.id]!.character"
-                                                placeholder="留空 = 用会话所选角色"
-                                                class="text-xs"
-                                            />
-                                        </div>
-                                        <div class="flex flex-col gap-1">
-                                            <label class="text-[10px] font-medium">固定世界书</label>
-                                            <UiInput
-                                                v-model="profileDrafts[item.id]!.world"
-                                                placeholder="留空 = 用会话所选世界书"
-                                                class="text-xs"
-                                            />
-                                        </div>
-                                    </div>
-                                </template>
-
-                                <div class="mt-2 flex flex-wrap items-center gap-1.5">
-                                    <UiButton
-                                        size="sm"
-                                        :disabled="savingProfile !== ''"
-                                        @click="saveProfile(item)"
-                                    >
-                                        <Loader2
-                                            v-if="savingProfile.startsWith(`${item.id}:`)"
-                                            class="size-3 animate-spin"
-                                        />
-                                        <Save v-else class="size-3" />
-                                        保存配置
-                                    </UiButton>
-                                    <UiButton
-                                        variant="ghost"
-                                        size="sm"
-                                        @click="profileDrafts[item.id] = null"
-                                    >
-                                        取消
-                                    </UiButton>
-                                    <div class="flex-1" />
-                                    <button
-                                        v-if="profileDrafts[item.id] && profilesOf(item.id).some(
-                                            (p) => p.id === profileDrafts[item.id]!.id
-                                        )"
-                                        type="button"
-                                        class="text-[10px] text-muted-foreground hover:text-primary"
-                                        @click="setDefaultProfile(item, profileDrafts[item.id]!.id)"
-                                    >
-                                        设为全局默认
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
                     </div>
 
                     <div v-if="item.kind === 'http-json' && expanded[item.id]" :id="`downstream-details-${item.id}`" class="border-t border-border/70 bg-muted/20 px-5 py-5 sm:px-6">
@@ -1021,25 +703,6 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
             </div>
         </section>
 
-        <!-- 说明：插件自注册 -->
-        <UiCard class="border-border/60">
-            <div class="flex items-start gap-3 px-5 py-4">
-                <Server class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                <div class="min-w-0 text-xs leading-relaxed text-muted-foreground">
-                    <p class="font-medium text-foreground">插件自动注册</p>
-                    <p class="mt-1">
-                        dsh 连接插件启动时会调用
-                        <code class="font-mono">POST /api/downstreams/register</code>
-                        把自己登记成下游，无需手工配置。该接口需要凭据
-                        （配置里的 <code class="font-mono">registrationToken</code>，首次运行自动生成），
-                        且只接受本机连接。
-                    </p>
-                    <p class="mt-1.5 flex items-center gap-1.5">
-                        <Terminal class="size-3" />
-                        上游 SnowLuma 的探测与配置在「SnowLuma 接入」页。
-                    </p>
-                </div>
-            </div>
-        </UiCard>
+
     </div>
 </template>

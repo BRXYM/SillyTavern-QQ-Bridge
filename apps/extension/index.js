@@ -512,6 +512,7 @@ function onQQMessage(msg) {
         sender: msg.sender ?? 'QQ',
         text,
         sessionKey: key,
+        system: typeof msg.system === 'string' ? msg.system : '',
         defaultCharacter: msg.defaultCharacter,
         defaultWorld: msg.defaultWorld,
     });
@@ -534,6 +535,7 @@ function pump() {
 
 /** 释放忙碌状态并处理队列中的下一条 */
 function releaseBusy() {
+    try { getContext()?.setExtensionPrompt?.('SNOWLUMA_CONVERSATION_SYSTEM', '', 0, 0, false); } catch { /* 清理失败不阻塞队列 */ }
     busy = false;
     generatingFor = null;
     activeSession = null;
@@ -653,6 +655,10 @@ async function processMessage(item) {
     const rendered = extension_settings[extensionName].messageTemplate
         .replace('{sender}', item.sender)
         .replace('{text}', item.text);
+
+    // 每轮更新并在释放队列时清理，避免不同 QQ 会话或手动聊天共用提示词。
+    if (item.system && typeof ctx.setExtensionPrompt !== 'function') throw new Error('当前酒馆无法设置会话前置提示词，请更新酒馆');
+    ctx.setExtensionPrompt?.('SNOWLUMA_CONVERSATION_SYSTEM', item.system || '', 0, 0, false);
 
     // ===== 关键：走 ST 自己的发送流程 =====
     // 直接把文本写进输入框再点击发送按钮，让 ST 完整处理：

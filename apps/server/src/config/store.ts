@@ -14,6 +14,7 @@
  */
 
 import fs from 'node:fs';
+import { importLegacyConversations, parseConversation } from './conversations.ts';
 import path from 'node:path';
 import {
     DEFAULT_CONFIG,
@@ -566,6 +567,18 @@ export function loadConfigFile(file: string): LoadedConfig {
             ? normalizeV2(parsed)
             : migrateLegacy(parsed);
 
+    result.config.conversationProfiles = Array.isArray(parsed.conversationProfiles)
+        ? parsed.conversationProfiles.flatMap(p => {
+            try {
+                const profile = parseConversation(p);
+                const ref = (p as { legacyRef?: { downstreamId: string; profileId: string } }).legacyRef;
+                if (ref && typeof ref.downstreamId === 'string' && typeof ref.profileId === 'string') profile.legacyRef = ref;
+                return [profile];
+            } catch { result.notes.push('忽略无效的会话配置'); return []; }
+        })
+        : importLegacyConversations(result.config);
+    const defaultConversationId = str(parsed.defaultConversationId);
+    result.config.defaultConversationId = result.config.conversationProfiles.some(p => p.id === defaultConversationId) ? defaultConversationId : '';
     return { ...result, existed: true };
 }
 

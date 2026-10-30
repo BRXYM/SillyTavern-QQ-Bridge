@@ -4,12 +4,12 @@ import { useStatusStore } from '@/stores/status';
 import UiCard from './ui/UiCard.vue';
 const store = useStatusStore();
 const accounts = computed(() => store.status?.accounts ?? []);
-const profiles = computed(() => ((store.status?.config.downstreams ?? []) as Array<{ profiles?: unknown[] }>).reduce((n, d) => n + (d.profiles?.length ?? 0), 0));
+const profiles = computed(() => (store.status?.config.conversationProfiles as unknown[] | undefined)?.length ?? 0);
 const links = computed(() => [
     { to: '/snowluma', label: 'QQ 账号', value: accounts.value.length, detail: `${accounts.value.filter(a => a.connected).length} 个在线` },
     { to: '/downstreams', label: '下游连接', value: store.downstreams.length, detail: `${store.downstreams.filter(d => d.enabled && d.available).length} 个可用` },
-    { to: '/profiles', label: '对话配置', value: profiles.value, detail: '按下游保存，供会话复用' },
-    { to: '/sessions', label: '会话与路由', value: new Set([...Object.keys(store.status?.sessions ?? {}), ...Object.keys(store.status?.sessionChoices ?? {})]).size, detail: '查看绑定与继承关系' },
+    { to: '/profiles', label: '会话配置', value: profiles.value, detail: '独立保存，供会话复用' },
+    { to: '/sessions', label: '会话管理', value: new Set([...Object.keys(store.status?.sessions ?? {}), ...Object.keys(store.status?.sessionChoices ?? {})]).size, detail: '查看绑定与继承关系' },
 ]);
 </script>
 

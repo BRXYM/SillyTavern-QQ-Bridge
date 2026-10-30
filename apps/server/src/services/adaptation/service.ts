@@ -74,7 +74,8 @@ export function parseGeneration(text: string, input: AdaptationInput) {
     if (result.status !== 'ready' || questions.length) throw new AdaptationError('dsh 未生成可用草稿');
     return { status: 'ready' as const, summary, questions, draft: parseDraft(result.draft, input) };
 }
-export function draftToDownstream(draft: AdaptationDraft): DownstreamConfig {
+export function draftToDownstream(draft: AdaptationDraft, connectionOnly = false): DownstreamConfig {
+    if (connectionOnly) return { id: draft.id, name: draft.name, kind: 'http-json', enabled: true, settings: { ...draft.connection, requestBody: draft.conversation.requestBody }, profiles: [] };
     return { id: draft.id, name: draft.name, kind: 'http-json', enabled: true,
         settings: { ...draft.connection, ...draft.conversation },
         profiles: [{ id: 'default', name: '默认对话', settings: { ...draft.conversation } }] };
@@ -174,14 +175,14 @@ export class AdaptationService {
             return await adapter.ask({ sessionKey: `_adaptation_test_${randomUUID()}`, text, system: draft.conversation.systemPrompt, sender: 'test' });
         } finally { await adapter.dispose(); this.testers.delete(adapter); }
     }
-    async apply(id: string, raw: unknown) {
+    async apply(id: string, raw: unknown, connectionOnly = false) {
         if (this.closed) throw new AdaptationError('适配服务已关闭', 503);
         const job = this.get(id);
         if (job.status === 'applied') return { id: job.appliedId!, alreadyApplied: true };
         if (job.status !== 'ready') throw new AdaptationError('任务尚未生成可用草稿');
         const draft = parseDraft(raw, job.input);
         if (this.deps.config().downstreams.some((d) => d.id === draft.id)) throw new AdaptationError('实例 ID 已存在，不会覆盖现有配置', 409);
-        const entry = draftToDownstream(draft);
+        const entry = draftToDownstream(draft, connectionOnly);
         this.deps.updateConfig((config) => { config.downstreams.push(entry); });
         job.status = 'applied'; job.appliedId = entry.id; job.draft = draft;
         let warning: string | undefined;

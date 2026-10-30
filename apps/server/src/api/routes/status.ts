@@ -11,6 +11,7 @@
 import type { Router } from '../router.ts';
 import { json } from '../router.ts';
 import type { AppContext } from '../context.ts';
+import { collectStatus } from '../../downstream/registry.ts';
 
 export function registerStatusRoutes(router: Router, app: AppContext): void {
     router.get('/api/status', ({ res }) => {
@@ -252,7 +253,7 @@ function buildStatus(app: AppContext): StatusSnapshot {
         codeVersion: app.codeVersion,
         accounts,
         upstream: aggregate,
-        downstreams: app.downstreams.list().map((a) => a.status()),
+        downstreams: collectStatus(new Map(app.downstreams.list().map(a => [a.id, a])), cfg.downstreams),
         defaultDownstreamId: cfg.defaultDownstreamId,
         defaultDownstreamProfileId: cfg.defaultDownstreamProfileId,
         sessionBackends,

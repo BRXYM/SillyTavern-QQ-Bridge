@@ -77,6 +77,7 @@ export interface BehaviorDto {
 }
 
 export interface SessionChoiceDto {
+    conversationId?: string;
     character?: string;
     world?: string;
     replyProcessors?: unknown[];
@@ -359,6 +360,7 @@ export const api = {
         }>('/sessions'),
 
     updateSession: (payload: {
+        conversationId?: string | null;
         sessionKey: string;
         character?: string;
         world?: string;
