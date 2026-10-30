@@ -22,14 +22,14 @@ import {
     isPortOpen,
     discoverSnowLumaDir,
     UIN_REGEX,
-} from '../../../snowluma-service.mjs';
+} from '../../integrations/snowluma/snowluma-service.mjs';
 import {
     probeSillyTavern,
     installExtension,
     uninstallExtension,
     discoverSillyTavernDir,
     isPortOpen as isStPortOpen,
-} from '../../../sillytavern-service.mjs';
+} from '../../integrations/sillytavern/sillytavern-service.mjs';
 import { log } from '../../core/logger.ts';
 import {
     readSnowLumaRuntime,

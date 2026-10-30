@@ -53,10 +53,16 @@ export class InboundServer {
     private readonly options: InboundServerOptions;
     private readonly metas = new WeakMap<WebSocket, SocketMeta>();
     private heartbeat: NodeJS.Timeout | null = null;
+    private readonly readiness: Promise<void>;
 
     constructor(options: InboundServerOptions) {
         this.options = options;
         this.wss = new WebSocketServer({ host: '127.0.0.1', port: options.port });
+        this.readiness = new Promise<void>((resolve, reject) => {
+            this.wss.once('listening', resolve);
+            this.wss.once('error', reject);
+        });
+        this.wss.on('error', (error: Error) => log(`下游监听失败：${error.message}`));
 
         this.wss.on('listening', () => {
             log(`下游入站 WS 服务已启动: ws://127.0.0.1:${options.port}`);
@@ -69,11 +75,17 @@ export class InboundServer {
     }
 
     /** 主动关闭服务（退出时调用） */
+    ready(): Promise<void> {
+        return this.readiness;
+    }
+
     async close(): Promise<void> {
         if (this.heartbeat) {
             clearInterval(this.heartbeat);
             this.heartbeat = null;
         }
+        // 客户端可能不会响应关闭握手，退出时主动释放所有连接。
+        for (const socket of this.wss.clients) socket.terminate();
         await new Promise<void>((resolve) => this.wss.close(() => resolve()));
     }
 

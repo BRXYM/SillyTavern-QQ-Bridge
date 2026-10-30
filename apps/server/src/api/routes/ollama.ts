@@ -17,7 +17,7 @@ import net from 'node:net';
 import type { Router } from '../router.ts';
 import { json } from '../router.ts';
 import type { AppContext } from '../context.ts';
-import { countModelsIn } from '../../../ollama-service.mjs';
+import { countModelsIn } from '../../integrations/ollama/ollama-service.mjs';
 import { log } from '../../core/logger.ts';
 
 /** 拉取任务的进度（同一时刻只允许一个） */

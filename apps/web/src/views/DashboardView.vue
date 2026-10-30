@@ -7,6 +7,7 @@ import {
 } from 'lucide-vue-next';
 import { useStatusStore } from '@/stores/status';
 import { useToastStore } from '@/stores/toast';
+import ConsoleOverview from '@/components/ConsoleOverview.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiButton from '@/components/ui/UiButton.vue';
@@ -200,6 +201,7 @@ async function retry() {
 
 <template>
     <div class="flex flex-col gap-5">
+        <ConsoleOverview />
         <!-- ============ 顶部：健康度 + 实时链路 ============ -->
         <div class="grid gap-4 lg:grid-cols-[260px_1fr]">
             <!-- 健康环 -->

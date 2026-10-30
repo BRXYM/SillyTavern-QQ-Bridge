@@ -25,19 +25,25 @@ const routes = [
         path: '/snowluma',
         name: 'snowluma',
         component: () => import('@/views/ServicesView.vue'),
-        meta: { title: 'SnowLuma 接入', desc: '上游协议端配置', icon: 'Server', group: '服务' } satisfies NavMeta,
+        meta: { title: 'QQ 账号', desc: '多账号连接与 OneBot 接入', icon: 'Server', group: '连接与路由' } satisfies NavMeta,
     },
     {
         path: '/downstreams',
         name: 'downstreams',
         component: () => import('@/views/DownstreamsView.vue'),
-        meta: { title: '下游管理', desc: '谁来回这条消息', icon: 'Boxes', group: '服务' } satisfies NavMeta,
+        meta: { title: '下游连接', desc: '服务实例、连接状态与自动适配', icon: 'Boxes', group: '连接与路由' } satisfies NavMeta,
+    },
+    {
+        path: '/profiles',
+        name: 'profiles',
+        component: () => import('@/views/ProfilesView.vue'),
+        meta: { title: '对话配置', desc: '复用提示词、请求模板与对话行为', icon: 'SlidersHorizontal', group: '连接与路由' } satisfies NavMeta,
     },
     {
         path: '/sessions',
         name: 'sessions',
         component: () => import('@/views/SessionsView.vue'),
-        meta: { title: '会话', desc: '角色与世界书', icon: 'Users', group: '消息' } satisfies NavMeta,
+        meta: { title: '会话与路由', desc: '账号 → 会话 → 下游 → 对话配置', icon: 'Users', group: '连接与路由' } satisfies NavMeta,
     },
     {
         path: '/segmentation',

@@ -19,7 +19,7 @@ import { logger } from '../core/logger.ts';
 /** 心跳间隔：保持连接活着的代价极小，同时能让前端及时发现断流 */
 const HEARTBEAT_MS = 25000;
 
-export function handleEventStream(req: IncomingMessage, res: ServerResponse): void {
+export function handleEventStream(req: IncomingMessage, res: ServerResponse): () => void {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
@@ -61,6 +61,7 @@ export function handleEventStream(req: IncomingMessage, res: ServerResponse): vo
     req.on('close', cleanup);
     res.on('close', cleanup);
     res.on('error', cleanup);
+    return cleanup;
 }
 
 function writeEvent(res: ServerResponse, event: string, data: unknown): void {

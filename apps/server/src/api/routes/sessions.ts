@@ -53,7 +53,7 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
         if (body.profileId !== undefined && String(body.profileId) !== '') {
             const pid = String(body.profileId);
             const backendId = body.backendId !== undefined
-                ? String(body.backendId)
+                ? String(body.backendId) || app.config().defaultDownstreamId
                 : app.sessions.resolve(key).backendId;
             const target = app.config().downstreams.find((d) => d.id === backendId);
             if (!target) {

@@ -12,7 +12,7 @@ import { mergeSettings, type BridgeConfig } from '../config/schema.ts';
 import type { DownstreamConfig, DownstreamProfile } from './types.ts';
 import type { DownstreamAdapter } from './types.ts';
 import { buildAdapters, collectStatus, type AdapterDeps } from './registry.ts';
-import type { DownstreamRuntime } from '../api/context.ts';
+import type { DownstreamRuntime } from './runtime.ts';
 import { log } from '../core/logger.ts';
 import { publishStatus } from '../api/events.ts';
 
@@ -123,6 +123,24 @@ export class DownstreamManager implements DownstreamRuntime {
             log(`下游重建失败：${error}`);
             return { ok: false, error };
         }
+    }
+
+    /** 新增或编辑通用连接时不重建 dsh，避免打断正在进行的聊天。 */
+    async reloadOne(id: string): Promise<{ ok: boolean; error?: string }> {
+        try {
+            const config = this.options.config().downstreams.find((entry) => entry.id === id);
+            const old = this.adapters.get(id);
+            if (old) { await old.dispose(); this.adapters.delete(id); }
+            if (config?.enabled) {
+                const built = await buildAdapters([config], this.options.deps);
+                const adapter = built.get(id);
+                if (!adapter) return { ok: false, error: `下游 ${id} 未能加载` };
+                adapter.onChange?.(() => publishStatus('downstream', { id, available: adapter.status().available }));
+                this.adapters.set(id, adapter);
+            }
+            publishStatus('downstream', { id, reloaded: true });
+            return { ok: true };
+        } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
     }
 
     /**

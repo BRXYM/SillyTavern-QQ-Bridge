@@ -1,43 +1,88 @@
 # 后端架构
 
-```
+当前后端采用模块化单体：应用装配、业务流程、传输和第三方集成各有边界，仍用一个 Node.js 进程运行。
+
+```text
 apps/server/
 ├── src/
-│   ├── index.ts              装配与生命周期（唯一入口）
+│   ├── index.ts                   进程入口、信号处理、退出码
+│   ├── app/
+│   │   ├── application.ts         createApplication：依赖装配和启动顺序
+│   │   ├── lifecycle.ts           顺序启动、逆序关闭、启动失败回收
+│   │   ├── paths.ts               数据路径与源码版本
+│   │   ├── sessions.ts            会话初始化、旧 key 迁移、事件绑定
+│   │   ├── message-events.ts      上游事件 → 状态推送 / 消息派发
+│   │   └── diagnostics.ts         运行环境诊断
 │   ├── config/
-│   │   ├── schema.ts         配置类型 + 默认值 + mergeSettings
-│   │   └── store.ts          读写、v1→v2→v3 迁移、原子落盘
-│   ├── core/
-│   │   ├── logger.ts         环形缓冲 + 多消费者
-│   │   ├── events.ts         状态事件总线（合并 + 无订阅者零开销）
-│   │   ├── sessions.ts       会话路由/计数/会话级选择（含账号维度）
-│   │   ├── dispatch.ts       触发规则 → 选下游+配置 → 组装 prompt → 管道
-│   │   └── sending.ts        选账号 → 分段/表情 → OneBot action
-│   ├── upstream/
-│   │   ├── onebot.ts         单个 OneBot v11 客户端
-│   │   └── manager.ts        多账号上游集合（每号一条连接）
+│   │   ├── schema.ts              配置类型、默认值与设置合并
+│   │   ├── store.ts               配置迁移、读取与原子写入
+│   │   ├── runtime.ts             环境覆盖、注册 token、运行时配置
+│   │   └── behavior.ts            会话行为配置解析
+│   ├── core/                      会话、触发规则、派发、发送、日志与事件
+│   ├── upstream/                  OneBot 客户端、多账号管理、SnowLuma hook
 │   ├── downstream/
-│   │   ├── types.ts          适配器契约 + 命名配置
-│   │   ├── registry.ts       类型 → 工厂映射
-│   │   ├── manager.ts        实例生命周期 + 配置解析 + 自注册
-│   │   ├── inbound.ts        下游入站 WS（酒馆 / dsh 插件）
-│   │   ├── dsh.ts            dsh（插件优先 + headless 兜底）
-│   │   └── sillytavern.ts    酒馆扩展
-│   └── api/
-│       ├── router.ts         极简路由 + JSON 包装
-│       ├── events.ts         SSE 状态流 /api/events
-│       ├── context.ts        依赖容器
-│       └── routes/
-│           ├── status.ts     状态 / 日志 / 健康
-│           ├── downstreams.ts 下游增删改查 + 命名配置 + 自注册
-│           ├── sessions.ts   会话与触发规则
-│           ├── config.ts     全局配置 + 账号
-│           ├── faces.ts      表情库（列表 / 同步 / 打标 / 导出）
-│           ├── ollama.ts     Ollama 管理（启停 / 模型 / 拉取）
-│           ├── dsh.ts        dsh 服务与插件注入
-│           └── host.ts       SnowLuma / 酒馆本体管理
-└── *.mjs                     迁移期保留：表情库、Ollama、dsh 服务管理
+│   │   ├── types.ts               下游消息适配器契约
+│   │   ├── runtime.ts             下游运行时集合契约（与 HTTP 解耦）
+│   │   ├── registry.ts            类型注册与适配器工厂
+│   │   ├── manager.ts             实例生命周期、命名配置、自注册
+│   │   ├── inbound.ts             入站 WebSocket 协议与连接管理
+│   │   ├── listener.ts            入站监听生命周期与适配器路由
+│   │   ├── dsh.ts                 dsh 消息适配器
+│   │   └── sillytavern.ts         酒馆消息适配器
+│   ├── services/faces/
+│   │   ├── runtime.ts             表情初始化、选取与近期去重
+│   │   ├── faces-service.mjs      同步与打标编排
+│   │   ├── faces-store.mjs        表情存储与检索
+│   │   └── faces-labeler.mjs      Ollama 打标
+│   ├── integrations/
+│   │   ├── dsh/                   CLI 客户端、profile / 插件管理、运行时
+│   │   ├── ollama/                HTTP 客户端与本机服务管理
+│   │   ├── snowluma/              安装探测、OneBot 配置
+│   │   └── sillytavern/           安装探测、扩展安装
+│   ├── api/
+│   │   ├── server.ts              HTTP 服务创建、路由注册、SSE 分流
+│   │   ├── router.ts              路由匹配、请求解析和 JSON 响应
+│   │   ├── context.ts             API 依赖契约
+│   │   ├── events.ts              SSE 状态流
+│   │   └── routes/                按业务模块组织的 API 端点
+│   └── types/legacy-modules.d.ts   现有 mjs 集成模块的类型声明
+├── tests/                         应用集成与生命周期回归测试
+├── st-headless.mjs                独立酒馆 CLI 工具，仍从后端根目录运行
+├── config.json / sessions.json    运行数据，位置兼容旧版
+└── data/                          表情缓存等运行数据
 ```
+
+## 依赖与职责
+
+- `index.ts` 只处理进程。导入 `app/application.ts` 不会创建应用、连接账号或注册信号处理器。
+- `createApplication()` 装配依赖、加载配置和会话，返回 `start()` / `stop()` / `context`。测试可注入 `serverRoot` 和 `env`，使用临时数据目录。
+- `start()` 依次启动会话生命周期、表情、上游、下游、入站 WS、HTTP。任何一步失败都会回收当前步骤和此前已启动的资源。
+- `stop()` 按相反顺序释放资源；重复或并发调用共用一次关闭流程。SSE 与 WS 连接会主动断开，某一步清理失败仍继续清理其余资源。
+- `core` 保留统一业务链路；下游适配器只处理消息传输；`integrations` 处理第三方软件的具体 API、文件和进程；`services` 组合这些能力。
+- HTTP 路由从 `api/server.ts` 集中注册，业务服务无需启动 HTTP 即可复用。下游集合接口归属 `downstream/runtime.ts`。
+
+## 扩展第三方下游
+
+1. 在 `downstream/` 实现 `DownstreamAdapter`，通过 `ask()` 返回最终文本、通过 `reset()` 清理上下文。
+2. 在 `downstream/types.ts` 声明类型，并在 `registry.ts` 登记工厂和类型展示信息；需要额外依赖时扩展 `AdapterDeps`，由应用装配层注入。
+3. 第三方 HTTP / CLI / 文件操作放到 `integrations/<服务名>/`。不要复制发送、分段、表情或 QQ 账号选择逻辑。
+4. 主动连接 Bridge 的插件沿用入站 WS 协议及 token 校验；实例通过 `downstreamId` 区分。
+5. 如果需要软件管理端点，在 `api/routes/` 添加模块并在 `api/server.ts` 注册。
+
+此结构为新增协议和适配器提供位置；自然语言生成任意第三方服务适配器不属于本次结构重构。
+
+## 兼容与验证
+
+启动命令、API 路径、端口环境变量、v1/v2/v3 配置迁移、账号维度的会话 key、配置/历史文件位置保持兼容。现有 `.mjs` 集成实现搬入对应目录并更新导入，未同时改写为 TypeScript。
+
+```bash
+pnpm --filter @bridge/server typecheck
+pnpm --filter @bridge/server test
+pnpm test
+pnpm typecheck
+```
+
+后端新增测试在临时目录运行，覆盖 HTTP 健康/状态/404、SSE 清理、WS 连接关闭、两种监听端口占用、配置覆盖和 token 持久化，以及启动失败和关闭异常的资源回收。真实 QQ 和 dsh 模型调用需在部署环境另行验证。
 
 ## 数据流
 
@@ -221,3 +266,42 @@ v2 → v3 映射：
 （`SessionStore.adoptLegacyKeys`）。不迁移的话第一个号上线后
 会看到一堆"新会话"，用户已有的下游/角色绑定全丢。
 
+
+## dsh 下游适配助手
+
+下游管理页的「用 dsh 适配新下游」调用管理面专用的 `services/adaptation/service.ts`。流程为：用户填写新实例 ID、目标地址、接入目标和接口资料 → dsh 分析生成 JSON 草稿 → Bridge 校验 → 用户编辑/真实测试 → 保存为 `http-json` 下游和默认命名配置 → 在会话页选择实例与配置。
+
+- 默认选可用的默认 dsh，否则选首个可用 dsh，也可显式选择来源。来源必须为启用且可用的 dsh 实例。
+- 每个任务使用独立 `_adaptation_<uuid>` 上下文，结束后请求清理；不传入 QQ 会话历史、其它连接配置或全局凭据。dsh 本身仍运行在它原有的工具和权限环境中，生成任务不是额外的执行沙箱。
+- 模型只返回声明式 JSON。资料不足或不支持的协议返回 `needs-input` 与问题列表。Bridge 不执行生成的 JavaScript，不自动修改第三方软件。
+- `draft.connection` 保存 url、method、headers、timeoutMs、response；`draft.conversation` 保存 systemPrompt 和 requestBody。应用到现有 v3 结构时，实例 settings 保存基线，默认 profile 保存对话设置；HTTP profile 只允许覆盖这两个对话字段。
+- 新增或修改 HTTP 连接只重新加载该实例，保留 dsh 连接。保存不会覆盖同 ID 的实例，也不会切换默认下游。
+- 任务持久化到 `data/adaptations/<uuid>.json`；最近 30 个任务可从页面恢复；未完成任务在重启后标记中断。数据目录已被 gitignore。
+
+### 首版连接范围
+
+`downstream/http-json.ts` 支持同步 GET/POST、JSON 请求体、JSON 字段提取（如 `choices.0.message.content`）和纯文本响应。模板支持 `{{input.text}}`、`{{input.system}}`、`{{input.sessionKey}}`、`{{input.sender}}`、`{{input.requestId}}`。请求头额外允许 `{{env.MY_API_KEY}}`，凭据只在实际调用时读取；例如 `Authorization: Bearer {{env.MY_API_KEY}}`。URL 查询参数会编码，JSON 模板值不会被执行成代码。
+
+连接配置加载并不代表远端在线；页面的测试会真实发起调用。适配生成和保存本身不访问目标接口。连接不自动重试、不跟随重定向，超时最多 180 秒，响应体最多 2MB。当前不支持 SSE 流式、WS 自定义协议、stdio、自动轮询和任意脚本，需要这些协议时由 dsh 提出限制或要求补充同步接口。
+
+### 管理 API
+
+| API | 用途 |
+|---|---|
+| `GET /api/adaptations` | 最近任务 |
+| `POST /api/adaptations` | 创建生成任务，返回 202 与任务 ID |
+| `GET /api/adaptations/:id` | 查询进度、问题或草稿 |
+| `POST /api/adaptations/:id/test` | 用提交的 draft 与 text 真实调用目标服务 |
+| `POST /api/adaptations/:id/apply` | 保存提交的 draft 为新下游，重复应用幂等 |
+
+适配器错误、资料缺失、任务生成失败、真实调用失败和运行时加载失败分别反馈，不会用配置加载成功冒充接口调用成功。集成测试使用模拟 dsh 插件和 OneBot 上游，并真实调用本地 HTTP 服务，覆盖生成、测试、保存、会话绑定与 QQ 回包；真实模型生成质量需用已连接的 dsh 验证。
+
+## 控制台信息结构
+
+产品定位为「多 QQ、多下游的自由控制台」。QQ 账号维护入口连接，下游连接维护服务实例，对话配置页面编辑实例下的 profiles，会话路由选择实例与配置。当前保存格式仍为 configVersion 3；配置尚未成为跨下游的独立实体。
+
+- 总览集中展示 QQ 账号、下游连接、对话配置和会话数量，以及每条入口 / 出口的状态。
+- 对话配置支持按下游选择、新建、编辑 JSON 参数、查看使用数、主动测试及删除。测试使用独立于 QQ 的会话标识，并携带合并后的配置和系统提示。
+- 会话与路由优先展示真实生效关系，支持按账号、下游、关键词筛选并保存绑定。继承关系以服务端解析结果为准。
+- 删除配置按实际下游归属清理会话，避免不同实例下同名配置互相影响。
+- 当前继承层级为全局默认 → 会话覆盖。账号级默认路由、任意脚本执行与更多协议不属于已实现能力。

@@ -5,11 +5,12 @@
  * 这样「以后自由增加配置」不需要动 dispatch / sending / api 任何代码。
  */
 
+import { HttpJsonAdapter } from './http-json.ts';
 import { log } from '../core/logger.ts';
 import { DshAdapter, type DshDeps, type DshSettings } from './dsh.ts';
 import { SillyTavernAdapter, type SillyTavernDeps } from './sillytavern.ts';
 import type { DownstreamAdapter, DownstreamConfig, DownstreamKind, DownstreamStatus } from './types.ts';
-import type { DshClient } from '../../dsh-service.mjs';
+import type { DshClient } from '../integrations/dsh/dsh-service.mjs';
 
 export interface AdapterDeps {
     dsh: DshDeps;
@@ -21,6 +22,7 @@ export interface AdapterDeps {
 type Factory = (config: DownstreamConfig, deps: AdapterDeps) => DownstreamAdapter;
 
 const FACTORIES: Record<DownstreamKind, Factory> = {
+    'http-json': (config) => new HttpJsonAdapter(config),
     'dsh-plugin': (cfg, deps) =>
         new DshAdapter(cfg.id, cfg.name, cfg, deps.dsh, deps.makeHeadless),
     'dsh-headless': (cfg, deps) =>
@@ -38,6 +40,7 @@ const FACTORIES: Record<DownstreamKind, Factory> = {
 
 /** 已知的下游类型，供前端下拉 */
 export const KNOWN_KINDS: Array<{ kind: DownstreamKind; label: string; description: string }> = [
+    { kind: 'http-json', label: '通用 HTTP / JSON', description: '通过请求模板和响应字段映射接入 HTTP 接口，可由 dsh 生成配置' },
     {
         kind: 'dsh-plugin',
         label: 'dsh（DeepSeek Harness）',

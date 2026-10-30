@@ -13,7 +13,7 @@
  */
 
 /** 下游类型标识；新增类型时在这里扩展，并在 registry 里注册工厂 */
-export type DownstreamKind = 'dsh-headless' | 'dsh-plugin' | 'sillytavern';
+export type DownstreamKind = 'dsh-headless' | 'dsh-plugin' | 'sillytavern' | 'http-json';
 
 /**
  * 下游的一个命名配置。
@@ -134,6 +134,8 @@ export interface DownstreamAdapter {
     status(): DownstreamStatus;
     /** 处理一条消息 */
     ask(req: DownstreamAsk): Promise<DownstreamResult>;
+    /** 使用合并后的对话配置生成系统提示，供会话和控制台测试复用。 */
+    composeSystemPrompt?(sessionKey: string, settings?: Record<string, unknown>): string;
     /** 清空某会话的上下文（尽力而为，不支持时返回 false） */
     resetSession?(sessionKey: string, opts?: { removeWorkDir?: boolean }): Promise<boolean>;
 }

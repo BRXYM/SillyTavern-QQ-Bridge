@@ -22,7 +22,7 @@
 
 import { WebSocket } from 'ws';
 import { log } from '../core/logger.ts';
-import type { DshClient } from '../../dsh-service.mjs';
+import type { DshClient } from '../integrations/dsh/dsh-service.mjs';
 import type {
     DownstreamAdapter,
     DownstreamAsk,

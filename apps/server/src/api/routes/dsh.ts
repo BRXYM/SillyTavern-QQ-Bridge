@@ -25,8 +25,8 @@ import {
     verifyInjection,
     dshHome,
     detectHomeMismatch,
-} from '../../../dsh-profile-service.mjs';
-import { findDsh, listProfiles, invalidateDshProbe } from '../../../dsh-service.mjs';
+} from '../../integrations/dsh/dsh-profile-service.mjs';
+import { findDsh, listProfiles, invalidateDshProbe } from '../../integrations/dsh/dsh-service.mjs';
 import { log } from '../../core/logger.ts';
 
 export interface DshRouteDeps {

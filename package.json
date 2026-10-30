@@ -3,7 +3,7 @@
     "version": "3.0.0",
     "private": true,
     "type": "module",
-    "description": "QQ <-> SillyTavern bridge with service orchestration",
+    "description": "Multi-account QQ and multi-downstream control console",
     "engines": {
         "node": ">=22"
     },
@@ -14,7 +14,7 @@
         "build": "pnpm --filter @bridge/web build",
         "start": "pnpm --filter @bridge/server start",
         "test": "pnpm -r test",
-        "typecheck": "pnpm --filter @bridge/web typecheck"
+        "typecheck": "pnpm --filter @bridge/server typecheck && pnpm --filter @bridge/web typecheck"
     },
     "devDependencies": {
         "typescript": "~5.9.3"

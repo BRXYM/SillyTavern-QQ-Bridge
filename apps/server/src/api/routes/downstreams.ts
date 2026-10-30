@@ -30,6 +30,7 @@ import {
     normalizeProgress,
     normalizePrompt,
 } from '../../config/behavior.ts';
+import { parseHttpConnection, validateRequestBody } from '../../downstream/http-json.ts';
 import { log } from '../../core/logger.ts';
 
 const VALID_KINDS = new Set<string>(KNOWN_KINDS.map((k) => k.kind));
@@ -75,7 +76,9 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
             }
         });
 
-        const reload = await app.downstreams.reload();
+        const reload = parsed.value.kind === 'http-json' && app.downstreams.reloadOne
+            ? await app.downstreams.reloadOne(parsed.value.id)
+            : await app.downstreams.reload();
         log(`下游已${existing ? '更新' : '新增'}：${parsed.value.id}（${parsed.value.kind}）`);
 
         json(res, 200, {
@@ -221,6 +224,15 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
             return;
         }
 
+        if (cfg.downstreams.find((d) => d.id === id)?.kind === 'http-json') {
+            try {
+                const settings = parsed.value.settings;
+                if (Object.keys(settings).some((key) => !['systemPrompt', 'requestBody'].includes(key))) throw new Error('HTTP 对话配置仅覆盖 systemPrompt / requestBody，连接参数请在实例中修改');
+                if (settings.systemPrompt !== undefined && typeof settings.systemPrompt !== 'string') throw new Error('systemPrompt 必须是文本');
+                validateRequestBody(settings.requestBody);
+            } catch (e) { json(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) }); return; }
+        }
+
         let created = false;
         app.updateConfig((c) => {
             const target = c.downstreams.find((d) => d.id === id);
@@ -254,9 +266,8 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
 
         // 用到这份配置的会话回落「继承」，否则它们会指向不存在的配置
         const affected = Object.entries(app.sessions.snapshot())
-            .filter(([, v]) => v.profileId === pid && (v.backendId === id || v.backendId === undefined))
+            .filter(([key, v]) => v.profileId === pid && app.sessions.resolve(key).backendId === id)
             .map(([k]) => k);
-        for (const key of affected) app.sessions.clearField(key, 'profileId');
 
         app.updateConfig((c) => {
             const d = c.downstreams.find((x) => x.id === id);
@@ -266,6 +277,7 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
                 c.defaultDownstreamProfileId = '';
             }
         });
+        for (const key of affected) app.sessions.clearField(key, 'profileId');
 
         log(`下游 ${id} 的配置已删除：${pid}（${affected.length} 个会话回落继承）`);
         json(res, 200, { ok: true, affectedSessions: affected.length });
@@ -292,7 +304,8 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
         const result = await adapter.ask({
             sessionKey,
             text,
-            system: '',
+            system: adapter.composeSystemPrompt?.(sessionKey, resolved.settings)
+                ?? String(resolved.settings.systemPrompt ?? normalizePrompt(resolved.settings.prompt).extra ?? ''),
             sender: 'test',
             // 用选定配置测试，而不是实例设置 —— 否则测不出配置里的问题
             settings: resolved.settings,
@@ -416,6 +429,14 @@ function parseDownstreamBody(
     const settings = body.settings;
     if (settings !== undefined && (typeof settings !== 'object' || settings === null)) {
         return { error: 'settings 必须是对象' };
+    }
+
+    if (kind === 'http-json') {
+        try {
+            const s = settings as Record<string, unknown>;
+            parseHttpConnection(Object.fromEntries(['url', 'method', 'headers', 'timeoutMs', 'response'].map((k) => [k, s?.[k]])));
+            validateRequestBody(s?.requestBody);
+        } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
     }
 
     // 只有显式传了 profiles 才覆盖（见调用处的保留逻辑）

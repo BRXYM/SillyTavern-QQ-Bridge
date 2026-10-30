@@ -7,7 +7,12 @@
         "moduleResolution": "NodeNext",
         "allowImportingTsExtensions": true,
         "rewriteRelativeImportExtensions": true,
-        "types": ["node"]
+        "types": [
+            "node"
+        ]
     },
-    "include": ["src/**/*.ts"]
+    "include": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+    ]
 }

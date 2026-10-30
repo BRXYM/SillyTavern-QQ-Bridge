@@ -5,6 +5,8 @@ import {
     AlertTriangle, Server, Star, Info, Power, RotateCw, Plug, PlugZap,
     Terminal, FileText, ChevronDown, ChevronRight, Save,
 } from 'lucide-vue-next';
+import HttpConnectionEditor from '@/components/downstream/HttpConnectionEditor.vue';
+import AdaptationAssistant from '@/components/downstream/AdaptationAssistant.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiButton from '@/components/ui/UiButton.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
@@ -326,6 +328,7 @@ interface ProfileDraft {
     world: string;
     /** dsh 专用：用哪个 profile 目录 */
     dshProfile: string;
+    httpSettings: string;
 }
 
 const profileDrafts = reactive<Record<string, ProfileDraft | null>>({});
@@ -345,6 +348,7 @@ function newProfile(item: { id: string }): void {
         character: '',
         world: '',
         dshProfile: '',
+        httpSettings: JSON.stringify({ systemPrompt: '', requestBody: { message: '{{input.text}}' } }, null, 2),
     };
 }
 
@@ -360,6 +364,7 @@ function editProfile(
         character: String(profile.settings.character ?? ''),
         world: String(profile.settings.world ?? ''),
         dshProfile: String(profile.settings.profile ?? ''),
+        httpSettings: JSON.stringify(profile.settings, null, 2),
     };
 }
 
@@ -375,10 +380,16 @@ async function saveProfile(
         return;
     }
 
-    const settings: Record<string, unknown> = { ...draft.settings };
+    let settings: Record<string, unknown> = { ...draft.settings };
     const isDshItem = isDshKind(item.kind);
 
-    if (isDshItem) {
+    if (item.kind === 'http-json') {
+        try {
+            const parsed = JSON.parse(draft.httpSettings);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('对话配置须为 JSON 对象');
+            settings = parsed;
+        } catch (e) { toast.error('配置格式错误', e instanceof Error ? e.message : String(e)); return; }
+    } else if (isDshItem) {
         // 只写「连哪个 profile」；提示词等行为设置由「会话」页维护
         if (draft.dshProfile.trim()) settings.profile = draft.dshProfile.trim();
         else delete settings.profile;
@@ -450,7 +461,7 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                 <div class="min-w-0 text-xs leading-relaxed text-muted-foreground">
                     <p class="font-medium text-foreground">下游 = 谁来回这条 QQ 消息</p>
                     <p class="mt-1">
-                        SnowLuma 是唯一上游；下游可以有多个实例（dsh、酒馆、多个 dsh 各连不同模型）。
+                        QQ 通过 OneBot v11 接入；下游可以有多个实例（dsh、酒馆、自建 HTTP 服务）。
                         每个 QQ 会话可单独选一个，未指定时用「默认下游」。
                         新下游可以在这里手动添加，也可以由插件调用注册接口自动登记。
                     </p>
@@ -458,12 +469,17 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
             </div>
         </UiCard>
 
-        <!-- 列表 -->
-        <UiCard>
-            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-3.5">
+        <AdaptationAssistant
+            :sources="registered.filter((item) => item.enabled && isDshKind(item.kind))"
+            @applied="load({ silent: true })"
+        />
+
+        <!-- 实例之间保留独立边界，展开内容始终属于当前实例。 -->
+        <section class="flex flex-col gap-5" aria-labelledby="downstream-list-title">
+            <div class="flex flex-wrap items-center justify-between gap-3 px-1">
                 <div class="flex items-center gap-2">
                     <Boxes class="size-4 text-muted-foreground" />
-                    <h3 class="text-sm font-semibold tracking-tight">下游实例</h3>
+                    <h3 id="downstream-list-title" class="text-base font-semibold tracking-tight">下游实例</h3>
                     <UiBadge tone="outline" class="text-micro">{{ registered.length }} 个</UiBadge>
                     <UiBadge :tone="store.live ? 'success' : 'secondary'" dot class="text-micro">
                         {{ store.live ? '实时' : '轮询' }}
@@ -487,7 +503,7 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
             </div>
 
             <!-- 新增表单 -->
-            <div v-if="showForm" class="border-b border-border/40 bg-accent/20 px-5 py-4">
+            <div v-if="showForm" class="rounded-xl border border-primary/25 bg-card p-5 shadow-sm">
                 <div class="grid gap-3 sm:grid-cols-2">
                     <div class="flex flex-col gap-1.5">
                         <label class="text-xs font-medium">实例 id</label>
@@ -498,7 +514,7 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                         <label class="text-xs font-medium">类型</label>
                         <UiSelect
                             v-model="form.kind"
-                            :options="kinds.map((k) => ({ value: k.kind, label: k.label }))"
+                            :options="kinds.filter((k) => k.kind !== 'http-json').map((k) => ({ value: k.kind, label: k.label }))"
                         />
                         <p class="text-[11px] text-muted-foreground">
                             {{ kinds.find((k) => k.kind === form.kind)?.description }}
@@ -523,82 +539,110 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                 </div>
             </div>
 
-            <div v-if="registered.length === 0" class="px-5 py-8 text-center text-xs text-muted-foreground">
+            <UiCard v-if="registered.length === 0" class="px-5 py-10 text-center text-sm text-muted-foreground">
                 还没有下游实例
-            </div>
+            </UiCard>
 
-            <div v-else class="divide-y divide-border/50">
-                <div v-for="item in registered" :key="item.id">
-                    <!-- 实例主行 -->
-                    <div class="px-5 py-3.5">
-                        <div class="flex flex-wrap items-center justify-between gap-2">
-                            <div class="flex flex-wrap items-center gap-2">
-                                <button
-                                    v-if="isDshKind(item.kind)"
-                                    class="text-muted-foreground transition-colors hover:text-foreground"
-                                    @click="toggle(item.id)"
-                                >
-                                    <component :is="expanded[item.id] ? ChevronDown : ChevronRight" class="size-3.5" />
-                                </button>
-                                <span class="font-mono text-xs">{{ item.id }}</span>
-                                <UiBadge tone="outline" class="text-micro">{{ kindLabel(item.kind) }}</UiBadge>
-                                <UiBadge v-if="defaultId === item.id" tone="info" class="text-micro">
-                                    <Star class="mr-0.5 size-2.5" />
-                                    默认
-                                </UiBadge>
-                                <UiBadge
-                                    :tone="statusOf(item.id)?.available ? 'success' : 'warning'"
-                                    dot
-                                    class="text-micro"
-                                >
-                                    {{ statusOf(item.id)?.available ? '可用' : '离线' }}
-                                </UiBadge>
-                                <UiBadge v-if="!item.enabled" tone="outline" class="text-micro">已停用</UiBadge>
+            <div v-else class="flex flex-col gap-6">
+                <UiCard
+                    v-for="item in registered"
+                    :key="item.id"
+                    class="overflow-hidden border-border shadow-sm transition-[border-color,box-shadow]"
+                    :class="defaultId === item.id ? 'border-primary/40 ring-1 ring-primary/10' : ''"
+                    :aria-labelledby="`downstream-title-${item.id}`"
+                >
+                    <!-- 卡片头部始终展示实例身份，操作只作用于当前卡片。 -->
+                    <div
+                        class="grid gap-4 border-b border-border/70 px-5 py-5 sm:px-6 xl:grid-cols-[minmax(0,1fr)_auto]"
+                        :class="defaultId === item.id ? 'bg-primary/5' : 'bg-muted/25'"
+                    >
+                        <div class="flex min-w-0 flex-1 items-start gap-3.5">
+                            <div
+                                class="flex size-11 shrink-0 items-center justify-center rounded-xl border"
+                                :class="isDshKind(item.kind) ? 'border-primary/15 bg-primary/10 text-primary' : 'border-info/15 bg-info/10 text-info'"
+                            >
+                                <component :is="isDshKind(item.kind) ? Terminal : Server" class="size-5" />
                             </div>
-                            <div class="flex flex-wrap items-center gap-1.5">
-                                <UiButton
-                                    v-if="defaultId !== item.id"
-                                    variant="ghost"
-                                    size="sm"
-                                    :disabled="saving || !item.enabled"
-                                    @click="setDefault(item.id)"
-                                >
-                                    <Star class="size-3.5" />
-                                    设为默认
-                                </UiButton>
-                                <UiButton
-                                    variant="ghost"
-                                    size="sm"
-                                    :disabled="testing !== '' || !item.enabled"
-                                    @click="runTest(item.id)"
-                                >
-                                    <Loader2 v-if="testing === item.id" class="size-3.5 animate-spin" />
-                                    <Play v-else class="size-3.5" />
-                                    测试
-                                </UiButton>
-                                <UiButton
-                                    variant="ghost"
-                                    size="sm"
-                                    :disabled="removing !== ''"
-                                    @click="remove(item.id)"
-                                >
-                                    <Loader2 v-if="removing === item.id" class="size-3.5 animate-spin" />
-                                    <Trash2 v-else class="size-3.5" />
-                                </UiButton>
+                            <div class="min-w-0">
+                                <h4 :id="`downstream-title-${item.id}`" class="break-words text-base font-semibold leading-6 tracking-tight">
+                                    {{ item.name || item.id }}
+                                </h4>
+                                <p class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                                    <span>实例 ID</span>
+                                    <code class="break-all rounded-md border border-border/70 bg-card px-1.5 py-0.5 text-[11px] text-foreground">{{ item.id }}</code>
+                                </p>
+                                <div class="mt-3 flex flex-wrap items-center gap-2">
+                                    <UiBadge tone="outline" class="bg-card text-[11px]">{{ kindLabel(item.kind) }}</UiBadge>
+                                    <UiBadge v-if="defaultId === item.id" tone="info" class="text-micro">
+                                        <Star class="mr-0.5 size-2.5" />
+                                        默认
+                                    </UiBadge>
+                                    <UiBadge
+                                        :tone="statusOf(item.id)?.available ? 'success' : 'warning'"
+                                        dot
+                                        class="text-micro"
+                                    >
+                                        {{ statusOf(item.id)?.available ? '可用' : '离线' }}
+                                    </UiBadge>
+                                    <UiBadge v-if="!item.enabled" tone="outline" class="text-micro">已停用</UiBadge>
+                                </div>
                             </div>
                         </div>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <UiButton
+                                v-if="isDshKind(item.kind) || item.kind === 'http-json'"
+                                variant="outline"
+                                size="sm"
+                                :aria-expanded="!!expanded[item.id]"
+                                :aria-controls="`downstream-details-${item.id}`"
+                                @click="toggle(item.id)"
+                            >
+                                <component :is="expanded[item.id] ? ChevronDown : ChevronRight" class="size-3.5" />
+                                {{ expanded[item.id] ? '收起详情' : '连接详情' }}
+                            </UiButton>
+                            <UiButton
+                                v-if="defaultId !== item.id"
+                                variant="ghost"
+                                size="sm"
+                                :disabled="saving || !item.enabled"
+                                @click="setDefault(item.id)"
+                            >
+                                <Star class="size-3.5" />
+                                设为默认
+                            </UiButton>
+                            <UiButton
+                                variant="ghost"
+                                size="sm"
+                                :disabled="testing !== '' || !item.enabled"
+                                @click="runTest(item.id)"
+                            >
+                                <Loader2 v-if="testing === item.id" class="size-3.5 animate-spin" />
+                                <Play v-else class="size-3.5" />
+                                测试
+                            </UiButton>
+                            <UiButton
+                                variant="ghost"
+                                size="sm"
+                                :disabled="removing !== ''"
+                                :aria-label="`删除实例 ${item.name || item.id}`"
+                                :title="`删除实例 ${item.name || item.id}`"
+                                @click="remove(item.id)"
+                            >
+                                <Loader2 v-if="removing === item.id" class="size-3.5 animate-spin" />
+                                <Trash2 v-else class="size-3.5" />
+                            </UiButton>
+                        </div>
+                    </div>
 
-                        <p class="mt-1 text-[11px] text-muted-foreground">
-                            {{ item.name }}
-                            <span v-if="statusOf(item.id)?.reason" class="ml-1 opacity-80">
-                                · {{ statusOf(item.id)!.reason }}
-                            </span>
+                    <div class="space-y-4 px-5 py-5 sm:px-6">
+                        <p v-if="statusOf(item.id)?.reason" class="text-xs leading-relaxed text-muted-foreground">
+                            {{ statusOf(item.id)!.reason }}
                         </p>
 
-                        <div class="mt-2 flex items-center justify-between rounded-md border border-border/50 px-2.5 py-1.5">
+                        <div class="flex items-center justify-between gap-4 rounded-lg border border-border/60 bg-muted/15 px-4 py-3">
                             <div class="min-w-0">
-                                <p class="text-[11px] font-medium">启用</p>
-                                <p class="text-[10px] text-muted-foreground">
+                                <p class="text-xs font-medium">启用此实例</p>
+                                <p class="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                                     停用后不再接收新消息（会话引用它的会报错）
                                 </p>
                             </div>
@@ -633,13 +677,14 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                             </p>
                         </div>
 
-                        <!-- 命名配置：同一实例下的多套人设 / 角色卡 -->
-                        <div class="mt-2 rounded-md border border-border/50 px-2.5 py-2">
+                        <RouterLink to="/profiles" class="text-xs text-primary">前往对话配置：统一创建、编辑与测试 →</RouterLink>
+                        <!-- 对话配置：连接与行为分开管理。 -->
+                        <div class="rounded-lg border border-border/60 px-4 py-3">
                             <div class="flex flex-wrap items-center justify-between gap-2">
                                 <p class="text-[11px] font-medium">
-                                    配置
+                                    对话配置
                                     <span class="ml-1 font-normal text-muted-foreground">
-                                        会话可选用，未选则用实例设置
+                                        供会话复用，未选则使用实例设置
                                     </span>
                                 </p>
                                 <UiButton
@@ -660,7 +705,7 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                                 还没有配置。{{
                                     isDshKind(item.kind)
                                         ? '可建多套（不同 dsh profile / 工作目录），供不同会话选用'
-                                        : '可建多套角色卡，供不同会话选用'
+                                        : item.kind === 'http-json' ? '可建多套请求模板和提示词，供不同会话选用' : '可建多套角色卡，供不同会话选用'
                                 }}
                             </p>
 
@@ -718,7 +763,11 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                                 </div>
 
                                 <!-- dsh：只留「连哪个 profile」，提示词等已移到会话管理 -->
-                                <template v-if="isDshKind(item.kind)">
+                                <template v-if="item.kind === 'http-json'">
+                                    <label class="mt-3 block text-xs font-medium">对话参数（systemPrompt / requestBody）</label>
+                                    <textarea v-model="profileDrafts[item.id]!.httpSettings" rows="8" spellcheck="false" class="mt-2 w-full rounded-lg border border-border bg-background p-3 font-mono text-xs" />
+                                </template>
+                                <template v-else-if="isDshKind(item.kind)">
                                     <div class="mt-2 flex flex-col gap-1">
                                         <label class="text-[10px] font-medium">dsh profile 目录</label>
                                         <UiInput
@@ -791,10 +840,15 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                         </div>
                     </div>
 
+                    <div v-if="item.kind === 'http-json' && expanded[item.id]" :id="`downstream-details-${item.id}`" class="border-t border-border/70 bg-muted/20 px-5 py-5 sm:px-6">
+                        <HttpConnectionEditor :item="item" @saved="load({ silent: true })" />
+                    </div>
+
                     <!-- dsh 实例展开：常驻服务 + 连接插件 -->
                     <div
                         v-if="isDshKind(item.kind) && expanded[item.id]"
-                        class="border-t border-border/40 bg-accent/10 px-5 py-3.5"
+                        :id="`downstream-details-${item.id}`"
+                        class="border-t border-border/70 bg-muted/20 px-5 py-5 sm:px-6"
                     >
                         <!-- 环境 -->
                         <div class="mb-3 grid gap-x-6 gap-y-1.5 text-[11px] sm:grid-cols-2">
@@ -963,9 +1017,9 @@ async function setDefaultProfile(item: { id: string }, profileId: string): Promi
                         </div>
 
                     </div>
-                </div>
+                </UiCard>
             </div>
-        </UiCard>
+        </section>
 
         <!-- 说明：插件自注册 -->
         <UiCard class="border-border/60">

@@ -61,7 +61,7 @@ const activeName = computed(() => String(route.name ?? ''));
                     <span class="text-[13px] font-bold tracking-tight">SnowLuma Bridge</span>
                 </div>
                 <span class="block whitespace-nowrap text-[11px] text-muted-foreground">
-                    QQ ↔ 酒馆 · 桥接中枢
+                    多 QQ · 多下游 · 自由控制台
                 </span>
             </div>
         </div>

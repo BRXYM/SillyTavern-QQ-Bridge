@@ -4,6 +4,7 @@ import {
     Users, Star, Save, RotateCcw, Info, SlidersHorizontal, ShieldCheck, Settings2,
 } from 'lucide-vue-next';
 import { useStatusStore } from '@/stores/status';
+import SessionRoutes from '@/components/SessionRoutes.vue';
 import UiCard from '@/components/ui/UiCard.vue';
 import UiBadge from '@/components/ui/UiBadge.vue';
 import UiSelect from '@/components/ui/UiSelect.vue';
@@ -383,6 +384,10 @@ function effectiveDownstream(key: string): {
     };
 }
 
+function isHttp(id: string): boolean {
+    return downstreamList.value.find((item) => item.id === id)?.kind === 'http-json';
+}
+
 /** 该下游是否是 dsh（用于配色与文案） */
 function isDsh(id: string): boolean {
     const hit = downstreamList.value.find((d) => d.id === id);
@@ -580,6 +585,7 @@ const groupedSessions = computed(() => {
 
 <template>
     <div class="flex flex-col gap-5">
+        <SessionRoutes />
         <!-- ============ 全局默认 ============ -->
         <UiCard>
             <div class="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
@@ -915,6 +921,9 @@ const groupedSessions = computed(() => {
                                 <template v-if="isDsh(effectiveDownstream(key).backendId)">
                                     该会话交给 dsh 直接回答，不使用下方角色卡；群聊 @ / 私聊开关与白名单仍然生效
                                 </template>
+                                <template v-else-if="isHttp(effectiveDownstream(key).backendId)">
+                                    该会话调用所选 HTTP 接口，请求格式和回复字段由下游配置决定
+                                </template>
                                 <template v-else>
                                     该会话走酒馆角色对话，角色的语气与人设来自下方所选角色
                                 </template>
@@ -1053,6 +1062,9 @@ const groupedSessions = computed(() => {
                     <p class="mt-2 text-[11px] text-muted-foreground/70">
                         <template v-if="isDsh(effectiveDownstream(key).backendId)">
                             dsh 会以所选角色作为人设提示，但不加载酒馆世界书全文
+                        </template>
+                        <template v-else-if="isHttp(effectiveDownstream(key).backendId)">
+                            HTTP 接口使用下游配置中的请求模板和系统提示词；角色卡与世界书不参与此次调用
                         </template>
                         <template v-else>
                             实际生效：角色

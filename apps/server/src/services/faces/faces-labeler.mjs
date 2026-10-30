@@ -16,7 +16,7 @@
  */
 import fs from 'node:fs';
 import { TAG_VOCAB, flatVocab } from './faces-store.mjs';
-import { OllamaClient, DEFAULT_BASE } from './ollama-service.mjs';
+import { OllamaClient, DEFAULT_BASE } from '../../integrations/ollama/ollama-service.mjs';
 
 export class OllamaLabeler {
     /**
