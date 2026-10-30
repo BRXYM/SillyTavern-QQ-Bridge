@@ -593,6 +593,10 @@ export function loadConfigFile(file: string): LoadedConfig {
         } catch { result.notes.push('忽略无效的流程定义'); return []; }
     }) : [];
     result.config.defaultFlowId = str(parsed.defaultFlowId);
+    result.config.downstreamFlowDefaults = {};
+    if (parsed.downstreamFlowDefaults && typeof parsed.downstreamFlowDefaults === 'object' && !Array.isArray(parsed.downstreamFlowDefaults)) {
+        for (const [id, flowId] of Object.entries(parsed.downstreamFlowDefaults)) if (typeof flowId === 'string' && !['__proto__', 'constructor', 'prototype'].includes(id)) result.config.downstreamFlowDefaults[id] = flowId;
+    }
     return { ...result, existed: true };
 }
 

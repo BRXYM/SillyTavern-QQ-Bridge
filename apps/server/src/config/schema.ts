@@ -136,6 +136,7 @@ export interface SnowLumaConfig {
 export interface BridgeConfig {
     flows: MessageFlow[];
     defaultFlowId: string;
+    downstreamFlowDefaults: Record<string, string>;
     conversationProfiles: ConversationConfig[];
     defaultConversationId: string;
     /** 配置结构版本；用于判断要不要迁移 */
@@ -195,6 +196,7 @@ export const DEFAULT_UPSTREAM_PORT = 3001;
 export const DEFAULT_CONFIG: BridgeConfig = {
     flows: [],
     defaultFlowId: '',
+    downstreamFlowDefaults: {},
     conversationProfiles: [],
     defaultConversationId: '',
     configVersion: 3,

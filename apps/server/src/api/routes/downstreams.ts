@@ -92,7 +92,7 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
     // ---------------- 删除 ----------------
     router.delete('/api/downstreams/:id', async ({ res, params }) => {
         const id = params.id ?? '';
-        if (app.config().flows.some(f => f.downstreamId === id)) return json(res, 409, { error: '连接仍被流程引用，请先修改对应流程' });
+        if (app.config().flows.some(f => f.downstreamId === id || f.operators?.some(op => op.actions.some(a => a.type === 'call' && a.downstreamId === id)))) return json(res, 409, { error: '连接仍被流程引用，请先修改对应流程' });
         if (!id) {
             json(res, 400, { ok: false, error: '缺少下游 id' });
             return;

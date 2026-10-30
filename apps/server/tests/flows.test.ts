@@ -91,6 +91,7 @@ test('flow APIs preview without calls, bind one flow, protect references and tes
     target.listen(0, '127.0.0.1'); await once(target, 'listening');
     const cfg = config(); cfg.consolePort = 0; cfg.extPort = 0; cfg.registrationToken = 'fixture'; cfg.accounts.forEach(a => a.enabled = false);
     cfg.downstreams[0]!.settings = { url: `http://127.0.0.1:${(target.address() as net.AddressInfo).port}`, method: 'POST', headers: {}, timeoutMs: 1000, response: { format: 'json', path: 'answer' }, requestBody: { text: '{{input.text}}', system: '{{input.system}}', session: '{{input.sessionKey}}' } };
+    cfg.downstreams.push({ ...structuredClone(cfg.downstreams[0]!), id: 'other', name: 'Other' });
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify(cfg));
     const app = createApplication({ serverRoot: root, env: {} });
     try {
@@ -99,6 +100,8 @@ test('flow APIs preview without calls, bind one flow, protect references and tes
         const compat = parseFlow(availableFlows(app.context.config(), app.context.sessions)[0]! as unknown as Record<string, unknown>);
         const oldPreview = await (await post('/flows/preview', { flow: compat, text: 'old', reply: 'mock' })).json() as { ok: boolean; output: string };
         assert.equal(oldPreview.ok, true); assert.equal(oldPreview.output, 'mock'); assert.equal(calls, 0);
+        assert.equal((await post('/sessions/' + encodeURIComponent('main:private_legacy'), { backendId: 'api', flowId: null })).status, 200);
+        assert.equal(resolveFlow(app.context.config(), app.context.sessions, 'main:private_legacy').flow?.legacyPreserveBehavior, true);
         const changedPreview = await (await post('/flows/preview', { flow: { ...compat, name: 'edited' }, text: 'old', reply: 'mock' })).json() as { ok: boolean };
         assert.equal(changedPreview.ok, false);
         assert.equal((await post('/flows', flow())).status, 200);
@@ -108,7 +111,7 @@ test('flow APIs preview without calls, bind one flow, protect references and tes
         const key = 'main:private_123';
         assert.equal((await post('/sessions/' + encodeURIComponent(key), { flowId: 'main_flow' })).status, 200);
         assert.equal((await post('/sessions/' + encodeURIComponent(key), { flowId: 'missing' })).status, 400);
-        assert.equal((await post('/sessions/' + encodeURIComponent(key), { flowId: 'main_flow', backendId: 'api' })).status, 400);
+        assert.equal((await post('/sessions/' + encodeURIComponent(key), { flowId: 'main_flow', backendId: 'missing' })).status, 400);
         assert.equal(app.context.sessions.get(key)?.flowId, 'main_flow');
         for (const route of ['/flows/main_flow', '/downstreams/api', '/conversations/dialog']) assert.equal((await fetch(base + route, { method: 'DELETE' })).status, 409);
         const tested = await (await post('/flows/main_flow/test', { text: 'actual' })).json() as { output: string; run: { variablesSaved: boolean } };
@@ -117,12 +120,33 @@ test('flow APIs preview without calls, bind one flow, protect references and tes
         const loaded = loadConfigFile(path.join(root, 'config.json')).config;
         assert.equal(loaded.defaultFlowId, 'main_flow');
         const duplicated = path.join(root, 'duplicated.json');
-        await fs.writeFile(duplicated, JSON.stringify({ ...loaded, flows: [...loaded.flows, { ...loaded.flows[0], name: 'Duplicate' }] }));
+        await fs.writeFile(duplicated, JSON.stringify({ ...loaded, flows: [...loaded.flows, { ...loaded.flows.find(f => f.id === 'main_flow'), name: 'Duplicate' }] }));
         const deduped = loadConfigFile(duplicated);
-        assert.equal(deduped.config.flows.length, 1); assert.equal(deduped.config.flows[0]?.name, 'Main'); assert.ok(deduped.notes.some(n => n.includes('流程 id 重复')));
+        assert.equal(deduped.config.flows.length, loaded.flows.length); assert.equal(deduped.config.flows.find(f => f.id === 'main_flow')?.name, 'Main'); assert.ok(deduped.notes.some(n => n.includes('流程 id 重复')));
         const records = await (await fetch(base + '/flow-runs')).json() as { runs: unknown[] }; assert.equal(records.runs.length, 4);
         assert.equal((await post('/sessions/' + encodeURIComponent(key), { flowId: null })).status, 200);
         assert.equal(app.context.sessions.get(key)?.flowId, undefined);
         assert.equal(resolveFlow(app.context.config(), app.context.sessions, key).id, 'main_flow');
+        const composed = { id: 'composed', name: 'Composed', downstreamId: 'api', operators: [
+            { id: 'ack', name: 'Ack', actions: [{ id: 'send', type: 'reply', text: 'ack' }] },
+            { id: 'work', name: 'Work', actions: [{ id: 'first', type: 'call' }, { id: 'prefix', type: 'process', prefix: 'next:' }, { id: 'second', type: 'call', downstreamId: 'other' }, { id: 'send', type: 'reply', stopAfter: true }] },
+        ] };
+        assert.equal((await post('/flows/validate', composed)).status, 200);
+        assert.equal((await post('/flows/validate', { ...composed, operators: [{ id: 'bad', actions: [{ type: 'script' }] }] })).status, 400);
+        assert.equal((await post('/flows', composed)).status, 200);
+        const simulated = await (await post('/flows/preview', { flow: composed, text: 'hello', reply: 'default', replies: { 'work.first': 'first mock', 'work.second': 'second mock' } })).json() as { output: string; run: { deliveries: Array<{ text: string }> } };
+        assert.equal(simulated.output, 'second mock'); assert.deepEqual(simulated.run.deliveries.map(r => r.text), ['ack', 'second mock']); assert.equal(calls, 1);
+        assert.equal((await post('/flow-defaults', { downstreamId: 'api', flowId: 'composed' })).status, 200);
+        assert.equal((await post('/sessions/' + encodeURIComponent(key), { backendId: 'api', flowId: null })).status, 200);
+        assert.equal(resolveFlow(app.context.config(), app.context.sessions, key).id, 'composed');
+        assert.equal((await post('/sessions/' + encodeURIComponent(key), { backendId: 'other', flowId: 'composed' })).status, 400);
+        assert.equal((await post('/sessions/' + encodeURIComponent(key), { backendId: 'other', flowId: null })).status, 400);
+        assert.equal((await fetch(base + '/downstreams/other', { method: 'DELETE' })).status, 409, 'secondary call connections are protected too');
+        const actual = await (await post('/flows/composed/test', { text: 'actual' })).json() as { output: string; run: { deliveries: Array<{ simulated: boolean }>; variablesSaved: boolean } };
+        assert.equal(actual.output, 'next:actual'); assert.equal(calls, 3); assert.ok(actual.run.deliveries.every(r => r.simulated)); assert.equal(actual.run.variablesSaved, false);
+        assert.deepEqual(app.context.conversationState.read(key).state, emptyState());
+        const restarted = loadConfigFile(path.join(root, 'config.json')).config;
+        assert.equal(restarted.downstreamFlowDefaults.api, 'composed'); assert.equal(restarted.flows.find(f => f.id === 'composed')?.operators?.length, 2);
+
     } finally { await app.stop(); await new Promise<void>(r => target.close(() => r())); await fs.rm(root, { recursive: true, force: true }); }
 });

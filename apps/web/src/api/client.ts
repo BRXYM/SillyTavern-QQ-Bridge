@@ -78,6 +78,7 @@ export interface BehaviorDto {
 
 export interface SessionChoiceDto {
     flowId?: string;
+    flowDefault?: boolean;
     conversationId?: string;
     character?: string;
     world?: string;
@@ -368,7 +369,7 @@ export const api = {
         world?: string;
         replyProcessors?: unknown[];
         /** 下游实例 id；'' = 清除会话级设置，继承全局 */
-        backendId?: SessionBackendDto | '';
+        backendId?: SessionBackendDto | '' | null;
         /** 下游配置 id；'' = 清除会话级配置，继承默认配置 */
         profileId?: string;
         reset?: boolean;

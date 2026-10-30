@@ -18,8 +18,9 @@ apps/server/
 │   │   ├── store.ts               配置迁移、读取与原子写入
 │   │   ├── runtime.ts             环境覆盖、注册 token、运行时配置
 │   │   ├── behavior.ts            会话行为配置解析
-│   │   ├── conversations.ts       独立会话配置校验与兼容导入
+│   │   ├── conversations.ts       旧会话配置兼容与处理参数校验
 │   │   └── flows.ts               流程模型、校验、解析与兼容流程
+│   │       operators.ts           算子/操作模型与旧配置展开
 │   ├── core/                      会话、触发规则、派发、发送、日志与事件
 │   ├── upstream/                  OneBot 客户端、多账号管理、SnowLuma hook
 │   ├── downstream/
@@ -98,8 +99,8 @@ SnowLuma ──▶ upstream/manager.ts ──▶ 事件补上 accountId
                                   core/dispatch.ts
                                         │  选消息流程（会话级 > 全局默认）
                                         ▼
-                           core/flow-runtime.ts（固定四步）
-                                        │  上游处理 → 调用 → 下游处理 → 投递
+                           core/flow-runtime.ts → operator-runtime.ts
+                                        │  有序算子 → 操作列表 → 按需调用/处理/投递
                                         ▼
                              downstream/<adapter>.ts
                                         │  最终文本
@@ -117,60 +118,63 @@ SnowLuma ──▶ upstream/manager.ts ──▶ 事件补上 accountId
 **下游可扩展**：新增一种后端 = 实现 `DownstreamAdapter` + 在 `registry.ts` 注册一行，
 不需要改 dispatch、sending 或任何 api 文件。
 
-## 流程、资源与会话
+## 算子流程、资源与会话
 
-五类对象独立保存：`accounts[]` 上游账号、`downstreams[]` 连接、`conversationProfiles[]` 会话配置、`flows[]` 消息流程，以及 `sessions.json` 会话绑定。
+主要模型为 `accounts[]` 上游账号、`downstreams[]` 连接、`flows[]` 流程配置，以及 `sessions.json` 的会话绑定。`conversationProfiles` 和原命名配置字段仅在旧数据兼容边界读取。
 
-```json
-{
-  "flows": [{
-    "id": "daily_chat",
-    "name": "日常聊天",
-    "enabled": true,
-    "downstreamId": "dsh",
-    "conversationId": "assistant",
-    "upstreamEnabled": true,
-    "downstreamEnabled": true
-  }],
-  "defaultFlowId": "daily_chat"
-}
-```
+每份流程配置包含 `id/name/enabled/downstreamId/operators`。`downstreamId` 是所属下游；`operators[]` 是有序列表，每项具有稳定 `id/name/enabled/actions`。算子内的 `actions[]` 可自由混合：
 
-示例引用的连接和会话配置须已存在。流程固定为上游处理、调用下游、下游处理、回复 QQ；配置只被引用，不复制到流程中。两侧处理开关分别控制对应区域，均关闭时直接透传。API 拒绝任意节点、脚本等不支持的字段。
+| type | 参数与行为 |
+|---|---|
+| input | source 模板成为当前文本 |
+| process | source、prefix/suffix、可选 system、rules、extracts、assignments、variables、stopIfEmpty |
+| call | 可选 downstreamId（省略用所属下游）、input/system 模板 |
+| reply | text 模板、stopAfter；原账号返回，可继续执行 |
+| stop | 结束剩余操作，不隐式返回 |
 
-会话使用 `flowId`，缺失时继承 `defaultFlowId`；绑定 API 传 `null` 表示恢复继承，同时清除旧的下游/配置覆盖。显式绑定或默认流程不存在时停止执行并报错，不暗中改走其他服务。已引用的流程、连接和会话配置禁止删除，需先解除引用。
+没有固定四个阶段，也没有默认调用或默认回复。一个算子内可以先返回，再调用，再处理，再次返回；多个调用可以指向同一个或不同连接。最多 32 个算子、每算子 16 个操作、总计 128 个操作。参数严格校验，不接受脚本。当前不支持条件分支、循环、并行与分布式调度。
 
-旧会话仍可保留 `backendId/profileId/conversationId`。`config/flows.ts` 将原组合解析为稳定 ID 的兼容流程，未编辑时沿用原提示词与回复处理；显式旧覆盖仍优先于新的全局默认。选择流程后会清理旧字段。保存兼容流程采用新处理定义，但连接未变化时保留旧 profile 的协议覆盖。只读 `legacyProfileId/legacyPreserveBehavior` 来自服务端，不接受客户端注入。
+`config/operators.ts` 校验操作参数、模板、提取、变量和稳定标识。`operatorFlow()` 将旧对话字段复制为可编辑算子，编辑器从此不再依赖会话配置。旧版固定流程在未保存前保留原执行器和绑定行为；保存新定义后由通用算子运行时执行。旧协议覆盖、方向引用和服务上下文通过兼容字段保留。旧 `/profiles` 页面重定向到流程页，历史 API 为兼容调用保留。
 
-旧版下游命名配置仅作兼容。`SessionStore.resolve()` 和 `mergeSettings()` 保留旧协议合并职责；新入口通过 `resolveFlow()` 选择流程，不再将其用作新的会话路由模型。
+### 连接与配置绑定
 
-会话 key 为 `<accountId>:private_<uin>` / `<accountId>:group_<gid>_<uin>`。变量与处理队列按完整 key 隔离。会话切换流程不会重置已有变量；不同账号不会共享同一用户的状态。
+会话显式绑定 `{ backendId, flowId }`，服务器要求流程属于所选下游。`{ backendId, flowId: null }` 表示使用该下游默认配置，存储为 `flowDefault: true`；`{ backendId: null, flowId: null }` 清除显式组合，继承全局默认。
 
-### 执行与调试
+`defaultFlowId/defaultDownstreamId` 是全局默认组合；`downstreamFlowDefaults[downstreamId]` 是各下游默认配置。旧绑定仍在迁移边界解析，显式旧覆盖不会被新默认暗中覆盖。绑定不存在或不匹配时停止执行，不改走其他服务。
 
-`core/flow-runtime.ts` 提供同一个 `executeFlow()` 供真实消息、模拟预览、真实调用测试使用。`dispatch.ts` 负责原触发/准入检查、账号与路由定位，再提供下游调用、状态提交和 QQ 投递回调。
+删除流程会检查全局默认、下游默认和所有会话引用。删除连接会检查流程所属关系与所有 call 操作的额外连接引用。已保存配置不能直接改变所属下游，需要复制为新配置，避免既有会话突然交叉绑定。
 
-- 上游处理：提取 → 变量赋值 → 文本规则 → 前后追加与提示词展开。
-- 调用下游：调用现有适配器一次，不自动重试。
-- 下游处理：处理服务原始回复，成功后原子保存变量与提取历史。持久化失败停止投递。
-- 回复 QQ：沿用原账号、分段、节奏和媒体发送。记录成功/失败段数；投递失败不撤销已完成的下游结果与状态，也不自动重发。
+### 执行器与检查点
 
-上游处理后为空时跳过后续步骤；回复处理后为空时不投递。调用或处理失败不推进会话变量。模拟预览不访问下游，使用模拟回复与独立模拟状态；真实调用测试使用 `_flow_test_<uuid>`，结束后请求适配器清理，不提交真实状态、不投递 QQ。兼容流程未修改的模拟预览恢复服务端旧行为，修改后按编辑定义校验。
+`core/flow-runtime.ts` 是运行入口和追踪存储。新流程进入 `operator-runtime.ts`，按算子和操作列表顺序执行。`dispatch.ts` 保留原触发/准入、账号定位与同会话队列，并提供 ask/commit/deliver 回调。多次提交会更新 revision，避免第二次返回发生版本冲突。
 
-`FlowRunStore` 仅在内存保留最近 50 次执行，重启清空；记录各步骤状态、输入输出、前置提示词、耗时、错误，以及变量变动和是否保存。单段正文截断至 4096 字，不采集连接认证或请求头。正文自身可能包含用户敏感内容。流程页可见时每 3 秒刷新执行记录，连接和配置状态继续使用 SSE。
+当前文本、提示词、原始 QQ 消息、最近服务回复、本次各算子记录和私有变量副本构成执行上下文。模板支持 text/system、message、extracted、operators、history 和 vars。缺失数据按空文本处理并产生诊断，未来操作结果不会倒流。插入的数据不递归解释；替换规则中的数据会转义美元符号。每次提取后同时计算本操作的赋值，再处理文本。
+
+每次真实返回前保存此前变量和历史，流程正常完成时保存最终状态。后续调用失败不撤销已发回复、服务调用或已保存检查点；未提交变更丢弃。持久化失败阻止当次返回。QQ 投递失败不自动重发，不触发额外兜底回复。追踪中标出每个变量是否已保存及此前外部效果。
+
+新 call 操作的服务 sessionKey 为 `flow_<SHA256 前40位>`，摘要输入为完整会话、流程、算子、操作 ID 的 JSON 数组，长度小于 dsh 工作目录名的 60 字截断上限。稳定 ID 使排序不改变上下文，不同调用相互隔离；旧迁移调用可保留原 sessionKey。变量仍按原始完整 QQ 会话 key 保存，切换流程不会清空同名变量。
+
+### 调试与存储
+
+模拟执行不访问服务、不投递 QQ、不持久化真实状态；`replies` 映射按 `算子ID.操作ID` 指定不同调用的回复。真实测试执行所有服务调用，以 `_flow_test_<uuid>` 和各操作 ID 生成隔离服务标识，记录所有返回但不发送 QQ；结束后逐个清理使用过的适配器测试上下文。
+
+`FlowRunStore` 在内存保留最近 50 次。追踪含动态算子、操作状态、输入输出、提示词、耗时、错误、变量变更和每次返回，正文每项截断至 4096 字。不记录连接认证与请求头。流程页可见时每 3 秒刷新，其他状态保持 SSE。
+
+`ConversationState` 保留旧 vars/previous，并新增可选 operators 映射，存储上次检查点的 input/output/extracted。历史输入输出各截断 4000 字；变量和提取每映射最多 32 项，每值 4000 字；每会话最多 512000 字，总文件最多 16 MiB。状态原子写入，坏文件报错而不静默清空。读取历史使用 `history.<算子ID>`，本次数据使用 `operators.<算子ID>`。
 
 | API | 用途 |
 |---|---|
-| `GET /api/flows` | 已保存与兼容流程、默认值、引用数与会话绑定 |
-| `POST /api/flows` | 新建/更新固定流程，校验资源引用 |
-| `POST /api/flows/:id/default` | 设为全局默认，必要时物化兼容定义 |
-| `DELETE /api/flows/:id` | 删除未引用的已保存流程 |
-| `POST /api/flows/preview` | 提交 flow/text/reply/state，模拟执行 |
-| `POST /api/flows/:id/test` | 使用独立测试会话真实调用，返回步骤记录 |
-| `GET /api/flow-runs` | 最近执行，可按 flowId/sessionKey 筛选 |
-| `POST /api/sessions/:key` | `{ "flowId": "daily_chat" }` 绑定；null 继承 |
-
-首版只支持固定四步；没有分支、循环、并行、多下游串联或分布式恢复。
+| `GET /api/flows` | 下游流程配置、展开的旧定义、各默认值与绑定 |
+| `POST /api/flows` | 校验并保存流程配置 |
+| `POST /api/flows/validate` | 只校验与规范化 JSON，供导入使用 |
+| `POST /api/flows/:id/default` | 设置全局默认组合与该下游默认配置 |
+| `POST /api/flow-defaults` | 设置 downstreamId 对应的 flowId 默认值 |
+| `DELETE /api/flows/:id` | 删除未引用配置 |
+| `POST /api/flows/preview` | flow/text/reply/replies/state 模拟执行 |
+| `POST /api/flows/:id/test` | 多调用隔离测试，不投递 QQ |
+| `GET /api/flow-runs` | 追踪，可按 flowId/sessionKey 筛选 |
+| `POST /api/sessions/:key` | backendId + flowId 组合绑定/继承 |
+| `GET/POST /api/session-variables/:key` | 读取或带 revision 编辑会话变量 |
 
 ### QQ 端点
 
@@ -211,8 +215,8 @@ updateConfig    ─────────────────────�
 |---|---|
 | 下游只返回最终文本 | 分段/表情/管道统一在 Bridge，新增后端不必重写发送链路 |
 | 下游用「实例 id」而非枚举 | 同类型可配多个实例（两个 dsh 各连不同模型） |
-| 连接、会话配置和流程分离 | 多个流程复用服务与处理规则 |
-| 会话只选择流程 | 显式流程优先，否则继承全局默认 |
+| 连接与算子流程分离 | 同一连接使用多份流程配置，参数保存在算子中 |
+| 会话选择下游 + 流程配置 | 所属关系校验，支持下游默认与全局默认 |
 | 发送必须带 accountId | 多账号下用错号等于冒名发言 |
 | **每个账号必须用不同的 OneBot 端口** | SnowLuma 每个号各自监听自己的 wsServer，两个号写同一端口时后启动的那个 `EADDRINUSE` 起不来 |
 | 自注册必须带 token | 防止同机任意进程改下游配置 |
@@ -260,7 +264,7 @@ v2 → v3 映射：
 - 默认选可用的默认 dsh，否则选首个可用 dsh，也可显式选择来源。来源必须为启用且可用的 dsh 实例。
 - 每个任务使用独立 `_adaptation_<uuid>` 上下文，结束后请求清理；不传入 QQ 会话历史、其它连接配置或全局凭据。dsh 本身仍运行在它原有的工具和权限环境中，生成任务不是额外的执行沙箱。
 - 模型只返回声明式 JSON。资料不足或不支持的协议返回 `needs-input` 与问题列表。Bridge 不执行生成的 JavaScript，不自动修改第三方软件。
-- 连接模式只保存地址、认证、请求体模板与响应映射，不创建会话配置。旧适配草稿与命名配置 API 保留兼容；前置提示词和消息处理在独立会话配置中编辑。
+- 连接模式只保存地址、认证、请求体模板与响应映射，不创建会话配置。旧适配草稿与命名配置 API 保留兼容；前置提示词和消息处理直接在算子中编辑。
 - 新增或修改 HTTP 连接只重新加载该实例，保留 dsh 连接。保存不会覆盖同 ID 的实例，也不会切换默认下游。
 - 任务持久化到 `data/adaptations/<uuid>.json`；最近 30 个任务可从页面恢复；未完成任务在重启后标记中断。数据目录已被 gitignore。
 
@@ -282,17 +286,6 @@ v2 → v3 映射：
 
 适配器错误、资料缺失、任务生成失败、真实调用失败和运行时加载失败分别反馈，不会用配置加载成功冒充接口调用成功。集成测试使用模拟 dsh 插件和 OneBot 上游，并真实调用本地 HTTP 服务，覆盖生成、测试、保存、会话绑定与 QQ 回包；真实模型生成质量需用已连接的 dsh 验证。
 
-## 控制台职责与独立会话配置
-
-- 下游连接：只维护服务实例、地址、认证与协议映射。HTTP requestBody 是协议字段映射，输入用 input.text，前置提示词用 input.system。
-- 会话配置：顶层 conversationProfiles，包含 id/name/systemPrompt/inputPrefix/inputSuffix/inputRules/replyRules；不包含地址、认证或下游 ID。API 严格拒绝连接字段。
-- 消息流程：组合连接、会话配置与两侧处理开关。会话管理只维护 flowId、默认流程与单会话变量。旧默认和绑定字段仅供兼容 API 使用。
-- 消息链路：输入规则 → 前后缀 → 下游（携带 system）→ 回复规则 → 原账号发送。默认配置可跨下游复用；明确不使用配置时不套用旧提示词和规则。
-- 兼容：旧 profiles 保留在运行文件中，导入独立配置带只读 legacyRef。尚未编辑且仍沿用旧绑定的会话走原处理链；编辑保存后解除 preserveBehavior 标记。原连接覆盖与协议参数不被导入到新会话配置。
-- 被流程引用的配置禁止删除；未被流程引用的旧配置删除时清理其旧绑定。
-
-新增 API：GET/POST /api/conversations、DELETE /api/conversations/:id、POST /api/conversations/preview（纯文本预览）、POST /api/conversation-defaults。原下游命名配置 API 仅保留兼容，核心界面不再调用。
-
 ## SnowLuma 核心连接
 
 GET /api/snowluma/connection 读取现有账号、OneBot 端点和注入诊断。POST /api/snowluma/connect 只将现有连接信息保存到 Bridge 并发起连接，不写入 SnowLuma 配置。POST /api/accounts/:id/connect 重新连接已保存账号。
@@ -302,14 +295,8 @@ GET /api/snowluma/connection 读取现有账号、OneBot 端点和注入诊断�
 原 POST /api/snowluma/hook 与 hook/restore 返回 410，不再更改注入开关。旧 apply API 保留兼容，但上游页面不再调用；页面只提供检测、连接、断开与手动参数。
 
 
-## 双向处理运行时
+## 状态生命周期
 
-config/conversation-flow.ts 校验提取、初始化、赋值与模板依赖；core/conversation-engine.ts 在私有工作副本中执行上游和下游两个阶段；core/conversation-state.ts 按完整 sessionKey 排队并原子保存状态。引擎不执行脚本，不访问网络或任意文件。
+会话队列按完整账号/群/成员 key 串行，变量管理与消息处理共用相同队列。手动变量编辑携带 revision，过期返回 409，不覆盖消息新结果。应用关闭后拒绝新的排队工作，等待既有队列清理。变量状态文件保持 version=1，旧文件缺少 operators 仍可读取。
 
-上游完成提取及变量赋值后，才渲染系统提示和输入消息；下游拿到最终文本后可引用本轮两端提取值。previous 仅保存上一轮成功处理的提取映射，不存整段对话。赋值默认跳过空值；所有赋值基于同阶段提取完成后的同一个快照同时计算。
-
-只有成功调用下游的轮次提交状态；失败或上游被过滤时丢弃工作副本。持久化失败时不替换内存状态。配置切换不重置同会话变量。未启用处理的旧会话仍保持原逻辑，不更新此状态。
-
-GET /api/session-variables/:key 返回 state 与 revision；POST 接受 vars 与 revision，在同一会话队列中保存，修订不一致返回 409。POST /api/conversations/preview 使用请求内的独立 state，返回 input/system/output、extracted、下一轮 state 和 warnings，从不访问真实会话状态。
-
-应用关闭时先释放下游，再关闭会话队列。新消息与排队任务在关闭后拒绝执行。变量状态文件格式为 version=1 + sessions 映射，加载校验失败会显式报错，防止覆盖损坏文件造成静默丢失。
+测试在临时目录和模拟 OneBot 中验证算子混合操作、前置回复、多次调用、多次返回、检查点、真实 HTTP 串联、账号隔离、下游/流程匹配、历史兼容及失败不重试。真实 QQ 与模型质量需在可连接部署环境验证。

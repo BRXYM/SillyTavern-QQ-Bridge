@@ -4,7 +4,9 @@ import type { ProcessorRule } from '../config/schema.ts';
 import type { ExtractionRule, VariableAssignment } from '../config/conversation-flow.ts';
 import { record, safeName } from '../config/conversation-flow.ts';
 
+export interface OperatorRecord { input: string; output: string; extracted: Record<string, string> }
 export interface ConversationState {
+    operators?: Record<string, OperatorRecord>;
     vars: Record<string, string>;
     previous: { upstream: Record<string, string>; downstream: Record<string, string> };
 }
@@ -21,7 +23,17 @@ export function parseValues(raw: unknown): Record<string, string> {
 export function parseState(raw: unknown): ConversationState {
     if (!record(raw)) throw new Error('会话变量状态无效');
     const previous = record(raw.previous) ? raw.previous : {};
-    return { vars: parseValues(raw.vars ?? {}), previous: { upstream: parseValues(previous.upstream ?? {}), downstream: parseValues(previous.downstream ?? {}) } };
+    const state: ConversationState = { vars: parseValues(raw.vars ?? {}), previous: { upstream: parseValues(previous.upstream ?? {}), downstream: parseValues(previous.downstream ?? {}) } };
+    if (raw.operators !== undefined) {
+        if (!record(raw.operators) || Object.keys(raw.operators).length > 32) throw new Error('算子历史最多 32 项');
+        state.operators = {};
+        for (const [id, item] of Object.entries(raw.operators)) {
+            if (!safeName(id) || !record(item) || typeof item.input !== 'string' || typeof item.output !== 'string' || item.input.length > 4000 || item.output.length > 4000) throw new Error('算子历史格式无效');
+            state.operators[id] = { input: item.input, output: item.output, extracted: parseValues(item.extracted ?? {}) };
+        }
+    }
+    if (JSON.stringify(state).length > 512000) throw new Error('单会话变量与算子历史超过 512000 字');
+    return state;
 }
 
 /** 一轮调用的私有工作副本，失败时直接丢弃，只有下游成功后才提交。 */

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { executeOperatorFlow } from './operator-runtime.ts';
+import type { OperatorAction } from '../config/operators.ts';
 import { applyReplyProcessors } from '@bridge/core';
 import type { BridgeConfig, ProcessorRule } from '../config/schema.ts';
 import { validateFlow, type MessageFlow } from '../config/flows.ts';
@@ -6,11 +8,12 @@ import { ConversationTurn, emptyState, type ConversationState } from './conversa
 import type { DownstreamResult } from '../downstream/types.ts';
 
 export type StepStatus = 'pending' | 'running' | 'success' | 'skipped' | 'failed';
-export interface FlowStep { id: 'upstream' | 'call' | 'downstream' | 'reply'; name: string; status: StepStatus; input?: string; output?: string; system?: string; error?: string; elapsedMs?: number }
+export interface FlowActionRun { id: string; type: OperatorAction['type']; status: StepStatus; input?: string; output?: string; system?: string; error?: string; elapsedMs?: number; downstreamId?: string }
+export interface FlowStep { actions?: FlowActionRun[]; id: string; name: string; status: StepStatus; input?: string; output?: string; system?: string; error?: string; elapsedMs?: number }
 export interface FlowRun {
     id: string; flowId: string; flowName: string; sessionKey: string; mode: 'live' | 'preview' | 'test';
     createdAt: string; status: 'running' | 'success' | 'failed' | 'filtered'; steps: FlowStep[]; elapsedMs: number;
-    error?: string; variablesSaved: boolean; variables: Array<{ name: string; before: string; after: string }>; warnings: string[];
+    error?: string; variablesSaved: boolean; variables: Array<{ name: string; before: string; after: string; saved?: boolean }>; warnings: string[]; deliveries?: Array<{ operatorId: string; actionId: string; text: string; simulated: boolean; sent: number; failed: number }>; downstreamId?: string; partialEffects?: boolean;
 }
 const clip = (value: string) => value.length > 4096 ? value.slice(0, 4096) + '\n…（记录已截断）' : value;
 /** 只保留本次进程最近 50 次执行，不保存请求头或连接凭据。 */
@@ -21,6 +24,7 @@ export class FlowRunStore {
             { id: 'upstream', name: '上游处理', status: 'pending' }, { id: 'call', name: '调用下游', status: 'pending' },
             { id: 'downstream', name: '下游处理', status: 'pending' }, { id: 'reply', name: '回复 QQ', status: 'pending' },
         ] };
+        if (flow.operators) { run.steps = flow.operators.map(op => ({ id: op.id, name: op.name, status: 'pending', actions: op.actions.map(a => ({ id: a.id, type: a.type, status: 'pending' })) })); run.downstreamId = flow.downstreamId; run.deliveries = []; }
         this.runs.unshift(run); this.runs = this.runs.slice(0, 50); return run;
     }
     list(flowId?: string) { return structuredClone(this.runs.filter(r => !flowId || r.flowId === flowId)); }
@@ -30,12 +34,13 @@ export interface FlowExecution {
     flow: MessageFlow; config: BridgeConfig; store: FlowRunStore; sessionKey: string; mode: FlowRun['mode']; text: string;
     state?: ConversationState; legacySystem?: string; legacyRules?: ProcessorRule[];
     decorateInput?: (text: string) => string;
-    ask: (text: string, system: string) => Promise<DownstreamResult>;
+    ask: (text: string, system: string, target?: { downstreamId: string; operatorId: string; actionId: string; sessionKey: string }) => Promise<DownstreamResult>;
     commit?: (state: ConversationState) => void;
     deliver?: (text: string) => Promise<{ sent: number; failed: number }>;
 }
 /** 固定顺序执行，同一引擎用于真实消息、模拟和测试。 */
-export async function executeFlow(options: FlowExecution) {
+export async function executeFlow(options: FlowExecution): Promise<{ ok: boolean; output: string; state?: ConversationState; run: FlowRun; error?: string }> {
+    if (options.flow.operators) return executeOperatorFlow(options);
     const { flow, config } = options;
     const run = options.store.begin(flow, options.sessionKey, options.mode);
     const started = Date.now();

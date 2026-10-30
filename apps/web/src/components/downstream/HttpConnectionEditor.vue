@@ -26,7 +26,7 @@ async function save() {
 </script>
 <template>
     <div class="space-y-3">
-        <p class="text-xs leading-relaxed text-muted-foreground">连接参数与响应字段映射。认证请求头可引用环境变量，例如 Bearer 后接双花括号包裹的 env.MY_API_KEY；requestBody 只定义接口字段映射，可用 input.text、input.system 等模板变量。前置提示词与消息处理在「会话配置」中维护。</p>
+        <p class="text-xs leading-relaxed text-muted-foreground">连接参数与响应字段映射。认证请求头可引用环境变量，例如 Bearer 后接双花括号包裹的 env.MY_API_KEY；requestBody 只定义接口字段映射，可用 input.text、input.system 等模板变量。前置提示词与消息处理在「消息流程」的处理操作中维护。</p>
         <textarea v-model="text" aria-label="HTTP 连接设置" rows="12" spellcheck="false" :disabled="saving" class="w-full rounded-lg border border-border bg-background p-3 font-mono text-xs leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-ring/30" />
         <UiButton size="sm" :disabled="saving" @click="save"><Loader2 v-if="saving" class="size-3.5 animate-spin" /><Save v-else class="size-3.5" />保存连接设置</UiButton>
     </div>

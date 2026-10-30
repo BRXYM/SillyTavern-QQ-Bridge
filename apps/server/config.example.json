@@ -1,9 +1,50 @@
 {
     "configVersion": 3,
-    "flows": [],
-    "defaultFlowId": "",
-    "conversationProfiles": [],
-    "defaultConversationId": "",
+    "flows": [
+        {
+            "id": "dsh_default",
+            "name": "日常聊天",
+            "enabled": true,
+            "downstreamId": "dsh",
+            "operators": [
+                {
+                    "id": "receive",
+                    "name": "读取消息",
+                    "enabled": true,
+                    "actions": [
+                        {
+                            "id": "read",
+                            "type": "input",
+                            "source": "{{message.upstream}}"
+                        }
+                    ]
+                },
+                {
+                    "id": "answer",
+                    "name": "调用并返回",
+                    "enabled": true,
+                    "actions": [
+                        {
+                            "id": "request",
+                            "type": "call",
+                            "input": "{{text}}",
+                            "system": "{{system}}"
+                        },
+                        {
+                            "id": "send",
+                            "type": "reply",
+                            "text": "{{text}}",
+                            "stopAfter": true
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "defaultFlowId": "dsh_default",
+    "downstreamFlowDefaults": {
+        "dsh": "dsh_default"
+    },
     "consolePort": 9510,
     "extPort": 9500,
     "accounts": [

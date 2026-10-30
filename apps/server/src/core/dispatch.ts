@@ -382,25 +382,27 @@ async function dispatchEventInOrder(deps: DispatchDeps, event: OneBotEvent): Pro
     const target = deps.resolveDownstream(flow.downstreamId, flow.legacyProfileId ?? '');
     const snapshot = deps.conversationState.read(sessionKey);
     const progressCfg = normalizeProgress(target?.settings.progress);
-    const onProgress = progressCfg.enabled ? makeProgressReporter({ sending: deps.sending, target: route, cfg: progressCfg }) : undefined;
+    const onProgress = !flow.operators && progressCfg.enabled ? makeProgressReporter({ sending: deps.sending, target: route, cfg: progressCfg }) : undefined;
     log(`QQ消息 [${accountId}] → 流程 ${flow.name} [${sessionKey}]: ${parsed.text}`);
+    let revision = snapshot.revision;
     const result = await executeFlow({
         flow, config, store: deps.flowRuns, sessionKey, mode: 'live', text: parsed.text, state: snapshot.state,
         legacySystem: target?.adapter ? buildSystemPrompt(config, sessionKey, deps, target.adapter, target.settings) : '',
         legacyRules: resolveReplyRules(config, deps.sessions, sessionKey).rules,
-        decorateInput: text => messageType === 'group' ? `[群成员 ${senderName}] ${text}` : text,
-        ask: async (text, system) => {
-            if (!target?.adapter) throw new Error(`下游 ${flow.downstreamId} 未启用或启动失败`);
-            return target.adapter.ask({ sessionKey, text, system, sender: senderName,
-                settings: { ...target.settings, systemPrompt: system }, profileId: target.profile?.id, onProgress });
+        decorateInput: flow.operators ? undefined : text => messageType === 'group' ? `[群成员 ${senderName}] ${text}` : text,
+        ask: async (text, system, request) => {
+            const selected = request ? deps.resolveDownstream(request.downstreamId, request.downstreamId === flow.downstreamId ? flow.legacyProfileId ?? '' : '') : target;
+            if (!selected?.adapter) throw new Error(`下游 ${flow.downstreamId} 未启用或启动失败`);
+            return selected.adapter.ask({ sessionKey: request?.sessionKey ?? sessionKey, text, system, sender: senderName,
+                settings: { ...selected.settings, systemPrompt: system }, profileId: selected.profile?.id, onProgress });
         },
-        commit: state => { deps.conversationState.commit(sessionKey, state, snapshot.revision); },
+        commit: state => { revision = deps.conversationState.commit(sessionKey, state, revision).revision; },
         deliver: text => sendReply(deps.sending, { accountId, messageType, groupId, userId, sessionKey }, text),
     });
     if (!result.ok) {
         log(`流程 ${flow.name} 失败 [${sessionKey}]：${result.error}`);
         // QQ 投递失败不自动重发，避免重复发送或产生额外副作用。
-        if (result.run.steps[3]?.status !== 'failed') {
+        if (!flow.operators && result.run.steps[3]?.status !== 'failed') {
             const fallback = errorReplyFor(target?.settings ?? {}) || String(config.sessionAccess.denyReply ?? '').trim();
             if (fallback) await sendReply(deps.sending, { accountId, messageType, groupId, userId, sessionKey }, fallback);
         }

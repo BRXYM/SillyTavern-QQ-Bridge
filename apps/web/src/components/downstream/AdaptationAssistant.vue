@@ -148,7 +148,7 @@ onUnmounted(() => { alive = false; clearTimeout(timer); });
                         <UiButton size="sm" variant="outline" :disabled="!!busy" @click="test"><Loader2 v-if="busy === 'test'" class="size-3.5 animate-spin" /><Play v-else class="size-3.5" />测试草稿</UiButton>
                         <UiButton v-if="job.status === 'ready'" size="sm" :disabled="!!busy" @click="apply"><Loader2 v-if="busy === 'save'" class="size-3.5 animate-spin" /><Save v-else class="size-3.5" />保存为新下游</UiButton>
                     </div>
-                    <p class="text-[11px] text-muted-foreground">这里只保存连接与接口字段映射，不创建会话配置。添加后在会话管理中绑定。</p>
+                    <p class="text-[11px] text-muted-foreground">这里只保存连接与接口字段映射。添加后为下游编排流程，再在会话中选择下游和流程配置。</p>
                     <div v-if="result" class="rounded-lg border p-3 text-xs" :class="result.ok ? 'border-success/30 bg-success/5' : 'border-destructive/30 bg-destructive/5'">
                         <p class="font-medium">{{ result.ok ? '真实调用成功' : '真实调用失败' }} · {{ (result.elapsedMs / 1000).toFixed(1) }}s</p>
                         <p class="mt-1 whitespace-pre-wrap break-words">{{ result.ok ? result.text : result.error }}</p>

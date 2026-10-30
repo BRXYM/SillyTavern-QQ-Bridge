@@ -39,8 +39,8 @@ function fmt(v: unknown, fallback = '—'): string {
                     </p>
                     <ul class="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
                         <li>• <strong class="text-foreground">OneBot 连接 / 上游配置</strong> → 上游连接</li>
-                        <li>• <strong class="text-foreground">默认流程 / 会话流程绑定</strong> → 会话管理</li>
-                        <li>• <strong class="text-foreground">前置提示词 / 消息处理</strong> → 会话配置</li>
+                        <li>• <strong class="text-foreground">默认下游 / 流程配置绑定</strong> → 会话管理</li>
+                        <li>• <strong class="text-foreground">前置提示词 / 消息处理</strong> → 算子参数</li>
                         <li>• <strong class="text-foreground">下游实例 / dsh 服务与插件</strong> → 下游连接</li>
                         <li>• <strong class="text-foreground">回复分段 / 图片表情</strong> → 对应页面</li>
                     </ul>

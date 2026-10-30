@@ -145,6 +145,20 @@ test('dsh plugin → generated HTTP draft → test → save → QQ reply works e
         assert.equal(deliveryFailure!.variablesSaved, true);
         assert.equal(deliveryCount, beforeDelivery + 1, 'failed QQ delivery must not trigger automatic resend');
         failDelivery = false;
+        const custom = { id: 'operators', name: 'Operators', downstreamId: 'echo-api', operators: [
+            { id: 'receive', name: 'Reply and process', actions: [{ id: 'ack', type: 'reply', text: 'ACK' }, { id: 'prepare', type: 'process', assignments: [{ name: 'phase', value: 'prepared' }], prefix: 'node:' }] },
+            { id: 'service', name: 'Call and return', actions: [{ id: 'call', type: 'call' }, { id: 'remember', type: 'process', assignments: [{ name: 'phase', value: 'done' }] }, { id: 'final', type: 'reply', stopAfter: true }] },
+        ] };
+        assert.equal((await post('/flows', custom)).status, 200);
+        assert.equal((await post('/sessions/' + encodeURIComponent('main:private_123'), { backendId: 'echo-api', flowId: 'operators' })).status, 200);
+        const beforeOperators = deliveryCount;
+        emitQQ('hello');
+        const operatorRun = await waitFor(() => app.context.flowRuns.list('operators')[0], r => !!r && r.status !== 'running');
+        assert.equal(operatorRun!.status, 'success'); assert.equal(deliveryCount, beforeOperators + 2);
+        assert.equal(operatorRun!.steps.length, 2); assert.equal(operatorRun!.deliveries?.[0]?.text, 'ACK');
+        assert.equal(operatorRun!.deliveries?.[1]?.text, 'Reply: node:hello');
+        assert.equal(app.context.conversationState.read('main:private_123').state.vars.phase, 'done');
+        assert.equal(app.context.sessions.get('main:private_123')?.backendId, 'echo-api');
         const reloaded = loadConfigFile(path.join(root, 'config.json')).config;
         assert.equal(reloaded.downstreams.find((d) => d.id === 'echo-api')?.kind, 'http-json');
         // HTTP adapters must never be treated as inbound plugin adapters.

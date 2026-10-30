@@ -2,17 +2,21 @@ import { createHash } from 'node:crypto';
 import type { BridgeConfig } from './schema.ts';
 import type { SessionStore } from '../core/sessions.ts';
 import { resolveConversation } from './conversations.ts';
+import { parseOperators, type FlowOperator } from './operators.ts';
 
 export interface MessageFlow {
     id: string; name: string; enabled: boolean;
-    downstreamId: string; conversationId: string;
-    upstreamEnabled: boolean; downstreamEnabled: boolean;
+    downstreamId: string;
+    operators?: FlowOperator[];
+    /** 升级前字段，仅在兼容旧数据时读取。 */
+    conversationId?: string;
+    upstreamEnabled?: boolean; downstreamEnabled?: boolean;
     /** 旧绑定的协议覆盖与原行为，仅用于兼容，不能由新流程指定。 */
     legacyProfileId?: string; legacyPreserveBehavior?: boolean;
 }
 export function parseFlow(raw: Record<string, unknown>): MessageFlow {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('流程定义须为对象');
-    if (Object.keys(raw).some(k => !['id', 'name', 'enabled', 'downstreamId', 'conversationId', 'upstreamEnabled', 'downstreamEnabled', 'legacyProfileId', 'legacyPreserveBehavior'].includes(k))) throw new Error('当前仅支持固定四步流程，不接受自定义节点或脚本');
+    if (Object.keys(raw).some(k => !['id', 'name', 'enabled', 'downstreamId', 'operators', 'conversationId', 'upstreamEnabled', 'downstreamEnabled', 'legacyProfileId', 'legacyPreserveBehavior'].includes(k))) throw new Error('流程定义包含不支持的字段');
     const id = String(raw.id ?? '');
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || id === '__inherit__') throw new Error('流程 ID 须为 1–64 位字母、数字、短横线或下划线，不能使用保留 ID');
     const name = raw.name ?? id;
@@ -20,12 +24,20 @@ export function parseFlow(raw: Record<string, unknown>): MessageFlow {
     for (const k of ['enabled', 'upstreamEnabled', 'downstreamEnabled']) if (raw[k] !== undefined && typeof raw[k] !== 'boolean') throw new Error('流程开关格式无效');
     for (const k of ['downstreamId', 'conversationId']) if (raw[k] !== undefined && typeof raw[k] !== 'string') throw new Error('流程引用须为字符串');
     const conversationId = String(raw.conversationId ?? '');
+    if (raw.operators !== undefined) return { id, name: name.trim() || id, enabled: raw.enabled !== false, downstreamId: String(raw.downstreamId ?? ''), operators: parseOperators(raw.operators) };
     return { id, name: name.trim() || id, enabled: raw.enabled !== false, downstreamId: String(raw.downstreamId ?? ''), conversationId,
         upstreamEnabled: raw.upstreamEnabled === undefined ? !!conversationId : raw.upstreamEnabled === true,
         downstreamEnabled: raw.downstreamEnabled === undefined ? !!conversationId : raw.downstreamEnabled === true };
 }
 export function validateFlow(flow: MessageFlow, cfg: BridgeConfig) {
     if (!cfg.downstreams.some(d => d.id === flow.downstreamId)) throw new Error('请选择存在的下游连接');
+    if (flow.operators) {
+        const operators = parseOperators(flow.operators);
+        for (const node of operators) for (const action of node.actions) {
+            if (action.type === 'call' && action.downstreamId && !cfg.downstreams.some(d => d.id === action.downstreamId)) throw new Error(`算子 ${node.name} 引用的连接不存在`);
+        }
+        return;
+    }
     if (flow.conversationId && !cfg.conversationProfiles.some(p => p.id === flow.conversationId)) throw new Error('引用的会话配置不存在');
     if (!flow.conversationId && (flow.upstreamEnabled || flow.downstreamEnabled) && !flow.legacyPreserveBehavior) throw new Error('启用消息处理前，请选择会话配置');
 }
@@ -43,7 +55,12 @@ function legacyFlow(cfg: BridgeConfig, sessions: SessionStore, key: string): Mes
 }
 export function resolveFlow(cfg: BridgeConfig, sessions: SessionStore, key: string): { flow?: MessageFlow; inherited: boolean; id: string } {
     const own = sessions.get(key);
-    if (own?.flowId !== undefined) return { flow: cfg.flows.find(f => f.id === own.flowId), id: own.flowId, inherited: false };
+    if (own?.flowId !== undefined) return { flow: cfg.flows.find(f => f.id === own.flowId && (!own.backendId || f.downstreamId === own.backendId)), id: own.flowId, inherited: false };
+    if (own?.flowDefault) {
+        const backendId = own.backendId || cfg.defaultDownstreamId;
+        const id = cfg.downstreamFlowDefaults[backendId] || (cfg.flows.find(f => f.id === cfg.defaultFlowId)?.downstreamId === backendId ? cfg.defaultFlowId : '');
+        return { flow: cfg.flows.find(f => f.id === id && f.downstreamId === backendId), id, inherited: true };
+    }
     if (own?.backendId !== undefined || own?.profileId !== undefined || own?.conversationId !== undefined) {
         const flow = legacyFlow(cfg, sessions, key); return { flow, id: flow.id, inherited: false };
     }
@@ -61,6 +78,7 @@ export function availableFlows(cfg: BridgeConfig, sessions: SessionStore): Messa
     return [...result.values()];
 }
 export function mirrorFlowDefault(cfg: BridgeConfig, flow: MessageFlow) {
+    cfg.downstreamFlowDefaults[flow.downstreamId] = flow.id;
     cfg.defaultFlowId = flow.id; cfg.defaultDownstreamId = flow.downstreamId;
-    cfg.defaultConversationId = flow.legacyPreserveBehavior ? '' : flow.conversationId; cfg.defaultDownstreamProfileId = flow.legacyProfileId ?? '';
+    cfg.defaultConversationId = flow.legacyPreserveBehavior ? '' : flow.conversationId ?? ''; cfg.defaultDownstreamProfileId = flow.legacyProfileId ?? '';
 }

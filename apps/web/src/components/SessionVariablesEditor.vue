@@ -31,10 +31,10 @@ onMounted(load);
 <template>
     <div class="space-y-4 border-b border-border bg-info/5 p-5">
         <h3 class="break-all text-sm font-medium">单会话持久变量 · {{ sessionKey }}</h3>
-        <p class="text-xs leading-5 text-muted-foreground">值按账号、群与成员所属的会话隔离，重启保留，切换配置时同名变量沿用。配置初始值仅在变量尚不存在时使用；移除后，下次处理消息可能重新初始化。</p>
+        <p class="text-xs leading-5 text-muted-foreground">值按账号、群与成员所属的会话隔离，重启保留，切换配置时同名变量沿用。算子中的初始值仅在变量尚不存在时使用；移除后，下次处理消息可能重新初始化。</p>
         <div v-for="(row, index) in rows" :key="index" class="flex flex-wrap gap-2"><UiInput v-model="row.name" :disabled="busy" aria-label="会话变量名" placeholder="英文变量名" class="min-w-36 flex-1" /><UiInput v-model="row.value" :disabled="busy" aria-label="会话变量值" placeholder="变量值" class="min-w-48 flex-1" /><UiButton variant="ghost" size="sm" :disabled="busy" @click="rows.splice(index, 1)">移除</UiButton></div>
         <div class="flex flex-wrap gap-2"><UiButton variant="outline" size="sm" :disabled="busy || rows.length >= 32 || !state" @click="rows.push({ name: '', value: '' })">添加变量</UiButton><UiButton size="sm" :disabled="busy || !state" @click="save">保存变量</UiButton><UiButton variant="outline" size="sm" :disabled="busy" @click="load">重新读取</UiButton><UiButton variant="ghost" size="sm" :disabled="busy" @click="emit('close')">关闭</UiButton></div>
         <p v-if="error" role="alert" class="text-xs text-destructive">{{ error }}</p><p v-if="notice" role="status" class="text-xs text-success">{{ notice }}</p>
-        <details v-if="state" class="text-xs"><summary class="cursor-pointer text-muted-foreground">上一轮成功调用的提取数据</summary><pre class="mt-3 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-background p-3">{{ JSON.stringify(state.previous, null, 2) }}</pre></details>
+        <details v-if="state" class="text-xs"><summary class="cursor-pointer text-muted-foreground">上次保存的算子数据与旧提取值</summary><pre class="mt-3 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-background p-3">{{ JSON.stringify({ operators: state.operators, legacy: state.previous }, null, 2) }}</pre></details>
     </div>
 </template>

@@ -3,7 +3,7 @@ export interface MessageRule { type: 'replace' | 'remove' | 'strip'; pattern?: s
 export interface ExtractionRule { name: string; source: string; mode: 'regex' | 'json'; expression: string; group: number; flags: string }
 export interface VariableDefinition { name: string; initialValue: string }
 export interface VariableAssignment { name: string; value: string; skipEmpty?: boolean }
-export interface ConversationState { vars: Record<string, string>; previous: { upstream: Record<string, string>; downstream: Record<string, string> } }
+export interface ConversationState { operators?: Record<string, { input: string; output: string; extracted: Record<string, string> }>; vars: Record<string, string>; previous: { upstream: Record<string, string>; downstream: Record<string, string> } }
 export interface ConversationPreview { input: string; system: string; output: string; extracted: ConversationState['previous']; state: ConversationState; warnings: string[] }
 export interface ConversationProfile { id: string; name: string; systemPrompt: string; inputPrefix: string; inputSuffix: string; inputRules: MessageRule[]; replyRules: MessageRule[]; replyPrefix?: string; replySuffix?: string; variables?: VariableDefinition[]; upstreamExtracts?: ExtractionRule[]; downstreamExtracts?: ExtractionRule[]; upstreamAssignments?: VariableAssignment[]; downstreamAssignments?: VariableAssignment[]; legacyRef?: { downstreamId: string; profileId: string } }
 export const conversationsApi = {

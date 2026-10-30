@@ -7,16 +7,16 @@ const accounts = computed(() => store.status?.accounts ?? []);
 const links = computed(() => [
     { to: '/snowluma', label: 'QQ 账号', value: accounts.value.length, detail: `${accounts.value.filter(a => a.connected).length} 个在线` },
     { to: '/downstreams', label: '下游连接', value: store.downstreams.length, detail: `${store.downstreams.filter(d => d.enabled && d.available).length} 个可用` },
-    { to: '/flows', label: '已保存流程', value: (store.status?.config.flows as unknown[] | undefined)?.length ?? 0, detail: '组合连接与处理配置，另保留旧绑定兼容' },
-    { to: '/sessions', label: '会话管理', value: new Set([...Object.keys(store.status?.sessions ?? {}), ...Object.keys(store.status?.sessionChoices ?? {})]).size, detail: '为会话选择流程' },
+    { to: '/flows', label: '已保存流程', value: (store.status?.config.flows as unknown[] | undefined)?.length ?? 0, detail: '按下游管理，自由组合处理与返回算子' },
+    { to: '/sessions', label: '会话管理', value: new Set([...Object.keys(store.status?.sessions ?? {}), ...Object.keys(store.status?.sessionChoices ?? {})]).size, detail: '选择下游与流程配置' },
 ]);
 </script>
 
 <template>
     <UiCard class="space-y-5 p-5 sm:p-6">
         <div class="flex flex-wrap items-start justify-between gap-3">
-            <div><h2 class="text-lg font-semibold">多 QQ · 多下游 · 自由控制台</h2><p class="mt-2 text-sm text-muted-foreground">连接账号与服务，为每个会话定义处理方式。</p></div>
-            <RouterLink to="/sessions" class="rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground">为会话选择流程 →</RouterLink>
+            <div><h2 class="text-lg font-semibold">多 QQ · 多下游 · 自由控制台</h2><p class="mt-2 text-sm text-muted-foreground">连接账号与服务，用算子组成流程配置。</p></div>
+            <RouterLink to="/sessions" class="rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground">选择下游与流程配置 →</RouterLink>
         </div>
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <RouterLink v-for="item in links" :key="item.to" :to="item.to" class="rounded-xl border border-border bg-muted/20 p-4 transition-colors hover:border-primary/40 hover:bg-primary/5">

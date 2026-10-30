@@ -1,0 +1,51 @@
+{
+  "id": "ack_then_reply",
+  "name": "先确认，再处理",
+  "enabled": true,
+  "downstreamId": "dsh",
+  "operators": [
+    {
+      "id": "receive",
+      "name": "受理与确认",
+      "enabled": true,
+      "actions": [
+        {
+          "id": "ack",
+          "type": "reply",
+          "text": "收到，正在处理你的消息。",
+          "stopAfter": false
+        }
+      ]
+    },
+    {
+      "id": "answer",
+      "name": "调用、处理与返回",
+      "enabled": true,
+      "actions": [
+        {
+          "id": "request",
+          "type": "call",
+          "input": "{{text}}",
+          "system": "{{system}}"
+        },
+        {
+          "id": "format",
+          "type": "process",
+          "prefix": "处理结果：",
+          "suffix": "",
+          "rules": [],
+          "extracts": [],
+          "assignments": [],
+          "variables": [],
+          "stopIfEmpty": false
+        },
+        {
+          "id": "send",
+          "type": "reply",
+          "text": "{{text}}",
+          "stopAfter": true
+        }
+      ]
+    }
+  ]
+}

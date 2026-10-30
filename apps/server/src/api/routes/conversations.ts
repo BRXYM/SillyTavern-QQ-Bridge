@@ -63,6 +63,7 @@ export function registerConversationRoutes(router: Router, app: AppContext) {
         if (app.config().flows.some(f => f.conversationId === params.id)) return json(res, 409, { error: '会话配置仍被流程引用，请先修改对应流程' });
         const profile = app.config().conversationProfiles.find(p => p.id === params.id);
         if (!profile) return json(res, 404, { error: '会话配置不存在' });
+        if (profile.legacyRef && app.config().flows.some(f => f.downstreamId === profile.legacyRef!.downstreamId && f.legacyProfileId === profile.legacyRef!.profileId)) return json(res, 409, { error: '此旧配置的协议覆盖仍被流程使用，不能删除' });
         const affected = Object.keys(app.sessions.snapshot()).filter(key => {
             const legacy = app.sessions.resolve(key);
             return resolveConversation(app.config(), app.sessions, key)?.id === profile.id || (!!profile.legacyRef && legacy.backendId === profile.legacyRef.downstreamId && legacy.profileId === profile.legacyRef.profileId);

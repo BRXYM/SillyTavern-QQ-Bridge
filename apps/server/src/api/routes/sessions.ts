@@ -10,7 +10,8 @@ import { json } from '../router.ts';
 import type { AppContext } from '../context.ts';
 import type { SessionChoice } from '../../core/sessions.ts';
 import { log } from '../../core/logger.ts';
-import { availableFlows } from '../../config/flows.ts';
+import { availableFlows, resolveFlow } from '../../config/flows.ts';
+import { operatorSessionKeys } from '../../core/operator-sessions.ts';
 
 export function registerSessionRoutes(router: Router, app: AppContext): void {
     // ---------------- 列表 ----------------
@@ -40,14 +41,30 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
             return;
         }
         if (body.flowId !== undefined) {
-            if (['backendId', 'profileId', 'conversationId', 'reset'].some(k => body[k] !== undefined)) return json(res, 400, { error: '请选择流程，不要同时提交旧式下游或配置绑定' });
+            if (['profileId', 'conversationId', 'reset'].some(k => body[k] !== undefined)) return json(res, 400, { error: '请提交下游和流程配置，不要同时提交旧会话配置' });
             const id = body.flowId;
             if (id !== null && (typeof id !== 'string' || !id)) return json(res, 400, { error: '流程 ID 无效，继承默认请传 null' });
-            const flow = id === null ? undefined : availableFlows(app.config(), app.sessions).find(f => f.id === id);
+            const cfg = app.config();
+            const flow = id === null ? undefined : availableFlows(cfg, app.sessions).find(f => f.id === id);
             if (id !== null && !flow) return json(res, 400, { error: '流程不存在' });
-            if (flow && !app.config().flows.some(f => f.id === flow.id)) app.updateConfig(cfg => { cfg.flows.push(flow); });
-            for (const field of ['backendId', 'profileId', 'conversationId'] as const) app.sessions.clearField(key, field);
-            if (id === null) app.sessions.clearField(key, 'flowId'); else app.sessions.patch(key, { flowId: String(id) });
+            const backend = body.backendId;
+            if (backend !== undefined && backend !== null && (typeof backend !== 'string' || !cfg.downstreams.some(d => d.id === backend))) return json(res, 400, { error: '下游不存在' });
+            if (flow && backend && flow.downstreamId !== backend) return json(res, 400, { error: '所选流程不属于该下游' });
+            const globalDefault = resolveFlow(cfg, app.sessions, '__unbound_flow_defaults__');
+            const inheritedId = backend ? cfg.downstreamFlowDefaults[String(backend)] || (globalDefault.flow?.downstreamId === backend ? globalDefault.id : '') : '';
+            const inheritedFlow = id === null && backend ? availableFlows(cfg, app.sessions).find(f => f.id === inheritedId && f.downstreamId === backend) : undefined;
+            if (id === null && backend && !inheritedFlow) return json(res, 400, { error: '该下游没有默认流程，请先指定流程或设置下游默认值' });
+            const materialized = flow ?? inheritedFlow;
+            if (materialized && (!cfg.flows.some(f => f.id === materialized.id) || inheritedFlow && !cfg.downstreamFlowDefaults[String(backend)])) app.updateConfig(c => {
+                if (!c.flows.some(f => f.id === materialized.id)) c.flows.push(materialized);
+                if (inheritedFlow) c.downstreamFlowDefaults[String(backend)] = inheritedFlow.id;
+            });
+            for (const field of ['backendId', 'profileId', 'conversationId', 'flowDefault'] as const) app.sessions.clearField(key, field);
+            if (typeof backend === 'string') app.sessions.patch(key, { backendId: backend });
+            if (id === null) {
+                app.sessions.clearField(key, 'flowId');
+                if (backend) app.sessions.patch(key, { flowDefault: true });
+            } else app.sessions.patch(key, { flowId: String(id) });
             return json(res, 200, { ok: true });
         }
 
@@ -96,7 +113,7 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
             else patch.conversationId = id as string;
         }
         if (body.character !== undefined) patch.character = String(body.character);
-        if (body.backendId !== undefined || body.profileId !== undefined || body.conversationId !== undefined) app.sessions.clearField(key, 'flowId');
+        if (body.backendId !== undefined || body.profileId !== undefined || body.conversationId !== undefined) { app.sessions.clearField(key, 'flowId'); app.sessions.clearField(key, 'flowDefault'); }
         if (body.world !== undefined) patch.world = String(body.world);
         if (body.replyProcessors !== undefined) {
             patch.replyProcessors = body.replyProcessors as unknown[];
@@ -195,7 +212,7 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
 async function resetAllDownstreams(app: AppContext, sessionKey: string): Promise<void> {
     for (const adapter of app.downstreams.list()) {
         try {
-            await adapter.resetSession?.(sessionKey);
+            for (const key of operatorSessionKeys(app.config().flows, sessionKey, adapter.id)) await adapter.resetSession?.(key);
         } catch (e) {
             log(`下游 ${adapter.id} 释放会话失败：${e instanceof Error ? e.message : String(e)}`);
         }
