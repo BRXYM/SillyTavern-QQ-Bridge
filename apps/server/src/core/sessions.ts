@@ -30,6 +30,7 @@ export interface SessionRoute {
 
 /** 会话级配置（持久化到 sessions.json） */
 export interface SessionChoice {
+    flowId?: string;
     /** 独立会话配置：缺失继承，空字符串明确不使用。 */
     conversationId?: string;
     character?: string;

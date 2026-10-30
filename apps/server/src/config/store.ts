@@ -14,6 +14,7 @@
  */
 
 import fs from 'node:fs';
+import { parseFlow } from './flows.ts';
 import { importLegacyConversations, parseConversation } from './conversations.ts';
 import path from 'node:path';
 import {
@@ -579,6 +580,19 @@ export function loadConfigFile(file: string): LoadedConfig {
         : importLegacyConversations(result.config);
     const defaultConversationId = str(parsed.defaultConversationId);
     result.config.defaultConversationId = result.config.conversationProfiles.some(p => p.id === defaultConversationId) ? defaultConversationId : '';
+    const flowIds = new Set<string>();
+    result.config.flows = Array.isArray(parsed.flows) ? parsed.flows.flatMap(raw => {
+        try {
+            const value = parseFlow(raw as Raw);
+            if (flowIds.has(value.id)) { result.notes.push(`流程 id 重复：${value.id}，后者已忽略`); return []; }
+            flowIds.add(value.id);
+            const legacy = raw as { legacyProfileId?: string; legacyPreserveBehavior?: boolean };
+            if (typeof legacy.legacyProfileId === 'string') value.legacyProfileId = legacy.legacyProfileId;
+            if (legacy.legacyPreserveBehavior === true) value.legacyPreserveBehavior = true;
+            return [value];
+        } catch { result.notes.push('忽略无效的流程定义'); return []; }
+    }) : [];
+    result.config.defaultFlowId = str(parsed.defaultFlowId);
     return { ...result, existed: true };
 }
 

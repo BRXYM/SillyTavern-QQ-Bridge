@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { registerFlowRoutes } from './routes/flows.ts';
 import { registerConversationRoutes } from './routes/conversations.ts';
 import { registerUpstreamConnectionRoutes } from './routes/upstream-connection.ts';
 import path from 'node:path';
@@ -25,6 +26,7 @@ export function createApiServer(app: AppContext, paths: AppPaths,
     registerDownstreamRoutes(router, app);
     registerSessionRoutes(router, app);
     registerConversationRoutes(router, app);
+    registerFlowRoutes(router, app);
     registerUpstreamConnectionRoutes(router, app);
     registerConfigRoutes(router, app);
 

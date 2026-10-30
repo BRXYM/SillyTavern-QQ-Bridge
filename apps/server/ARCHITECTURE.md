@@ -17,7 +17,9 @@ apps/server/
 │   │   ├── schema.ts              配置类型、默认值与设置合并
 │   │   ├── store.ts               配置迁移、读取与原子写入
 │   │   ├── runtime.ts             环境覆盖、注册 token、运行时配置
-│   │   └── behavior.ts            会话行为配置解析
+│   │   ├── behavior.ts            会话行为配置解析
+│   │   ├── conversations.ts       独立会话配置校验与兼容导入
+│   │   └── flows.ts               流程模型、校验、解析与兼容流程
 │   ├── core/                      会话、触发规则、派发、发送、日志与事件
 │   ├── upstream/                  OneBot 客户端、多账号管理、SnowLuma hook
 │   ├── downstream/
@@ -94,7 +96,10 @@ SnowLuma ──▶ upstream/manager.ts ──▶ 事件补上 accountId
                                         │
                                         ▼
                                   core/dispatch.ts
-                                        │  选「下游实例 + 命名配置」（会话级 > 全局默认）
+                                        │  选消息流程（会话级 > 全局默认）
+                                        ▼
+                           core/flow-runtime.ts（固定四步）
+                                        │  上游处理 → 调用 → 下游处理 → 投递
                                         ▼
                              downstream/<adapter>.ts
                                         │  最终文本
@@ -112,83 +117,64 @@ SnowLuma ──▶ upstream/manager.ts ──▶ 事件补上 accountId
 **下游可扩展**：新增一种后端 = 实现 `DownstreamAdapter` + 在 `registry.ts` 注册一行，
 不需要改 dispatch、sending 或任何 api 文件。
 
-## 多账号与命名配置
+## 流程、资源与会话
 
-三层结构，越往下越具体：
+五类对象独立保存：`accounts[]` 上游账号、`downstreams[]` 连接、`conversationProfiles[]` 会话配置、`flows[]` 消息流程，以及 `sessions.json` 会话绑定。
 
+```json
+{
+  "flows": [{
+    "id": "daily_chat",
+    "name": "日常聊天",
+    "enabled": true,
+    "downstreamId": "dsh",
+    "conversationId": "assistant",
+    "upstreamEnabled": true,
+    "downstreamEnabled": true
+  }],
+  "defaultFlowId": "daily_chat"
+}
 ```
-账号（accounts[]）          qq_123 / qq_456        各自独立连接、独立会话
-  └── 下游实例（downstreams[]）  dsh / tavern / ...    同类型可多个
-        └── 命名配置（profiles[]） 鲸鱼娘 / 客服         只描述差异
-```
 
-会话最终绑定的是「实例 + 配置」：
+示例引用的连接和会话配置须已存在。流程固定为上游处理、调用下游、下游处理、回复 QQ；配置只被引用，不复制到流程中。两侧处理开关分别控制对应区域，均关闭时直接透传。API 拒绝任意节点、脚本等不支持的字段。
 
-| 会话字段 | 缺失时 | 说明 |
-|---|---|---|
-| `backendId` | `defaultDownstreamId` | 用哪个下游实例 |
-| `profileId` | `defaultDownstreamProfileId` | 用该实例下的哪份配置 |
+会话使用 `flowId`，缺失时继承 `defaultFlowId`；绑定 API 传 `null` 表示恢复继承，同时清除旧的下游/配置覆盖。显式绑定或默认流程不存在时停止执行并报错，不暗中改走其他服务。已引用的流程、连接和会话配置禁止删除，需先解除引用。
 
-`profileId` 有两层继承判断（见 `SessionStore.resolve`）：
+旧会话仍可保留 `backendId/profileId/conversationId`。`config/flows.ts` 将原组合解析为稳定 ID 的兼容流程，未编辑时沿用原提示词与回复处理；显式旧覆盖仍优先于新的全局默认。选择流程后会清理旧字段。保存兼容流程采用新处理定义，但连接未变化时保留旧 profile 的协议覆盖。只读 `legacyProfileId/legacyPreserveBehavior` 来自服务端，不接受客户端注入。
 
-1. 会话没写 → 用全局默认配置
-2. 但**仅当会话用的实例就是全局默认实例**时才套用 ——
-   全局默认配置描述的是默认实例的差异，套到别的实例上会串味。
+旧版下游命名配置仅作兼容。`SessionStore.resolve()` 和 `mergeSettings()` 保留旧协议合并职责；新入口通过 `resolveFlow()` 选择流程，不再将其用作新的会话路由模型。
 
-显式写 `profileId: ''` 表示「明确不用配置」，与「缺失（继承）」区分开。
+会话 key 为 `<accountId>:private_<uin>` / `<accountId>:group_<gid>_<uin>`。变量与处理队列按完整 key 隔离。会话切换流程不会重置已有变量；不同账号不会共享同一用户的状态。
 
-配置合并规则（`schema.mergeSettings`）：配置只覆盖它显式给出的键，
-没写的沿用实例设置；嵌套对象（如 `prompt`）逐键合并，不会因为
-配置里只写一个开关就把其余抹掉。
+### 执行与调试
 
-会话 key 带账号前缀：`<accountId>:private_<uin>` / `<accountId>:group_<gid>_<uin>`。
-同一用户在两个号下聊天是两个独立会话，各自有自己的下游、配置和上下文。
+`core/flow-runtime.ts` 提供同一个 `executeFlow()` 供真实消息、模拟预览、真实调用测试使用。`dispatch.ts` 负责原触发/准入检查、账号与路由定位，再提供下游调用、状态提交和 QQ 投递回调。
 
-### 端口必须逐号分配
+- 上游处理：提取 → 变量赋值 → 文本规则 → 前后追加与提示词展开。
+- 调用下游：调用现有适配器一次，不自动重试。
+- 下游处理：处理服务原始回复，成功后原子保存变量与提取历史。持久化失败停止投递。
+- 回复 QQ：沿用原账号、分段、节奏和媒体发送。记录成功/失败段数；投递失败不撤销已完成的下游结果与状态，也不自动重发。
 
-这是多号接入最容易踩的坑，而且**两侧日志都不明显**：
+上游处理后为空时跳过后续步骤；回复处理后为空时不投递。调用或处理失败不推进会话变量。模拟预览不访问下游，使用模拟回复与独立模拟状态；真实调用测试使用 `_flow_test_<uuid>`，结束后请求适配器清理，不提交真实状态、不投递 QQ。兼容流程未修改的模拟预览恢复服务端旧行为，修改后按编辑定义校验。
 
-| 现象 | 真实原因 |
+`FlowRunStore` 仅在内存保留最近 50 次执行，重启清空；记录各步骤状态、输入输出、前置提示词、耗时、错误，以及变量变动和是否保存。单段正文截断至 4096 字，不采集连接认证或请求头。正文自身可能包含用户敏感内容。流程页可见时每 3 秒刷新执行记录，连接和配置状态继续使用 SSE。
+
+| API | 用途 |
 |---|---|
-| 加了第二个号，但它永远收不到消息 | 两个号写成了同一个端口 |
-| SnowLuma 日志只有一句 `network startup degraded` | 后启动的号 `listen EADDRINUSE`，WS 服务没起来 |
-| 两个号的 `selfId` 显示成同一个 | 两条连接实际连的是同一个实例 |
-| 同一条消息被回复两次 | 同上的后果 |
+| `GET /api/flows` | 已保存与兼容流程、默认值、引用数与会话绑定 |
+| `POST /api/flows` | 新建/更新固定流程，校验资源引用 |
+| `POST /api/flows/:id/default` | 设为全局默认，必要时物化兼容定义 |
+| `DELETE /api/flows/:id` | 删除未引用的已保存流程 |
+| `POST /api/flows/preview` | 提交 flow/text/reply/state，模拟执行 |
+| `POST /api/flows/:id/test` | 使用独立测试会话真实调用，返回步骤记录 |
+| `GET /api/flow-runs` | 最近执行，可按 flowId/sessionKey 筛选 |
+| `POST /api/sessions/:key` | `{ "flowId": "daily_chat" }` 绑定；null 继承 |
 
-SnowLuma 每个 QQ 号都有独立的 `onebot_<uin>.json`，**各自监听自己的 wsServer**。
+首版只支持固定四步；没有分支、循环、并行、多下游串联或分布式恢复。
 
-端口由后端统一分配，起点固定，不随前端输入漂移：
+### QQ 端点
 
-```
-3001 → 3002 → 3003 → …        （第 N 个号用 3001+N-1）
-```
-
-`pickOneBotPort` 的取舍：
-
-| 情况 | 做法 |
-|---|---|
-| 该号已有端口，且没被其他账号占用 | **沿用**（重复点按钮不换端口） |
-| 端口被其他账号配置占用 | 跳过，继续往上 |
-| 端口真被别的进程监听（NapCat / 残留进程） | 跳过，继续往上 |
-
-第二、三条缺一不可：只比配置不看实际监听，会把端口分给一个正在被占用的号，
-结果又是 EADDRINUSE；只查监听又会让自己正在正常工作的号每次都被换端口。
-
-起点固定而不是"找最小空闲"，是为了让「第几个号在哪」可预测 —— 排查时看一眼就知道。
-
-上游管理器还会在 `apply()` 里做一次端点去重：同一 `host:port` 只保留第一个账号，
-其余跳过并记警告。这样即使配置错了，也不会出现"一条消息回两遍"。
-
-### 改完 OneBot 配置必须重启 SnowLuma
-
-`onebot_<uin>.json` 只在 SnowLuma **启动时**读取。写完文件后：
-
-- 运行中的 SnowLuma 仍用旧 token / 旧端口
-- Bridge 立刻用新 token 去连 → 得到 **401 rejected unauthorized WebSocket upgrade**
-- 界面上表现为「配置写成功、状态就绪，但这个号连不上」
-
-`/api/snowluma/apply` 因此返回 `restartRequired`（`changed && 端口在监听`），
-前端把它显示成明确的警告，而不是绿色的"已就绪"。
+每个 QQ 使用独立 OneBot WebSocket 端口。控制台读取 SnowLuma 已有配置后连接，不分配或修改端口、不自动注入。账号记录存在但未注入时显示对应诊断；诊断不足时显示未知。上游管理器还会去重相同端点，避免同一条消息被多个配置重复接收。
 
 ## 状态推送
 
@@ -225,8 +211,8 @@ updateConfig    ─────────────────────�
 |---|---|
 | 下游只返回最终文本 | 分段/表情/管道统一在 Bridge，新增后端不必重写发送链路 |
 | 下游用「实例 id」而非枚举 | 同类型可配多个实例（两个 dsh 各连不同模型） |
-| 配置用「命名配置」而非直接改实例 | 同一台 dsh 要服务多种人设，复用一套可执行文件路径 |
-| 会话选择三层继承 | 账号 → 实例 → 配置，逐层回落 |
+| 连接、会话配置和流程分离 | 多个流程复用服务与处理规则 |
+| 会话只选择流程 | 显式流程优先，否则继承全局默认 |
 | 发送必须带 accountId | 多账号下用错号等于冒名发言 |
 | **每个账号必须用不同的 OneBot 端口** | SnowLuma 每个号各自监听自己的 wsServer，两个号写同一端口时后启动的那个 `EADDRINUSE` 起不来 |
 | 自注册必须带 token | 防止同机任意进程改下游配置 |
@@ -269,12 +255,12 @@ v2 → v3 映射：
 
 ## dsh 下游适配助手
 
-下游管理页的「用 dsh 适配新下游」调用管理面专用的 `services/adaptation/service.ts`。流程为：用户填写新实例 ID、目标地址、接入目标和接口资料 → dsh 分析生成 JSON 草稿 → Bridge 校验 → 用户编辑/真实测试 → 保存为 `http-json` 下游和默认命名配置 → 在会话页选择实例与配置。
+下游管理页的「用 dsh 适配新下游」调用管理面专用的 `services/adaptation/service.ts`。流程为：用户填写新实例 ID、目标地址、接入目标和接口资料 → dsh 分析生成 JSON 草稿 → Bridge 校验 → 用户编辑/真实测试 → 保存为 `http-json` 连接 → 在消息流程中引用。
 
 - 默认选可用的默认 dsh，否则选首个可用 dsh，也可显式选择来源。来源必须为启用且可用的 dsh 实例。
 - 每个任务使用独立 `_adaptation_<uuid>` 上下文，结束后请求清理；不传入 QQ 会话历史、其它连接配置或全局凭据。dsh 本身仍运行在它原有的工具和权限环境中，生成任务不是额外的执行沙箱。
 - 模型只返回声明式 JSON。资料不足或不支持的协议返回 `needs-input` 与问题列表。Bridge 不执行生成的 JavaScript，不自动修改第三方软件。
-- `draft.connection` 保存 url、method、headers、timeoutMs、response；`draft.conversation` 保存 systemPrompt 和 requestBody。应用到现有 v3 结构时，实例 settings 保存基线，默认 profile 保存对话设置；HTTP profile 只允许覆盖这两个对话字段。
+- 连接模式只保存地址、认证、请求体模板与响应映射，不创建会话配置。旧适配草稿与命名配置 API 保留兼容；前置提示词和消息处理在独立会话配置中编辑。
 - 新增或修改 HTTP 连接只重新加载该实例，保留 dsh 连接。保存不会覆盖同 ID 的实例，也不会切换默认下游。
 - 任务持久化到 `data/adaptations/<uuid>.json`；最近 30 个任务可从页面恢复；未完成任务在重启后标记中断。数据目录已被 gitignore。
 
@@ -300,10 +286,10 @@ v2 → v3 映射：
 
 - 下游连接：只维护服务实例、地址、认证与协议映射。HTTP requestBody 是协议字段映射，输入用 input.text，前置提示词用 input.system。
 - 会话配置：顶层 conversationProfiles，包含 id/name/systemPrompt/inputPrefix/inputSuffix/inputRules/replyRules；不包含地址、认证或下游 ID。API 严格拒绝连接字段。
-- 会话管理：defaultDownstreamId 与 defaultConversationId 独立生效；会话用 backendId 与 conversationId 覆盖。conversationId 缺失或 API 传 null 表示继承，显式空字符串表示不用配置。
+- 消息流程：组合连接、会话配置与两侧处理开关。会话管理只维护 flowId、默认流程与单会话变量。旧默认和绑定字段仅供兼容 API 使用。
 - 消息链路：输入规则 → 前后缀 → 下游（携带 system）→ 回复规则 → 原账号发送。默认配置可跨下游复用；明确不使用配置时不套用旧提示词和规则。
 - 兼容：旧 profiles 保留在运行文件中，导入独立配置带只读 legacyRef。尚未编辑且仍沿用旧绑定的会话走原处理链；编辑保存后解除 preserveBehavior 标记。原连接覆盖与协议参数不被导入到新会话配置。
-- 删除配置只清理相关配置绑定，保留下游绑定；默认配置被删则回落不指定。
+- 被流程引用的配置禁止删除；未被流程引用的旧配置删除时清理其旧绑定。
 
 新增 API：GET/POST /api/conversations、DELETE /api/conversations/:id、POST /api/conversations/preview（纯文本预览）、POST /api/conversation-defaults。原下游命名配置 API 仅保留兼容，核心界面不再调用。
 

@@ -1,5 +1,7 @@
 {
     "configVersion": 3,
+    "flows": [],
+    "defaultFlowId": "",
     "conversationProfiles": [],
     "defaultConversationId": "",
     "consolePort": 9510,

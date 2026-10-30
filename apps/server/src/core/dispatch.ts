@@ -6,17 +6,16 @@
  *   1. 过滤（请求事件 / 自身消息 / 触发规则 / 准入名单）
  *   2. 解析消息段，得到纯文本与是否 @ 机器人
  *   3. 计算 sessionKey（含账号维度），记录路由与计数，必要时建档
- *   4. 按会话解析「下游实例 + 命名配置」
- *   5. 组装系统设定（QQ 约束 + 角色 + 表情词表 + 图片能力）
- *   6. 交给下游 ask()，拿到最终文本
- *   7. 过回复处理管道 → 发送层分段/表情 → 用**同一个号**回出去
+ *   4. 按会话解析消息流程（旧绑定生成兼容流程）
+ *   5. 执行上游处理 → 下游 ask() → 下游处理，成功后提交会话状态
+ *   6. 发送层分段/表情 → 用**同一个号**回出去，记录每一步结果
  *
  * 这里不认识任何具体下游类型，只面向 DownstreamAdapter 接口。
  */
 
 import { applyReplyProcessors } from '@bridge/core';
-import { resolveConversation } from '../config/conversations.ts';
-import { ConversationTurn } from './conversation-engine.ts';
+import { executeFlow, type FlowRunStore } from './flow-runtime.ts';
+import { resolveFlow, type MessageFlow } from '../config/flows.ts';
 import type { ConversationStateStore } from './conversation-state.ts';
 import type { OneBotEvent } from '../upstream/onebot.ts';
 import type { AccountEvent } from '../upstream/manager.ts';
@@ -31,6 +30,7 @@ import { sendReply, type SendContext } from './sending.ts';
 import { QQ_BASE_PROMPT, renderFaceInstruction, renderImageInstruction } from '../downstream/dsh.ts';
 
 export interface DispatchDeps {
+    flowRuns: FlowRunStore;
     conversationState: ConversationStateStore;
     sessions: SessionStore;
     sending: SendContext;
@@ -250,7 +250,7 @@ export function checkSessionAccess(
 export function buildSystemPrompt(
     config: BridgeConfig,
     sessionKey: string,
-    deps: DispatchDeps,
+    deps: Pick<DispatchDeps, 'sessions'>,
     adapter?: DownstreamAdapter,
     settings?: Record<string, unknown>,
 ): string {
@@ -377,126 +377,34 @@ async function dispatchEventInOrder(deps: DispatchDeps, event: OneBotEvent): Pro
     deps.sessions.bumpIn(sessionKey);
     deps.sessions.ensure(sessionKey);
 
-    // ---- 选「下游实例 + 配置」----
-    const resolved = deps.sessions.resolve(sessionKey);
-    const target = deps.resolveDownstream(resolved.backendId, resolved.profileId);
-
-    /**
-     * 下游不可用（未配置 / 不存在 / 未启用 / 启动失败）时给用户一个回执。
-     *
-     * 以前只写一行日志就丢弃，用户在 QQ 侧看到的是"完全没反应"，
-     * 分不清是机器人离线、被准入拦住，还是下游挂了。
-     * 现在回一句提示（复用准入的 denyReply，留空则静默），让问题可见。
-     */
-    if (!target || !target.adapter) {
-        const reason = !target
-            ? `下游 ${resolved.backendId || '(未设置)'} 不存在`
-            : `下游 ${resolved.backendId} 未启用或启动失败`;
-        log(`⚠ 会话 ${sessionKey}：${reason}，消息已丢弃`);
-
-        const notice = String(config.sessionAccess.denyReply ?? '').trim();
-        if (notice) {
-            await sendReply(
-                deps.sending,
-                { accountId, messageType, groupId, userId, sessionKey },
-                notice,
-            );
-        }
-        return;
-    }
-
-    const adapter = target.adapter;
-
-    const profileLabel = target.profile ? ` / ${target.profile.name}` : '';
-    log(
-        `QQ消息 [${accountId}] → ${adapter.name}${profileLabel} [${sessionKey}]: [${senderName}] ${parsed.text}`
-        + (resolved.inherited ? '（继承全局下游）' : '（会话级下游）')
-        + (resolved.profileInherited ? '' : '（会话级配置）'),
-    );
-
-    // ---- 进度摘要转发 ----
-    // 用合并后的设置判断，否则会话选了「开启进度」的配置也不会生效
-    const progressCfg = normalizeProgress(target.settings.progress);
-    const onProgress = progressCfg.enabled
-        ? makeProgressReporter({
-            sending: deps.sending,
-            target: { accountId, messageType, groupId, userId, sessionKey },
-            cfg: progressCfg,
-        })
-        : undefined;
-
-    // ---- 询问下游 ----
-    const selectedConversation = resolveConversation(config, deps.sessions, sessionKey);
-    // 旧会话在用户保存新配置前，继续采用原来的提示词开关和处理链。
-    const preserveLegacy = selectedConversation?.legacyRef?.preserveBehavior && deps.sessions.get(sessionKey)?.conversationId === undefined && !config.defaultConversationId;
-    const conversation = preserveLegacy ? undefined : selectedConversation;
-    const useConversation = !preserveLegacy && (!!conversation || deps.sessions.get(sessionKey)?.conversationId !== undefined || !!config.defaultConversationId);
+    const binding = resolveFlow(config, deps.sessions, sessionKey);
+    const flow: MessageFlow = binding.flow ?? { id: binding.id, name: '不可用流程', downstreamId: '', conversationId: '', enabled: false, upstreamEnabled: false, downstreamEnabled: false };
+    const target = deps.resolveDownstream(flow.downstreamId, flow.legacyProfileId ?? '');
     const snapshot = deps.conversationState.read(sessionKey);
-    const turn = conversation ? new ConversationTurn(conversation, snapshot.state) : undefined;
-    const prepared = turn?.upstream(parsed.text);
-    const inputText = prepared?.input ?? parsed.text;
-    if (!inputText.trim()) return;
-    const userText = messageType === 'group' ? `[群成员 ${senderName}] ${inputText}` : inputText;
-    const result = await adapter.ask({
-        sessionKey,
-        text: userText,
-        system: useConversation ? prepared?.system ?? '' : buildSystemPrompt(config, sessionKey, deps, adapter, target.settings),
-        sender: senderName,
-        settings: useConversation ? { ...target.settings, systemPrompt: prepared?.system ?? '' } : target.settings,
-        profileId: target.profile?.id,
-        onProgress,
+    const progressCfg = normalizeProgress(target?.settings.progress);
+    const onProgress = progressCfg.enabled ? makeProgressReporter({ sending: deps.sending, target: route, cfg: progressCfg }) : undefined;
+    log(`QQ消息 [${accountId}] → 流程 ${flow.name} [${sessionKey}]: ${parsed.text}`);
+    const result = await executeFlow({
+        flow, config, store: deps.flowRuns, sessionKey, mode: 'live', text: parsed.text, state: snapshot.state,
+        legacySystem: target?.adapter ? buildSystemPrompt(config, sessionKey, deps, target.adapter, target.settings) : '',
+        legacyRules: resolveReplyRules(config, deps.sessions, sessionKey).rules,
+        decorateInput: text => messageType === 'group' ? `[群成员 ${senderName}] ${text}` : text,
+        ask: async (text, system) => {
+            if (!target?.adapter) throw new Error(`下游 ${flow.downstreamId} 未启用或启动失败`);
+            return target.adapter.ask({ sessionKey, text, system, sender: senderName,
+                settings: { ...target.settings, systemPrompt: system }, profileId: target.profile?.id, onProgress });
+        },
+        commit: state => { deps.conversationState.commit(sessionKey, state, snapshot.revision); },
+        deliver: text => sendReply(deps.sending, { accountId, messageType, groupId, userId, sessionKey }, text),
     });
-
     if (!result.ok) {
-        log(`下游 ${adapter.name} 处理失败 [${sessionKey}]：${result.error}`);
-
-        /**
-         * 失败提示的优先级：实例自己的 errorReply > 准入的 denyReply。
-         *
-         * 实例配置允许它定制细节（比如"重试一下"），没配就退回全局那句。
-         * 两者都空才静默 —— 否则用户发消息后完全没反应，分不清
-         * 是机器人掉线、被拦住，还是下游崩了。
-         */
-        const fallback = errorReplyFor(target.settings)
-            || String(config.sessionAccess.denyReply ?? '').trim();
-
-        if (fallback) {
-            await sendReply(deps.sending, {
-                accountId,
-                messageType,
-                groupId,
-                userId,
-                sessionKey,
-            }, fallback);
+        log(`流程 ${flow.name} 失败 [${sessionKey}]：${result.error}`);
+        // QQ 投递失败不自动重发，避免重复发送或产生额外副作用。
+        if (result.run.steps[3]?.status !== 'failed') {
+            const fallback = errorReplyFor(target?.settings ?? {}) || String(config.sessionAccess.denyReply ?? '').trim();
+            if (fallback) await sendReply(deps.sending, { accountId, messageType, groupId, userId, sessionKey }, fallback);
         }
-        return;
     }
-
-    const finished = turn?.downstream(result.text);
-    if (finished) deps.conversationState.commit(sessionKey, finished.state, snapshot.revision);
-    const reply = result.text.trim();
-    if (!reply && !finished?.output) {
-        log(`下游 ${adapter.name} 返回空回复 [${sessionKey}]`);
-        return;
-    }
-
-    log(
-        `下游原始回复 [${sessionKey}]：${reply.slice(0, 80)}`
-        + `（${(result.elapsedMs / 1000).toFixed(1)}s${result.via ? `，${result.via}` : ''}）`,
-    );
-
-    // ---- 处理管道 ----
-    const legacyRules = resolveReplyRules(config, deps.sessions, sessionKey);
-    const { rules, source } = useConversation ? { rules: conversation?.replyRules ?? [], source: '会话配置' } : legacyRules;
-    if (rules.length > 0) log(`处理管道来源: ${source} (${rules.length} 条规则)`);
-    const processed = finished?.output ?? applyReplyProcessors(reply, rules);
-    if (!processed) {
-        log('回复经规则处理后为空，不发送');
-        return;
-    }
-
-    // ---- 发送（用收消息的那个号回，绝不串号）----
-    await sendReply(deps.sending, { accountId, messageType, groupId, userId, sessionKey }, processed);
 }
 
 /** 从生效设置里读失败提示（找不到返回空） */

@@ -92,6 +92,7 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
     // ---------------- 删除 ----------------
     router.delete('/api/downstreams/:id', async ({ res, params }) => {
         const id = params.id ?? '';
+        if (app.config().flows.some(f => f.downstreamId === id)) return json(res, 409, { error: '连接仍被流程引用，请先修改对应流程' });
         if (!id) {
             json(res, 400, { ok: false, error: '缺少下游 id' });
             return;
@@ -150,6 +151,7 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
 
         app.updateConfig((c) => {
             c.defaultDownstreamId = id;
+            c.defaultFlowId = '';
             if (profileId !== undefined) c.defaultDownstreamProfileId = profileId;
             // 换了实例且没指定新配置时，旧默认配置不再适用
             else {
@@ -253,6 +255,7 @@ export function registerDownstreamRoutes(router: Router, app: AppContext): void 
     router.delete('/api/downstreams/:id/profiles/:pid', ({ res, params }) => {
         const id = params.id ?? '';
         const pid = params.pid ?? '';
+        if (app.config().flows.some(f => f.downstreamId === id && f.legacyProfileId === pid)) return json(res, 409, { error: '旧配置仍被兼容流程引用，请先修改对应流程' });
         const cfg = app.config();
         const target = cfg.downstreams.find((d) => d.id === id);
         if (!target) {

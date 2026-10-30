@@ -12,6 +12,7 @@ import type { Router } from '../router.ts';
 import { json } from '../router.ts';
 import type { AppContext } from '../context.ts';
 import { collectStatus } from '../../downstream/registry.ts';
+import { resolveFlow } from '../../config/flows.ts';
 
 export function registerStatusRoutes(router: Router, app: AppContext): void {
     router.get('/api/status', ({ res }) => {
@@ -214,11 +215,11 @@ function buildStatus(app: AppContext): StatusSnapshot {
     const sessionBackends: Record<string, { backendId: string; inherited: boolean; profileId: string }> = {};
     const keys = new Set([...Object.keys(sessionStats), ...Object.keys(app.sessions.snapshot())]);
     for (const key of keys) {
-        const r = app.sessions.resolve(key);
+        const binding = resolveFlow(cfg, app.sessions, key);
         sessionBackends[key] = {
-            backendId: r.backendId,
-            inherited: r.inherited,
-            profileId: r.profileId,
+            backendId: binding.flow?.downstreamId ?? '',
+            inherited: binding.inherited,
+            profileId: binding.flow?.legacyProfileId ?? '',
         };
     }
 

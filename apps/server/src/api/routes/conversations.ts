@@ -4,6 +4,7 @@ import type { AppContext } from '../context.ts';
 import { parseConversation, resolveConversation } from '../../config/conversations.ts';
 import { publishStatus } from '../events.ts';
 import { ConversationTurn, emptyState, parseState, parseValues } from '../../core/conversation-engine.ts';
+import { resolveFlow } from '../../config/flows.ts';
 
 export function registerConversationRoutes(router: Router, app: AppContext) {
     router.post('/api/conversations/preview', ({ res, body }) => {
@@ -40,7 +41,10 @@ export function registerConversationRoutes(router: Router, app: AppContext) {
     router.get('/api/conversations', ({ res }) => {
         const cfg = app.config();
         const keys = new Set([...Object.keys(app.sessions.snapshot()), ...Object.keys(app.sessions.statsSnapshot())]);
-        json(res, 200, { profiles: cfg.conversationProfiles, defaultId: cfg.defaultConversationId, bindings: Object.fromEntries([...keys].map(key => [key, { id: resolveConversation(cfg, app.sessions, key)?.id ?? '', inherited: app.sessions.get(key)?.conversationId === undefined }])) });
+        json(res, 200, { profiles: cfg.conversationProfiles, defaultId: cfg.defaultConversationId, bindings: Object.fromEntries([...keys].map(key => {
+            const binding = resolveFlow(cfg, app.sessions, key);
+            return [key, { id: binding.flow ? binding.flow.conversationId : '', inherited: binding.inherited }];
+        })) });
     });
     router.post('/api/conversations', ({ res, body }) => {
         try {
@@ -56,6 +60,7 @@ export function registerConversationRoutes(router: Router, app: AppContext) {
         } catch (e) { json(res, 400, { error: e instanceof Error ? e.message : String(e) }); }
     });
     router.delete('/api/conversations/:id', ({ res, params }) => {
+        if (app.config().flows.some(f => f.conversationId === params.id)) return json(res, 409, { error: '会话配置仍被流程引用，请先修改对应流程' });
         const profile = app.config().conversationProfiles.find(p => p.id === params.id);
         if (!profile) return json(res, 404, { error: '会话配置不存在' });
         const affected = Object.keys(app.sessions.snapshot()).filter(key => {
@@ -83,7 +88,7 @@ export function registerConversationRoutes(router: Router, app: AppContext) {
         const conversationId = String(body.conversationId ?? '');
         if (!app.config().downstreams.some(d => d.id === backendId)) return json(res, 400, { error: '下游连接不存在' });
         if (conversationId && !app.config().conversationProfiles.some(p => p.id === conversationId)) return json(res, 400, { error: '会话配置不存在' });
-        app.updateConfig(cfg => { cfg.defaultDownstreamId = backendId; cfg.defaultConversationId = conversationId; cfg.defaultDownstreamProfileId = ''; });
+        app.updateConfig(cfg => { cfg.defaultFlowId = ''; cfg.defaultDownstreamId = backendId; cfg.defaultConversationId = conversationId; cfg.defaultDownstreamProfileId = ''; });
         publishStatus('config');
         json(res, 200, { ok: true });
     });

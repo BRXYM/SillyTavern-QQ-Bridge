@@ -22,6 +22,12 @@ const routes = [
         meta: { title: '运行日志', desc: '实时事件流', icon: 'Terminal', group: '监控' } satisfies NavMeta,
     },
     {
+        path: '/flows',
+        name: 'flows',
+        component: () => import('@/views/FlowsView.vue'),
+        meta: { title: '消息流程', desc: '组合连接与处理步骤，查看每次执行', icon: 'Boxes', group: '流程与会话' } satisfies NavMeta,
+    },
+    {
         path: '/snowluma',
         name: 'snowluma',
         component: () => import('@/views/ServicesView.vue'),
@@ -43,7 +49,7 @@ const routes = [
         path: '/sessions',
         name: 'sessions',
         component: () => import('@/views/SessionsView.vue'),
-        meta: { title: '会话管理', desc: '选择下游、会话配置与全局默认', icon: 'Users', group: '连接与路由' } satisfies NavMeta,
+        meta: { title: '会话管理', desc: '为每个会话选择流程', icon: 'Users', group: '流程与会话' } satisfies NavMeta,
     },
     {
         path: '/segmentation',

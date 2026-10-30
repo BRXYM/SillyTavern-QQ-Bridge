@@ -45,21 +45,22 @@ export interface SendContext {
 
 /**
  * 发送一条（可能被拆成多条）QQ 消息。
- * 失败只记日志不抛异常——发送失败不应该让调用方的流程中断。
+ * 逐段记录成功/失败并返回计数，调用方据此标记流程投递结果。
  */
-export async function sendReply(ctx: SendContext, target: SendOptions, text: string): Promise<void> {
+export async function sendReply(ctx: SendContext, target: SendOptions, text: string): Promise<{ sent: number; failed: number }> {
     const body = String(text ?? '').trim();
-    if (!body) return;
+    if (!body) return { sent: 0, failed: 0 };
 
     // 账号必须先确定：没有它就不知道该用哪个号发，宁可不发也不要发错号
     const client = ctx.upstreams.client(target.accountId);
     if (!client) {
         log(`QQ 发送跳过：账号 ${target.accountId || '(未指定)'} 的上游未启用`);
-        return;
+        return { sent: 0, failed: 1 };
     }
 
     const segments = segmentText(body, ctx.segmentation(), ctx.maxMessageLength());
-    if (segments.length === 0) return;
+    if (segments.length === 0) return { sent: 0, failed: 0 };
+    const delivery = { sent: 0, failed: 0 };
 
     const label = target.messageType === 'group' ? `群${target.groupId}` : `私聊${target.userId}`;
     const decision = { hasMark: false, sent: 0, failed: 0, tokens: [] as string[] };
@@ -100,18 +101,21 @@ export async function sendReply(ctx: SendContext, target: SendOptions, text: str
 
         try {
             await sendOne(client, target, payload);
+            delivery.sent++;
             log(
                 `分段 ${i + 1}/${segments.length} 已发往QQ → ${label}`
                 + ` (${seg.text.length}字)${target.accountId ? ` [${target.accountId}]` : ''}`,
             );
         } catch (e) {
+            delivery.failed++;
             log(`QQ 发送失败(${label})：${e instanceof Error ? e.message : String(e)}`);
         }
     }
 
     logFaceDecision(decision, ctx.faceSummary());
 
-    if (target.sessionKey) ctx.sessions.bumpOut(target.sessionKey);
+    if (target.sessionKey && delivery.sent > 0) ctx.sessions.bumpOut(target.sessionKey);
+    return delivery;
 }
 
 /** 发送单条消息（文本或消息段数组） */

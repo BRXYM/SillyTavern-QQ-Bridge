@@ -77,6 +77,7 @@ export interface BehaviorDto {
 }
 
 export interface SessionChoiceDto {
+    flowId?: string;
     conversationId?: string;
     character?: string;
     world?: string;
@@ -360,6 +361,7 @@ export const api = {
         }>('/sessions'),
 
     updateSession: (payload: {
+        flowId?: string | null;
         conversationId?: string | null;
         sessionKey: string;
         character?: string;

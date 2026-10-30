@@ -10,6 +10,7 @@ import { json } from '../router.ts';
 import type { AppContext } from '../context.ts';
 import type { SessionChoice } from '../../core/sessions.ts';
 import { log } from '../../core/logger.ts';
+import { availableFlows } from '../../config/flows.ts';
 
 export function registerSessionRoutes(router: Router, app: AppContext): void {
     // ---------------- 列表 ----------------
@@ -37,6 +38,17 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
         if (!key) {
             json(res, 400, { ok: false, error: '缺少 sessionKey' });
             return;
+        }
+        if (body.flowId !== undefined) {
+            if (['backendId', 'profileId', 'conversationId', 'reset'].some(k => body[k] !== undefined)) return json(res, 400, { error: '请选择流程，不要同时提交旧式下游或配置绑定' });
+            const id = body.flowId;
+            if (id !== null && (typeof id !== 'string' || !id)) return json(res, 400, { error: '流程 ID 无效，继承默认请传 null' });
+            const flow = id === null ? undefined : availableFlows(app.config(), app.sessions).find(f => f.id === id);
+            if (id !== null && !flow) return json(res, 400, { error: '流程不存在' });
+            if (flow && !app.config().flows.some(f => f.id === flow.id)) app.updateConfig(cfg => { cfg.flows.push(flow); });
+            for (const field of ['backendId', 'profileId', 'conversationId'] as const) app.sessions.clearField(key, field);
+            if (id === null) app.sessions.clearField(key, 'flowId'); else app.sessions.patch(key, { flowId: String(id) });
+            return json(res, 200, { ok: true });
         }
 
         // 校验 backendId 必须存在（除非传空串表示继承）
@@ -84,6 +96,7 @@ export function registerSessionRoutes(router: Router, app: AppContext): void {
             else patch.conversationId = id as string;
         }
         if (body.character !== undefined) patch.character = String(body.character);
+        if (body.backendId !== undefined || body.profileId !== undefined || body.conversationId !== undefined) app.sessions.clearField(key, 'flowId');
         if (body.world !== undefined) patch.world = String(body.world);
         if (body.replyProcessors !== undefined) {
             patch.replyProcessors = body.replyProcessors as unknown[];

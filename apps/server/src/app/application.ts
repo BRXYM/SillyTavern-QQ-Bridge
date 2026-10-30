@@ -18,6 +18,7 @@ import { logEnvironment } from './diagnostics.ts';
 import { Lifecycle } from './lifecycle.ts';
 import path from 'node:path';
 import { ConversationStateStore } from '../core/conversation-state.ts';
+import { FlowRunStore } from '../core/flow-runtime.ts';
 
 export interface ApplicationOptions {
     /** 可注入独立数据目录，测试无需接触真实账号配置。 */
@@ -33,6 +34,7 @@ export function createApplication(options: ApplicationOptions = {}) {
     const { config, updateConfig } = createConfigRuntime(paths.config, env);
     const sessions = createSessions(paths.sessions, config);
     const conversationState = new ConversationStateStore(path.join(paths.serverRoot, 'data', 'conversation-state.json'));
+    const flowRuns = new FlowRunStore();
     const upstreams = new UpstreamManager();
     const activeUpstream = () => {
         const accounts = config().accounts.filter((account) => account.enabled);
@@ -84,6 +86,7 @@ export function createApplication(options: ApplicationOptions = {}) {
     };
 
     const dispatchDeps: DispatchDeps = {
+        flowRuns,
         conversationState,
         sessions,
         sending,
@@ -96,6 +99,7 @@ export function createApplication(options: ApplicationOptions = {}) {
     bindMessageEvents(upstreams, dispatchDeps);
     const inbound = createInboundListener(config, downstreams);
     const context: AppContext = {
+        flowRuns,
         conversationState,
         logger, config, updateConfig, sessions, upstreams, downstreams,
         faces: faces.service, ollama, dshService: () => dsh.service,

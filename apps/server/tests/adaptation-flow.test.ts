@@ -36,12 +36,14 @@ test('dsh plugin → generated HTTP draft → test → save → QQ reply works e
     await once(upstream, 'listening');
     let upstreamSocket: WebSocket | undefined;
     let sent: { action: string; params: { user_id: number; message: unknown } } | undefined;
+    let failDelivery = false;
+    let deliveryCount = 0;
     upstream.on('connection', (socket) => {
         upstreamSocket = socket;
         socket.on('message', (raw) => {
             const msg = JSON.parse(String(raw));
-            socket.send(JSON.stringify({ echo: msg.echo, status: 'ok', data: { message_id: 1 } }));
-            if (msg.action === 'send_private_msg') sent = msg;
+            socket.send(JSON.stringify({ echo: msg.echo, status: failDelivery && msg.action === 'send_private_msg' ? 'failed' : 'ok', retcode: failDelivery && msg.action === 'send_private_msg' ? 100 : 0, message: 'fixture delivery', data: { message_id: 1 } }));
+            if (msg.action === 'send_private_msg') { sent = msg; deliveryCount++; }
         });
     });
     const reserve = net.createServer(); reserve.listen(0, '127.0.0.1'); await once(reserve, 'listening');
@@ -128,6 +130,21 @@ test('dsh plugin → generated HTTP draft → test → save → QQ reply works e
         sent = undefined; emitQQ('hello', 124); await waitFor(() => sent, Boolean);
         assert.equal(lastBody?.system, 'Guest|');
         assert.equal(app.context.conversationState.read('main:private_123').state.vars.nickname, 'Alice');
+        assert.equal((await post('/flows', { id: 'pipeline', name: 'Pipeline', downstreamId: 'echo-api', conversationId: 'stateful', enabled: true, upstreamEnabled: true, downstreamEnabled: true })).status, 200);
+        assert.equal((await post('/sessions/' + encodeURIComponent('main:private_123'), { flowId: 'pipeline' })).status, 200);
+        sent = undefined; emitQQ('name:Bob'); await waitFor(() => sent, Boolean);
+        const completeFlow = await waitFor(() => app.context.flowRuns.list('pipeline')[0], r => !!r && r.status !== 'running');
+        assert.deepEqual(completeFlow!.steps.map(s => s.status), ['success', 'success', 'success', 'success']);
+        assert.equal(completeFlow!.variablesSaved, true);
+        assert.equal(lastBody?.system, 'Bob|Alice:hello');
+        assert.equal(app.context.sessions.get('main:private_123')?.backendId, undefined);
+        const beforeDelivery = deliveryCount;
+        failDelivery = true; emitQQ('name:Carol');
+        const deliveryFailure = await waitFor(() => app.context.flowRuns.list('pipeline')[0], r => !!r && r.id !== completeFlow!.id && r.status !== 'running');
+        assert.equal(deliveryFailure!.steps[3]?.status, 'failed');
+        assert.equal(deliveryFailure!.variablesSaved, true);
+        assert.equal(deliveryCount, beforeDelivery + 1, 'failed QQ delivery must not trigger automatic resend');
+        failDelivery = false;
         const reloaded = loadConfigFile(path.join(root, 'config.json')).config;
         assert.equal(reloaded.downstreams.find((d) => d.id === 'echo-api')?.kind, 'http-json');
         // HTTP adapters must never be treated as inbound plugin adapters.
