@@ -16,6 +16,8 @@ import type { AppContext } from '../api/context.ts';
 import { createAppPaths, codeVersion } from './paths.ts';
 import { logEnvironment } from './diagnostics.ts';
 import { Lifecycle } from './lifecycle.ts';
+import path from 'node:path';
+import { ConversationStateStore } from '../core/conversation-state.ts';
 
 export interface ApplicationOptions {
     /** 可注入独立数据目录，测试无需接触真实账号配置。 */
@@ -30,6 +32,7 @@ export function createApplication(options: ApplicationOptions = {}) {
     const env = options.env ?? process.env;
     const { config, updateConfig } = createConfigRuntime(paths.config, env);
     const sessions = createSessions(paths.sessions, config);
+    const conversationState = new ConversationStateStore(path.join(paths.serverRoot, 'data', 'conversation-state.json'));
     const upstreams = new UpstreamManager();
     const activeUpstream = () => {
         const accounts = config().accounts.filter((account) => account.enabled);
@@ -81,6 +84,7 @@ export function createApplication(options: ApplicationOptions = {}) {
     };
 
     const dispatchDeps: DispatchDeps = {
+        conversationState,
         sessions,
         sending,
         config,
@@ -92,6 +96,7 @@ export function createApplication(options: ApplicationOptions = {}) {
     bindMessageEvents(upstreams, dispatchDeps);
     const inbound = createInboundListener(config, downstreams);
     const context: AppContext = {
+        conversationState,
         logger, config, updateConfig, sessions, upstreams, downstreams,
         faces: faces.service, ollama, dshService: () => dsh.service,
         faceSummary: faces.summary, restartInbound: inbound.restart,
@@ -100,6 +105,7 @@ export function createApplication(options: ApplicationOptions = {}) {
     const api = createApiServer(context, paths, dsh, faces.dataDir);
     const lifecycle = new Lifecycle([
         { name: 'sessions', start: () => {}, stop: () => { sessions.flush(); } },
+        { name: 'conversation-state', start: () => {}, stop: () => conversationState.close() },
         { name: 'faces', start: faces.start, stop: faces.stop },
         { name: 'upstreams', start: () => upstreams.apply(toUpstreamAccounts(config())), stop: () => upstreams.dispose() },
         { name: 'downstreams', start: () => downstreams.start(), stop: () => downstreams.dispose() },

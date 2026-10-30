@@ -16,6 +16,8 @@
 
 import { applyReplyProcessors } from '@bridge/core';
 import { resolveConversation } from '../config/conversations.ts';
+import { ConversationTurn } from './conversation-engine.ts';
+import type { ConversationStateStore } from './conversation-state.ts';
 import type { OneBotEvent } from '../upstream/onebot.ts';
 import type { AccountEvent } from '../upstream/manager.ts';
 import type { SessionStore, SessionRoute } from './sessions.ts';
@@ -29,6 +31,7 @@ import { sendReply, type SendContext } from './sending.ts';
 import { QQ_BASE_PROMPT, renderFaceInstruction, renderImageInstruction } from '../downstream/dsh.ts';
 
 export interface DispatchDeps {
+    conversationState: ConversationStateStore;
     sessions: SessionStore;
     sending: SendContext;
     /** 当前配置（可变，热更新后指向新对象） */
@@ -304,6 +307,13 @@ export function resolveReplyRules(
  * 注意：这是 async 但调用方不应 await（OneBot 事件循环不能被阻塞）。
  */
 export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Promise<void> {
+    const accountId = (event as AccountEvent).accountId;
+    if (event.post_type !== 'message' || !accountId || !['private', 'group'].includes(event.message_type ?? '')) return;
+    const key = scopedSessionKey(accountId, sessionKeyOf(event.message_type as 'private' | 'group', event.group_id ?? null, Number(event.user_id)));
+    return deps.conversationState.serial(key, () => dispatchEventInOrder(deps, event));
+}
+
+async function dispatchEventInOrder(deps: DispatchDeps, event: OneBotEvent): Promise<void> {
     // 好友申请 / 群邀请等请求事件：忽略
     if (event.request_type) {
         log(`忽略请求事件: ${event.request_type} from ${event.user_id}`);
@@ -421,15 +431,18 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     const preserveLegacy = selectedConversation?.legacyRef?.preserveBehavior && deps.sessions.get(sessionKey)?.conversationId === undefined && !config.defaultConversationId;
     const conversation = preserveLegacy ? undefined : selectedConversation;
     const useConversation = !preserveLegacy && (!!conversation || deps.sessions.get(sessionKey)?.conversationId !== undefined || !!config.defaultConversationId);
-    const inputText = conversation ? conversation.inputPrefix + applyReplyProcessors(parsed.text, conversation.inputRules) + conversation.inputSuffix : parsed.text;
+    const snapshot = deps.conversationState.read(sessionKey);
+    const turn = conversation ? new ConversationTurn(conversation, snapshot.state) : undefined;
+    const prepared = turn?.upstream(parsed.text);
+    const inputText = prepared?.input ?? parsed.text;
     if (!inputText.trim()) return;
     const userText = messageType === 'group' ? `[群成员 ${senderName}] ${inputText}` : inputText;
     const result = await adapter.ask({
         sessionKey,
         text: userText,
-        system: useConversation ? conversation?.systemPrompt ?? '' : buildSystemPrompt(config, sessionKey, deps, adapter, target.settings),
+        system: useConversation ? prepared?.system ?? '' : buildSystemPrompt(config, sessionKey, deps, adapter, target.settings),
         sender: senderName,
-        settings: useConversation ? { ...target.settings, systemPrompt: conversation?.systemPrompt ?? '' } : target.settings,
+        settings: useConversation ? { ...target.settings, systemPrompt: prepared?.system ?? '' } : target.settings,
         profileId: target.profile?.id,
         onProgress,
     });
@@ -459,8 +472,10 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
         return;
     }
 
+    const finished = turn?.downstream(result.text);
+    if (finished) deps.conversationState.commit(sessionKey, finished.state, snapshot.revision);
     const reply = result.text.trim();
-    if (!reply) {
+    if (!reply && !finished?.output) {
         log(`下游 ${adapter.name} 返回空回复 [${sessionKey}]`);
         return;
     }
@@ -474,7 +489,7 @@ export async function dispatchEvent(deps: DispatchDeps, event: OneBotEvent): Pro
     const legacyRules = resolveReplyRules(config, deps.sessions, sessionKey);
     const { rules, source } = useConversation ? { rules: conversation?.replyRules ?? [], source: '会话配置' } : legacyRules;
     if (rules.length > 0) log(`处理管道来源: ${source} (${rules.length} 条规则)`);
-    const processed = applyReplyProcessors(reply, rules);
+    const processed = finished?.output ?? applyReplyProcessors(reply, rules);
     if (!processed) {
         log('回复经规则处理后为空，不发送');
         return;

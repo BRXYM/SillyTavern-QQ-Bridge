@@ -57,7 +57,9 @@ test('conversation configuration rejects connection fields and previews input/pr
     try {
         const r = await f.post('/conversations/preview', { profile, text: '@助手 你好', reply: '<think>私有推理</think>你好' });
         assert.equal(r.status, 200);
-        assert.deepEqual(await r.json(), { input: '问题：你好', system: '简短回答', output: '你好' });
+        const preview = await r.json() as { input: string; system: string; output: string; state: unknown };
+        assert.equal(preview.input, '问题：你好'); assert.equal(preview.system, '简短回答'); assert.equal(preview.output, '你好');
+        assert.deepEqual(preview.state, { vars: {}, previous: { upstream: {}, downstream: {} } });
         assert.equal(f.app.context.config().conversationProfiles.length, 0);
         assert.equal((await f.post('/conversations', profile)).status, 200);
         const disk = loadConfigFile(path.join(f.root, 'config.json')).config;
@@ -104,6 +106,30 @@ test('legacy dialogue fields import with stable IDs while connection overrides s
         saveConfigFile(file, a);
         assert.deepEqual(loadConfigFile(file).config.conversationProfiles, a.conversationProfiles);
     } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('session variable API isolates accounts, rejects stale edits and preview never changes real state', async () => {
+    const f = await fixture();
+    try {
+        const key = 'a:private_123';
+        const other = 'b:private_123';
+        await f.post('/sessions/' + encodeURIComponent(key), { backendId: 'a' });
+        await f.post('/sessions/' + encodeURIComponent(other), { backendId: 'a' });
+        const route = '/session-variables/' + encodeURIComponent(key);
+        assert.equal((await f.post(route, { vars: { nickname: 'Alice' }, revision: 0 })).status, 200);
+        assert.equal((await f.post(route, { vars: { nickname: 'stale' }, revision: 0 })).status, 409);
+        const real = f.app.context.conversationState.read(key);
+        const p = { ...profile, systemPrompt: '{{vars.nickname}}', downstreamAssignments: [{ name: 'nickname', value: 'Preview only' }] };
+        const preview = await f.post('/conversations/preview', { profile: p, text: 'hi', reply: 'hello', state: real.state });
+        assert.equal(preview.status, 200);
+        const result = await preview.json() as { system: string; state: { vars: { nickname: string } } };
+        assert.equal(result.system, 'Alice');
+        assert.equal(result.state.vars.nickname, 'Preview only');
+        assert.equal(f.app.context.conversationState.read(key).state.vars.nickname, 'Alice');
+        assert.deepEqual(f.app.context.conversationState.read(other).state.vars, {});
+        assert.equal((await fetch(f.base + '/session-variables/missing')).status, 404);
+        assert.equal((await f.post(route, { vars: { constructor: 'bad' }, revision: 1 })).status, 400);
+    } finally { await f.close(); }
 });
 
 test('SnowLuma injection inspection distinguishes not injected from unavailable or incompatible diagnostics', async () => {

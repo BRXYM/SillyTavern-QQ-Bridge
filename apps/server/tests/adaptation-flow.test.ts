@@ -26,6 +26,7 @@ test('dsh plugin → generated HTTP draft → test → save → QQ reply works e
         let raw = ''; for await (const chunk of req) raw += chunk;
         const body = JSON.parse(raw);
         lastBody = body;
+        if (body.message.includes('FAIL')) { res.writeHead(500); res.end('fixture error'); return; }
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ answer: 'Reply: ' + body.message }));
     });
@@ -113,6 +114,20 @@ test('dsh plugin → generated HTTP draft → test → save → QQ reply works e
         await waitFor(() => sent, Boolean);
         assert.match(JSON.stringify(sent!.params.message), /Reply: hello/);
         assert.equal(lastBody?.system, '');
+        assert.equal((await post('/conversations', { id: 'stateful', name: 'Stateful', systemPrompt: '{{vars.nickname}}|{{previous.downstream.receipt}}', inputPrefix: '{{vars.nickname}}:', variables: [{ name: 'nickname', initialValue: 'Guest' }], upstreamExtracts: [{ name: 'nickname', mode: 'regex', expression: '^name:(.+)$', group: 1 }], upstreamAssignments: [{ name: 'nickname', value: '{{current.upstream.nickname}}' }], downstreamExtracts: [{ name: 'receipt', mode: 'regex', expression: '^Reply: (.+)$', group: 1 }] })).status, 200);
+        await post('/sessions/' + encodeURIComponent('main:private_123'), { conversationId: 'stateful' });
+        const emitQQ = (text: string, userId = 123) => upstreamSocket!.send(JSON.stringify({ post_type: 'message', message_type: 'private', user_id: userId, self_id: 999, message: [{ type: 'text', data: { text } }], sender: { nickname: 'Test' } }));
+        sent = undefined; emitQQ('name:Alice'); await waitFor(() => sent, Boolean);
+        assert.equal(app.context.conversationState.read('main:private_123').state.vars.nickname, 'Alice');
+        sent = undefined;
+        emitQQ('name:FAIL'); emitQQ('hello');
+        await waitFor(() => sent, Boolean);
+        assert.equal(lastBody?.system, 'Alice|Alice:name:Alice', 'a failed request cannot overwrite durable variables or successful previous extraction');
+        assert.match(JSON.stringify(sent!.params.message), /Reply: Alice:hello/);
+        await post('/sessions/' + encodeURIComponent('main:private_124'), { backendId: 'echo-api', conversationId: 'stateful' });
+        sent = undefined; emitQQ('hello', 124); await waitFor(() => sent, Boolean);
+        assert.equal(lastBody?.system, 'Guest|');
+        assert.equal(app.context.conversationState.read('main:private_123').state.vars.nickname, 'Alice');
         const reloaded = loadConfigFile(path.join(root, 'config.json')).config;
         assert.equal(reloaded.downstreams.find((d) => d.id === 'echo-api')?.kind, 'http-json');
         // HTTP adapters must never be treated as inbound plugin adapters.

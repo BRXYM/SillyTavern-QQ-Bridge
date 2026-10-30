@@ -314,3 +314,16 @@ GET /api/snowluma/connection 读取现有账号、OneBot 端点和注入诊断�
 注入诊断优先读取本机 WebUI /api/processes 中明确的 injected 状态；Windows 下可只读枚举 QQ 主进程与 mojo.<pid>.control 管道作补充。管道检测无法确认账号归属时只提示 PID。无权限、接口不兼容、未登录或不可访问时保留未知，不能由 OneBot 断线推断未注入。
 
 原 POST /api/snowluma/hook 与 hook/restore 返回 410，不再更改注入开关。旧 apply API 保留兼容，但上游页面不再调用；页面只提供检测、连接、断开与手动参数。
+
+
+## 双向处理运行时
+
+config/conversation-flow.ts 校验提取、初始化、赋值与模板依赖；core/conversation-engine.ts 在私有工作副本中执行上游和下游两个阶段；core/conversation-state.ts 按完整 sessionKey 排队并原子保存状态。引擎不执行脚本，不访问网络或任意文件。
+
+上游完成提取及变量赋值后，才渲染系统提示和输入消息；下游拿到最终文本后可引用本轮两端提取值。previous 仅保存上一轮成功处理的提取映射，不存整段对话。赋值默认跳过空值；所有赋值基于同阶段提取完成后的同一个快照同时计算。
+
+只有成功调用下游的轮次提交状态；失败或上游被过滤时丢弃工作副本。持久化失败时不替换内存状态。配置切换不重置同会话变量。未启用处理的旧会话仍保持原逻辑，不更新此状态。
+
+GET /api/session-variables/:key 返回 state 与 revision；POST 接受 vars 与 revision，在同一会话队列中保存，修订不一致返回 409。POST /api/conversations/preview 使用请求内的独立 state，返回 input/system/output、extracted、下一轮 state 和 warnings，从不访问真实会话状态。
+
+应用关闭时先释放下游，再关闭会话队列。新消息与排队任务在关闭后拒绝执行。变量状态文件格式为 version=1 + sessions 映射，加载校验失败会显式报错，防止覆盖损坏文件造成静默丢失。

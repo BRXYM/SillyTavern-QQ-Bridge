@@ -3,15 +3,39 @@ import { json } from '../router.ts';
 import type { AppContext } from '../context.ts';
 import { parseConversation, resolveConversation } from '../../config/conversations.ts';
 import { publishStatus } from '../events.ts';
-import { applyReplyProcessors } from '@bridge/core';
+import { ConversationTurn, emptyState, parseState, parseValues } from '../../core/conversation-engine.ts';
 
 export function registerConversationRoutes(router: Router, app: AppContext) {
     router.post('/api/conversations/preview', ({ res, body }) => {
         try {
             const p = parseConversation(body.profile);
             if (String(body.text ?? '').length > 32000 || String(body.reply ?? '').length > 32000) throw new Error('预览内容过长');
-            json(res, 200, { input: p.inputPrefix + applyReplyProcessors(String(body.text ?? ''), p.inputRules) + p.inputSuffix, system: p.systemPrompt, output: applyReplyProcessors(String(body.reply ?? ''), p.replyRules) });
+            const turn = new ConversationTurn(p, body.state === undefined ? emptyState() : parseState(body.state));
+            turn.upstream(String(body.text ?? ''));
+            json(res, 200, turn.downstream(String(body.reply ?? '')));
         } catch (e) { json(res, 400, { error: e instanceof Error ? e.message : String(e) }); }
+    });
+    const knownSession = (key: string) => !!app.sessions.get(key) || Object.hasOwn(app.sessions.statsSnapshot(), key);
+    router.get('/api/session-variables/:key', ({ res, params }) => {
+        const key = params.key!;
+        if (!knownSession(key)) return json(res, 404, { error: '会话不存在' });
+        json(res, 200, app.conversationState.read(key));
+    });
+    router.post('/api/session-variables/:key', async ({ res, params, body }) => {
+        const key = params.key!;
+        if (!knownSession(key)) return json(res, 404, { error: '会话不存在' });
+        try {
+            const vars = parseValues(body.vars);
+            if (!Number.isSafeInteger(body.revision) || Number(body.revision) < 0) throw new Error('请先读取当前会话变量');
+            const snapshot = await app.conversationState.serial(key, () => {
+                const current = app.conversationState.read(key);
+                return app.conversationState.commit(key, { ...current.state, vars }, Number(body.revision));
+            });
+            json(res, 200, snapshot);
+        } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            json(res, message.includes('已被新消息更新') ? 409 : (e as NodeJS.ErrnoException)?.code ? 500 : 400, { error: message });
+        }
     });
     router.get('/api/conversations', ({ res }) => {
         const cfg = app.config();

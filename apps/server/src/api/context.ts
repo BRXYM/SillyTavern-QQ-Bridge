@@ -7,6 +7,7 @@
 
 import type { BridgeConfig } from '../config/schema.ts';
 import type { SessionStore } from '../core/sessions.ts';
+import type { ConversationStateStore } from '../core/conversation-state.ts';
 import type { UpstreamManager } from '../upstream/manager.ts';
 import type { Logger } from '../core/logger.ts';
 import type { FaceService } from '../services/faces/faces-service.mjs';
@@ -17,6 +18,7 @@ export type { DownstreamRuntime } from '../downstream/runtime.ts';
 import type { DownstreamRuntime } from '../downstream/runtime.ts';
 
 export interface AppContext {
+    conversationState: ConversationStateStore;
     logger: Logger;
     config: () => BridgeConfig;
     /** 修改配置并落盘；可选立即生效的回调由调用方触发 */

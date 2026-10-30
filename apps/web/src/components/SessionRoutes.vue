@@ -8,6 +8,7 @@ import UiCard from './ui/UiCard.vue';
 import UiInput from './ui/UiInput.vue';
 import UiSelect from './ui/UiSelect.vue';
 import UiButton from './ui/UiButton.vue';
+import SessionVariablesEditor from './SessionVariablesEditor.vue';
 
 const store = useStatusStore();
 const toast = useToastStore();
@@ -15,6 +16,7 @@ const account = ref('');
 const downstream = ref('');
 const query = ref('');
 const busy = ref(false);
+const variablesOf = ref('');
 const editor = ref<{ key: string; backendId: string; profileId: string } | null>(null);
 const configurations = ref<ConversationProfile[]>([]);
 const bindings = ref<Record<string, { id: string; inherited: boolean }>>({});
@@ -87,6 +89,7 @@ async function save() {
             </div>
             <div class="flex gap-2"><UiButton size="sm" :disabled="busy" @click="save">保存路由</UiButton><UiButton variant="ghost" size="sm" :disabled="busy" @click="editor = null">取消</UiButton></div>
         </div>
+        <SessionVariablesEditor v-if="variablesOf" :key="variablesOf" :session-key="variablesOf" @close="variablesOf = ''" />
         <div v-if="!filtered.length" class="p-8 text-center text-sm text-muted-foreground">{{ rows.length ? '没有符合筛选条件的会话' : '接通 QQ 并收到消息后，会话会出现在这里。' }}</div>
         <div v-else class="max-h-[520px] overflow-auto">
             <table class="w-full min-w-[680px] text-left text-xs">
@@ -96,7 +99,7 @@ async function save() {
                         <td class="max-w-64 px-5 py-4"><p class="font-medium">{{ row.accountName }}</p><p class="mt-1 break-all font-mono text-muted-foreground">{{ row.session }}</p></td>
                         <td class="px-5 py-4"><p>{{ name(row.backendId) }}</p><p class="mt-1 text-muted-foreground">{{ row.inherited ? '继承默认' : '单独绑定' }} · {{ row.available ? '可用' : '不可用' }}</p></td>
                         <td class="px-5 py-4"><p>{{ row.profileName }}</p><p class="mt-1 font-mono text-muted-foreground">{{ bindings[row.key]?.inherited ? '继承默认' : '单独指定' }}</p></td>
-                        <td class="px-5 py-4"><UiButton variant="outline" size="sm" :disabled="busy" @click="open(row.key)">调整</UiButton></td>
+                        <td class="px-5 py-4"><div class="flex gap-2"><UiButton variant="outline" size="sm" :disabled="busy" @click="open(row.key)">调整</UiButton><UiButton variant="ghost" size="sm" :disabled="busy" @click="variablesOf = row.key">变量</UiButton></div></td>
                     </tr>
                 </tbody>
             </table>
